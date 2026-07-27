@@ -1,67 +1,68 @@
 import AppKit
 import SwiftUI
 
-/// Content shown in the menu bar popover. Minimal: just settings + quit.
-/// Each item has an icon on the left and shortcut hint on the right.
-/// Rows highlight with accent background on hover — matching macOS native
-/// menu bar popover styling.
+/// 菜单栏下拉内容：
+/// - 顶部：系统信息面板（仅当 systemMonitor.enabled 时显示）
+/// - 底部：设置(左) + 退出(右) 只保留图标
+///
+/// 监控未启用时下拉菜单只显示底部图标按钮一行，宽度 200pt。
+/// 监控启用时顶部多出面板，宽度增至 280pt 容纳 3 列卡片。
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
-    @State private var hoveredLabel: String?
+    @EnvironmentObject private var settings: AppSettings
+    @State private var hoveredButton: String?
+
+    private var monitorEnabled: Bool { settings.systemMonitor.enabled }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            menuButton(icon: "gearshape", label: "设置", shortcut: "⌘,") {
-                openWindow(id: "settings")
-                DispatchQueue.main.async {
-                    NSApp.activate(ignoringOtherApps: true)
-                    NotificationCenter.default.post(name: .openSettings, object: nil)
+        VStack(alignment: .leading, spacing: 8) {
+            if monitorEnabled {
+                SystemMonitorPanel()
+                Divider()
+            }
+
+            // 底部：设置(左) + 退出(右) 只保留图标。
+            HStack {
+                iconButton(icon: "gearshape", shortcut: "⌘, 设置") {
+                    openWindow(id: "settings")
+                    DispatchQueue.main.async {
+                        NSApp.activate(ignoringOtherApps: true)
+                        NotificationCenter.default.post(name: .openSettings, object: nil)
+                    }
+                }
+                Spacer()
+                iconButton(icon: "power", shortcut: "⌘Q 退出") {
+                    NSApp.terminate(nil)
                 }
             }
-
-            Divider()
-
-            menuButton(icon: "power", label: "退出", shortcut: "⌘Q") {
-                NSApp.terminate(nil)
-            }
+            .padding(.horizontal, 4)
         }
-        .padding(8)
-        .frame(width: 200)
+        .padding(10)
+        .frame(width: monitorEnabled ? 280 : 200)
         .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
             openWindow(id: "settings")
         }
     }
 
-    /// A menu row with an icon on the left, label in the middle, and a
-    /// monospaced shortcut hint on the right — matching macOS menu style.
-    /// On hover the row fills with an accent-tinted rounded background,
-    /// mirroring the system's menu item highlight.
-    private func menuButton(icon: String, label: String, shortcut: String,
+    /// 圆形 hover 高亮图标按钮。仅图标，无文字，hover 时背景变 accentColor.opacity(0.15)。
+    /// tooltip 用 .help() 显示快捷键提示。
+    private func iconButton(icon: String, shortcut: String,
                             action: @escaping () -> Void) -> some View {
-        let isHovered = hoveredLabel == label
+        let isHovered = hoveredButton == icon
         return Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .frame(width: 16)
-                    .foregroundStyle(isHovered ? Color.accentColor : .secondary)
-                Text(label)
-                    .foregroundStyle(isHovered ? Color.accentColor : .primary)
-                Spacer()
-                Text(shortcut)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(isHovered ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.7))
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isHovered ? Color.accentColor.opacity(0.2) : .clear)
-            )
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(isHovered ? Color.accentColor : .secondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered ? Color.accentColor.opacity(0.15) : .clear)
+                )
         }
         .buttonStyle(.plain)
+        .help(shortcut)
         .onHover { hovering in
-            hoveredLabel = hovering ? label : nil
+            hoveredButton = hovering ? icon : nil
         }
     }
 }

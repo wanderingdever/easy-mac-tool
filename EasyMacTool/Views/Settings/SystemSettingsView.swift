@@ -4,8 +4,9 @@ import ScreenCaptureKit
 import ServiceManagement
 import SwiftUI
 
-/// 系统设置 view: 权限管理 + 开机启动开关。Replaces the old permissions-only view.
-struct SystemSettingsView: View {
+/// 权限设置 view: 权限管理 + 开机启动开关。原 SystemSettingsView 改名，
+/// 内容不变——只调整标题与文件结构对应「权限设置」Tab。
+struct PermissionsSettingsView: View {
     @State private var launchAtLogin = false
     // 权限状态本地缓存：每 2 秒定时刷新，让用户授权后回到设置窗口能看到
     // 状态图标变绿。直接读 AccessibilityChecker 的静态计算属性不会触发
@@ -20,7 +21,7 @@ struct SystemSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("系统设置").font(.title2).fontWeight(.semibold)
+            Text("权限设置").font(.title2).fontWeight(.semibold)
 
             // MARK: - 开机启动
             Section {

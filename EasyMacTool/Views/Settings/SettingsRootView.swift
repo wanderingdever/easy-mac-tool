@@ -7,7 +7,8 @@ struct SettingsRootView: View {
     enum Section: String, CaseIterable, Identifiable {
         case windowSwitcher = "窗口切换"
         case clipboard = "剪切板"
-        case systemSettings = "系统设置"
+        case systemInfo = "系统信息"
+        case permissions = "权限设置"
         case about = "关于"
         var id: String { rawValue }
     }
@@ -28,8 +29,10 @@ struct SettingsRootView: View {
                 WindowSwitcherSettingsView()
             case .clipboard:
                 ClipboardSettingsView()
-            case .systemSettings:
-                SystemSettingsView()
+            case .systemInfo:
+                SystemInfoSettingsView()
+            case .permissions:
+                PermissionsSettingsView()
             case .about:
                 AboutView()
             case .none:
@@ -41,10 +44,9 @@ struct SettingsRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
             activateAndBringToFront()
         }
-        // When permissions are missing on launch/hotkey, switch to the 系统设置
-        // section so the user immediately sees the three permissions' status.
+        // 权限缺失时跳转到「权限设置」section，让用户立即看到三项权限状态。
         .onReceive(NotificationCenter.default.publisher(for: .focusPermissionSection)) { _ in
-            selection = .systemSettings
+            selection = .permissions
         }
     }
 
@@ -52,7 +54,8 @@ struct SettingsRootView: View {
         switch section {
         case .windowSwitcher: return "rectangle.3.offgrid"
         case .clipboard: return "doc.on.clipboard"
-        case .systemSettings: return "gear"
+        case .systemInfo: return "speedometer"
+        case .permissions: return "lock.shield"
         case .about: return "info.circle"
         }
     }

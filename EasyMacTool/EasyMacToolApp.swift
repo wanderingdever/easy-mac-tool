@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 
@@ -11,12 +12,14 @@ struct EasyMacToolApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // 菜单栏图标：黑底白字"E"（NSImage 自绘，非 template 保持黑底白字）
+        // 菜单栏 label：E 图标 + 选中指标数值（混合样式：常态单色、异常着色）。
+        // 监控未启用时只显示 E 图标。
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(settings)
         } label: {
-            BlackEMenuBarIcon()
+            MenuBarLabel()
+                .environmentObject(settings)
         }
         .menuBarExtraStyle(.window)
 
@@ -65,6 +68,7 @@ final class AppCoordinator: ObservableObject {
     private let panelController = OverlayPanelController()
     private let clipboardManager = ClipboardManager.shared
     private let clipboardPanelController = ClipboardPanelController()
+    private var cancellables = Set<AnyCancellable>()
 
     /// The shortcut whose key combo opened the switcher (drives release behavior).
     private var activeShortcut: ShortcutConfig?
@@ -77,7 +81,7 @@ final class AppCoordinator: ObservableObject {
         self.settings = settings
         // Trigger the system's native permission request flow shortly after
         // launch: requests ALL missing permissions, opens EasyMacTool's
-        // settings window to the 系统设置 section (shows three status icons),
+        // settings window to the 权限设置 section (shows three status icons),
         // AND opens macOS System Settings to the first missing permission's
         // pane. No custom NSAlert — the system's own dialog is the only prompt.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -113,6 +117,19 @@ final class AppCoordinator: ObservableObject {
         clipboardPanelController.onReapply = { [weak self] item in
             self?.reapplyClipboard(item)
         }
+
+        // 系统监控：监听 settings.systemMonitor 配置变化即时启停。
+        // 启动时若配置已启用则立即开始采样。
+        if settings.systemMonitor.enabled {
+            SystemMonitorManager.shared.start()
+        }
+        settings.$systemMonitor
+            .receive(on: RunLoop.main)
+            .sink { config in
+                if config.enabled { SystemMonitorManager.shared.start() }
+                else { SystemMonitorManager.shared.stop() }
+            }
+            .store(in: &cancellables)
     }
 
     private func handle(_ event: HotkeyEvent) {

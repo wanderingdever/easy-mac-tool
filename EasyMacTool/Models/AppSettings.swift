@@ -18,6 +18,11 @@ final class AppSettings: ObservableObject {
     /// frontmost app (Paste-style). When false, only copies back to clipboard.
     @Published var clipboardAutoPaste: Bool = true { didSet { persist() } }
 
+    /// 系统监控配置：默认关闭，用户在「系统信息」Tab 中主动开启。
+    /// 开启后 SystemMonitorManager 启动 1s 采样，菜单栏 E 旁按 menuBarItems
+    /// 集合展示选中指标，下拉面板顶部展示监控面板。
+    @Published var systemMonitor: SystemMonitorConfig = .default { didSet { persist() } }
+
     private let defaults = UserDefaults.standard
     private let storageKey = "appSettings.v1"
 
@@ -92,6 +97,7 @@ final class AppSettings: ObservableObject {
         var clipboardShortcut: ShortcutConfig?
         var clipboardHistoryLimit: Int?
         var clipboardAutoPaste: Bool?
+        var systemMonitor: SystemMonitorConfig?
     }
 
     private func persist() {
@@ -100,7 +106,8 @@ final class AppSettings: ObservableObject {
             shortcuts: shortcuts,
             clipboardShortcut: clipboardShortcut,
             clipboardHistoryLimit: clipboardHistoryLimit,
-            clipboardAutoPaste: clipboardAutoPaste
+            clipboardAutoPaste: clipboardAutoPaste,
+            systemMonitor: systemMonitor
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults.set(data, forKey: storageKey)
@@ -114,5 +121,6 @@ final class AppSettings: ObservableObject {
         if let cs = snapshot.clipboardShortcut { clipboardShortcut = cs }
         if let limit = snapshot.clipboardHistoryLimit { clipboardHistoryLimit = limit }
         if let autoPaste = snapshot.clipboardAutoPaste { clipboardAutoPaste = autoPaste }
+        if let sm = snapshot.systemMonitor { systemMonitor = sm }
     }
 }
