@@ -252,10 +252,66 @@ final class SystemMonitorManager: ObservableObject {
 
     // MARK: - GPU
 
-    /// GPU 占用率：Metal 公开 API 不暴露 utilization，私有 KVC 在 Swift 协议
-    /// 类型上不可调用。返回 nil 让 UI 静默隐藏该项。
-    /// 若后续 macOS 提供 MTLDevice.utilization 公开 API，在此实现即可。
+    /// GPU 占用率：通过 IOKit 遍历 IOAccelerator 服务读取 PerformanceStatistics
+    /// 属性。该属性在不同机型上 key 名不同：
+    /// - AMD 独显：`device Utilization %`（0-100 整数）
+    /// - Apple Silicon 集显：`utilization`（0-100 整数）或 `Renderer Activity`
+    /// - Intel 集显：`device Utilization %` 或 `renderer`
+    /// 取所有 GPU 服务中的最大值（多 GPU 场景，独显占用比集显更重要）。
+    /// 失败返回 nil，UI 静默隐藏该项（机型兼容降级）。
     private func sampleGPU() -> Double? {
-        return nil
+        var iterator: io_iterator_t = 0
+        guard let matching = IOServiceMatching("IOAccelerator") else { return nil }
+        guard IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iterator) == kIOReturnSuccess else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var best: Double? = nil
+
+        var service = IOIteratorNext(iterator)
+        while service != 0 {
+            defer { IOObjectRelease(service) }
+
+            // PerformanceStatistics 是 CFDictionary，包含 GPU 各项计数器。
+            // IORegistryEntryCreateCFProperty 返回 retained CFTypeRef，需 takeRetainedValue。
+            guard let statsRef = IORegistryEntryCreateCFProperty(
+                service,
+                "PerformanceStatistics" as CFString,
+                kCFAllocatorDefault,
+                0
+            ) else { continue }
+            guard let stats = statsRef.takeRetainedValue() as? [String: Any] else { continue }
+
+            // 尝试多个已知 utilization key，取第一个有效值。
+            // 不同 GPU 厂商使用不同 key 名，按常见程度排序。
+            let candidates = [
+                "device Utilization %",   // AMD 独显
+                "utilization",            // Apple Silicon AGX
+                "Renderer Activity",      // Intel 集显
+                "device GPU Utilization",
+                "GPU Utilization"
+            ]
+            for key in candidates {
+                if let v = stats[key] as? Int, v >= 0 {
+                    let normalized = min(1.0, Double(v) / 100.0)
+                    if best == nil || normalized > best! {
+                        best = normalized
+                    }
+                    break
+                }
+                // 部分 GPU 返回浮点数（较少见）。
+                if let v = stats[key] as? Double, v >= 0 {
+                    let normalized = min(1.0, v / 100.0)
+                    if best == nil || normalized > best! {
+                        best = normalized
+                    }
+                    break
+                }
+            }
+            service = IOIteratorNext(iterator)
+        }
+
+        return best
     }
 }
