@@ -121,15 +121,19 @@ enum AccessibilityChecker {
         _ = semaphore.wait(timeout: .now() + 3.0)
     }
 
-    /// 创建一个临时的 CGEventTap（headInsertEventTap, listenOnly）来强制
+    /// 创建一个临时的 CGEventTap（headInsertEventTap, defaultTap）来强制
     /// TCC 把 app 加入输入监控列表。创建后立即停止并释放，只用于触发注册。
     /// 如果没有辅助功能权限会返回 nil（CGEventTap 需要 AX 权限才能创建）。
+    ///
+    /// 注意：必须用 .defaultTap 而非 .listenOnly。在 macOS 15+ 上，
+    /// .listenOnly 创建的 tap 不会触发 TCC 把 app 加入"输入监控"列表，
+    /// 用户在系统设置中看不到应用。.defaultTap 才会触发系统注册。
     private static func triggerInputMonitoringRegistration() {
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         // CGEventTapCallBack 回调签名需要4个参数：proxy, type, event, userInfo
         let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                     place: .headInsertEventTap,
-                                    options: .listenOnly,
+                                    options: .defaultTap,
                                     eventsOfInterest: CGEventMask(eventMask),
                                     callback: { _, _, _, _ in nil },
                                     userInfo: nil)

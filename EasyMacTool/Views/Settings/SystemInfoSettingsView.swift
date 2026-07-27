@@ -27,35 +27,23 @@ struct SystemInfoSettingsView: View {
                 }
             }
 
-            // MARK: - 菜单栏展示项 + 实时预览
+            // MARK: - 菜单栏展示项（方框布局，一排三个，参考 Lemon）
             if settings.systemMonitor.enabled {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("菜单栏展示项")
                             .font(.headline)
-                        Text("勾选的指标将出现在菜单栏 E 图标右侧，用 | 分隔。常态单色跟随系统深浅色，异常值（如 CPU>80°C）变橙红。")
+                        Text("勾选的指标将出现在菜单栏 E 图标右侧，用 | 分隔。常态单色跟随系统深浅色，异常值变橙红。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        VStack(spacing: 0) {
+                        // 方框网格：一排 3 个，每个方框右上角勾选，中间图标+数值，下面名称
+                        let columns = [GridItem(.flexible(), spacing: 10),
+                                       GridItem(.flexible(), spacing: 10),
+                                       GridItem(.flexible(), spacing: 10)]
+                        LazyVGrid(columns: columns, spacing: 10) {
                             ForEach(SystemMetricKind.allCases) { kind in
-                                Toggle(isOn: menuBarItemBinding(kind)) {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: kind.symbol)
-                                            .font(.system(size: 13))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 18)
-                                        Text(kind.displayName)
-                                        if let live = monitor.metrics.value(for: kind) {
-                                            Spacer()
-                                            Text(formatValue(live, for: kind))
-                                                .font(.system(.caption, design: .monospaced))
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                    }
-                                }
-                                .tint(.accentColor)
-                                Divider().padding(.vertical, 4)
+                                metricBoxCard(kind)
                             }
                         }
                     }
@@ -121,18 +109,71 @@ struct SystemInfoSettingsView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.3)))
     }
 
-    // MARK: - Helpers
+    /// 菜单栏展示项方框：右上角勾选，中间图标+数值，下面名称。参考 Lemon。
+    /// 选中时整框加 accentColor 边框，未选中时灰色边框。点击切换勾选状态。
+    private func metricBoxCard(_ kind: SystemMetricKind) -> some View {
+        let isSelected = settings.systemMonitor.menuBarItems.contains(kind)
+        let value = monitor.metrics.value(for: kind)
+        return Button {
+            if isSelected { settings.systemMonitor.menuBarItems.remove(kind) }
+            else { settings.systemMonitor.menuBarItems.insert(kind) }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 6) {
+                    // 中间：图标 + 数值
+                    VStack(spacing: 4) {
+                        Image(systemName: kind.symbol)
+                            .font(.system(size: 18))
+                            .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                        if let v = value {
+                            Text(formatValue(v, for: kind))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(colorFor(value: v, kind: kind))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        } else {
+                            Text("—")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    // 下面：选项名称
+                    Text(kind.displayName)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 70)
+                .padding(.top, 4)
 
-    /// 双向绑定到 settings.systemMonitor.menuBarItems 中某个 kind 的勾选状态。
-    private func menuBarItemBinding(_ kind: SystemMetricKind) -> Binding<Bool> {
-        Binding(
-            get: { settings.systemMonitor.menuBarItems.contains(kind) },
-            set: { isOn in
-                if isOn { settings.systemMonitor.menuBarItems.insert(kind) }
-                else    { settings.systemMonitor.menuBarItems.remove(kind) }
+                // 右上角勾选
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(6)
+                } else {
+                    Image(systemName: "circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.tertiary)
+                        .padding(6)
+                }
             }
-        )
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.6) : Color.gray.opacity(0.2),
+                                  lineWidth: isSelected ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
+
+    // MARK: - Helpers
 
     /// 格式化指标数值为字符串。kind.unit 用于非百分比项，百分比取整后加 %。
     private func formatValue(_ value: Double, for kind: SystemMetricKind) -> String {

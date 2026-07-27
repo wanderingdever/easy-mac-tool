@@ -12,7 +12,7 @@ struct MenuBarLabel: View {
     @EnvironmentObject private var settings: AppSettings
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(alignment: .center, spacing: 4) {
             BlackEMenuBarIcon()
 
             // 仅当监控启动且有勾选项时展示数值。无勾选项时仅显示 E 图标，
@@ -38,6 +38,9 @@ struct MenuBarLabel: View {
                 }
             }
         }
+        // 关键：覆盖默认的 firstTextBaseline 对齐，让 E 图标（NSImage 18pt）
+        // 与数值 Text 在垂直中心对齐。否则 SwiftUI 会按 Text 基线对齐导致错位。
+        .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] }
     }
 }
 

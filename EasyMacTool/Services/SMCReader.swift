@@ -6,19 +6,28 @@ import IOKit
 ///
 /// 原理：通过 IOServiceMatching("AppleSMC") 拿到 SMC 服务，再用
 /// IOConnectCallStructMethod 发送 SMCReadKey 命令读取指定 4 字符 key。
-/// 参考 osx-cpu-temp / stats 的纯 Swift 实现，不引入其代码。
+/// 参考 osx-cpu-temp / iStats 的 C 实现，转为纯 Swift。
 ///
 /// 机型差异：不同 Mac SMC key 名不同（温度 TC0P/TC0D/TC0H、风扇 F0Ac/F1Ac）。
 /// 读不到时返回 nil，UI 静默隐藏对应项。
 enum SMCReader {
-    /// SMC 命令码（来自 AppleSMC.kext 私有头）。
+    /// SMC 命令码（来自 AppleSMC.kext 私有头，与 osx-cpu-temp 一致）。
     private enum KernelIndex: UInt32 {
         case readKey = 5   // SMCReadKey
     }
 
-    /// SMC 数据结构：8 字节 key + 32 字节数据 + 类型 + 长度 + 属性。
+    /// SMC 数据结构（与 osx-cpu-temp 的 SMCKeyData 完全一致，80 字节）：
+    ///   key: UInt32 (4) + vers: UInt32 (4) + pLimitData: 32 bytes +
+    ///   dataSize: UInt32 (4) + dataType: UInt32 (4) + dataBytes: 32 bytes
+    /// 总共 80 字节。Swift 中用 tuple 表达固定大小 32-byte 数组。
     private struct SMCKeyData {
         var key: UInt32 = 0
+        var vers: UInt32 = 0
+        var pLimitData: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                         UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                         UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                         UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) =
+            (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
         var dataSize: UInt32 = 0
         var dataType: UInt32 = 0
         var dataBytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
@@ -28,34 +37,28 @@ enum SMCReader {
             (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
     }
 
-    /// 输入参数（kernelIndex + key + 8 字节 padding）。
-    private struct SMCInputStruct {
-        var key: UInt32 = 0
-        var padding: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) =
-            (0,0,0,0,0,0,0,0)
-    }
-
     /// SMC 服务连接。静态缓存避免每次读取重新打开。
     private static var connection: io_connect_t = 0
     private static var didTryOpen: Bool = false
 
-    /// 4 字符 key（"TC0P"）转 UInt32（big-endian）。
+    /// 4 字符 key（"TC0P"）转 UInt32（big-endian，与 SMC 约定一致）。
     private static func keyToUInt32(_ key: String) -> UInt32 {
         var result: UInt32 = 0
         for char in key.utf8.prefix(4) {
             result = (result << 8) | UInt32(char)
         }
-        return result.bigEndian
+        // 不需要再 bigEndian 转换——我们已经按字节序拼好了。
+        return result
     }
 
-    /// UInt32 转 4 字符 key。
+    /// UInt32 转 4 字符 key（用于解析 dataType）。
     private static func uint32ToKey(_ value: UInt32) -> String {
-        let v = value.bigEndian
+        // SMC key 以 big-endian 存储，与上方 keyToUInt32 对应。
         return String(format: "%c%c%c%c",
-                      UInt8(truncatingIfNeeded: v),
-                      UInt8(truncatingIfNeeded: v >> 8),
-                      UInt8(truncatingIfNeeded: v >> 16),
-                      UInt8(truncatingIfNeeded: v >> 24))
+                      UInt8(truncatingIfNeeded: value >> 24),
+                      UInt8(truncatingIfNeeded: value >> 16),
+                      UInt8(truncatingIfNeeded: value >> 8),
+                      UInt8(truncatingIfNeeded: value))
     }
 
     /// 打开 SMC 服务连接。失败返回 false（机型无 SMC kext）。
@@ -64,13 +67,11 @@ enum SMCReader {
         didTryOpen = true
 
         guard let matching = IOServiceMatching("AppleSMC") else { return false }
-        // kIOMasterPortDefault 在新 SDK 中是 kIOMainPort 的旧名；为了兼容
-        // 不同 SDK 版本统一用 kIOMasterPortDefault（与 IOKit lib 自动链接）。
         let service = IOServiceGetMatchingService(kIOMasterPortDefault, matching)
         guard service != 0 else { return false }
         defer { IOObjectRelease(service) }
 
-        // 打开服务连接。kIODefaultConnect = 0。
+        // IOServiceOpen 第 3 个参数是 userClient type，AppleSMC 为 0。
         let kr = IOServiceOpen(service, mach_task_self_, 0, &connection)
         return kr == kIOReturnSuccess
     }
@@ -79,11 +80,14 @@ enum SMCReader {
     private static func readKey(_ key: String) -> (type: String, bytes: [UInt8])? {
         guard openConnection() else { return nil }
 
-        var input = SMCInputStruct()
+        var input = SMCKeyData()
         input.key = keyToUInt32(key)
+        // input.dataSize 必须设为 0（请求读取 key 的现有数据大小），其他字段清零。
+        input.dataSize = 0
+        input.dataType = 0
 
         var output = SMCKeyData()
-        let inputSize = MemoryLayout<SMCInputStruct>.size
+        let inputSize = MemoryLayout<SMCKeyData>.size
         var outputSize = MemoryLayout<SMCKeyData>.size
 
         let kr = withUnsafePointer(to: &input) { inputPtr in
@@ -110,10 +114,10 @@ enum SMCReader {
         return (type, Array(bytes.prefix(Int(output.dataSize))))
     }
 
-    /// 解析 SMC 数值。类型说明：
-    /// - "sp5e" (SPIRE_DATA): 32-bit float, big-endian
+    /// 解析 SMC 数值。类型说明（与 osx-cpu-temp 一致）：
     /// - "sp78" (SP78): 2 bytes, signed int / 256.0（如温度）
     /// - "fpe2" (FPE2): 2 bytes, unsigned int / 4.0（如风扇转速）
+    /// - "sp5e" (SPIRE_DATA): 32-bit float, big-endian
     /// - "flt " (FLOAT): 32-bit float
     private static func parseValue(type: String, bytes: [UInt8]) -> Double? {
         switch type {
@@ -142,10 +146,10 @@ enum SMCReader {
     /// 依次尝试多个常见 key：TC0P（CPU Proximity）、TC0D（CPU Die）、TC0H。
     /// 全部失败返回 nil（虚拟机/某些机型 SMC 不可用）。
     static func readCPUTemperature() -> Double? {
-        for key in ["TC0P", "TC0D", "TC0H", "TC0E", "TC0F", "TC0C"] {
+        for key in ["TC0P", "TC0D", "TC0H", "TC0E", "TC0F", "TC0C", "TC1C", "TC2C"] {
             if let result = readKey(key),
                let value = parseValue(type: result.type, bytes: result.bytes) {
-            return value
+                return value
             }
         }
         return nil

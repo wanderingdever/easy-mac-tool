@@ -134,12 +134,13 @@ struct PermissionsSettingsView: View {
 
     private func requestInputMonitoring() {
         // IOHIDRequestAccess 在 macOS 15+ 常静默失败。实际创建一次
-        // CGEventTap（.listenOnly）会强制 TCC 把 app 加入输入监控列表。
+        // CGEventTap（.defaultTap）会强制 TCC 把 app 加入输入监控列表。
+        // 必须用 .defaultTap 而非 .listenOnly —— listenOnly 不会触发 TCC 注册。
         _ = IOHIDRequestAccess(IOHIDRequestType(rawValue: 1))
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         if let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                        place: .headInsertEventTap,
-                                       options: .listenOnly,
+                                       options: .defaultTap,
                                        eventsOfInterest: CGEventMask(eventMask),
                                        callback: { _, _, _, _ in nil },
                                        userInfo: nil) {
@@ -148,7 +149,7 @@ struct PermissionsSettingsView: View {
             CGEvent.tapEnable(tap: tap, enable: true)
             CGEvent.tapEnable(tap: tap, enable: false)
             CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
-            print("[TCC] CGEventTap created — app registered for Input Monitoring")
+            print("[TCC] CGEventTap created (.defaultTap) — app registered for Input Monitoring")
         } else {
             // CGEventTap 创建失败通常意味着辅助功能权限未授权。
             print("[TCC] CGEventTap creation failed — needs Accessibility permission first")

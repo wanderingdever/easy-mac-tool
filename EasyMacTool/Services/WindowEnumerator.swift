@@ -107,18 +107,35 @@ final class WindowEnumerator {
         // `AppUsageTracker.windowOrder` records the real window focus order
         // (most recently focused windowID at index 0). Off-screen/placeholder
         // apps still sort to the END so they don't pollute the recency order.
+        //
+        // Fallback：若两个 windowID 都不在 windowOrder 中（rank 返回 Int.max），
+        // 退化到 PID 的 MRU 排序——避免所有未追踪窗口按 windowID 排序导致
+        // 看似"错乱"。例如刚启动后 windowOrder 几乎为空，需要靠 PID rank
+        // 让最近激活的应用排前面。
         items.sort { lhs, rhs in
             // Off-screen/placeholder windows always go last.
             let lhsOff = lhs.isOffScreen || lhs.isPlaceholder
             let rhsOff = rhs.isOffScreen || rhs.isPlaceholder
             if lhsOff && !rhsOff { return false }
             if !lhsOff && rhsOff { return true }
-            // Within the same group, sort by per-window MRU rank.
+            // 优先用 per-window MRU rank。
             let lhsRank = AppUsageTracker.shared.rank(ofWindow: lhs.id)
             let rhsRank = AppUsageTracker.shared.rank(ofWindow: rhs.id)
-            if lhsRank != rhsRank { return lhsRank < rhsRank }
-            // Tie-breaker: same rank (both unseen) — keep a stable order by
-            // windowID so the list doesn't reshuffle between opens.
+            if lhsRank != rhsRank {
+                // 若两个 rank 都不是 Int.max，按 rank 排序。
+                // 若都是 Int.max，下面会 fallback 到 PID rank。
+                if lhsRank != Int.max && rhsRank != Int.max {
+                    return lhsRank < rhsRank
+                }
+            } else {
+                // rank 相等且都不是 Int.max，稳定排序保留 windowID 比较。
+                if lhsRank != Int.max { return lhs.id < rhs.id }
+            }
+            // Fallback：用 PID 的 MRU rank（最近激活的应用排前）。
+            let lhsPidRank = AppUsageTracker.shared.rank(of: lhs.pid)
+            let rhsPidRank = AppUsageTracker.shared.rank(of: rhs.pid)
+            if lhsPidRank != rhsPidRank { return lhsPidRank < rhsPidRank }
+            // PID rank 也相等：稳定排序避免反复 reshuffle。
             return lhs.id < rhs.id
         }
         return items
