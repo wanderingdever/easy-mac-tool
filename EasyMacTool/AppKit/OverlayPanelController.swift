@@ -8,7 +8,16 @@ import SwiftUI
 final class OverlayPanelController: ObservableObject {
     @Published var items: [WindowItem] = []
     @Published var selectedIndex: Int = 0
+    /// Mouse-hover "aim" index — a lighter preview border, NOT the actual
+    /// selection. Keyboard navigation (Tab/Shift+Tab) changes `selectedIndex`
+    /// which has higher priority. Clicking a hovered cell promotes it to
+    /// `selectedIndex` and activates the window. Mirrors Windows Alt+Tab:
+    /// hover is a visual aim, click is the commit.
+    @Published var hoverIndex: Int? = nil
     @Published var previewSize: AppSettings.PreviewSize = .small
+    /// Which screen the panel appears on (set per presentation from
+    /// AppSettings.displayTarget).
+    private var displayTarget: AppSettings.DisplayTarget = .active
 
     private let panel = OverlayPanel()
     private var hostingController: NSHostingController<SwitcherOverlayView>?
@@ -28,15 +37,19 @@ final class OverlayPanelController: ObservableObject {
         return items[selectedIndex]
     }
 
-    func present(with items: [WindowItem], previewSize: AppSettings.PreviewSize) {
+    func present(with items: [WindowItem],
+                 previewSize: AppSettings.PreviewSize,
+                 displayTarget: AppSettings.DisplayTarget) {
         self.items = items
         self.previewSize = previewSize
+        self.displayTarget = displayTarget
         self.selectedIndex = 0
+        self.hoverIndex = nil
         HotkeyManager.shared.isSwitcherOpen = true
 
         let view = SwitcherOverlayView(
             controller: self,
-            onSelect: { [weak self] index in self?.select(index) },
+            onHoverChange: { [weak self] index in self?.setHover(index) },
             onActivate: { [weak self] index in self?.activate(at: index) }
         )
         let hosting = NSHostingController(rootView: view)
@@ -72,6 +85,7 @@ final class OverlayPanelController: ObservableObject {
         HotkeyManager.shared.resetActiveShortcut()
         items = []
         selectedIndex = 0
+        hoverIndex = nil
         hostingController = nil
         panel.contentViewController = nil
     }
@@ -90,16 +104,32 @@ final class OverlayPanelController: ObservableObject {
     func next() {
         guard !items.isEmpty else { return }
         selectedIndex = (selectedIndex + 1) % items.count
+        // Keyboard navigation takes priority over mouse hover — clear the
+        // visual aim so it doesn't linger on a different cell than selected.
+        hoverIndex = nil
         notifySelectionChanged()
     }
 
     func prev() {
         guard !items.isEmpty else { return }
         selectedIndex = (selectedIndex - 1 + items.count) % items.count
+        hoverIndex = nil
         notifySelectionChanged()
     }
 
-    /// Mouse-click/hover selection: update selection to the clicked cell.
+    /// Sets the mouse-hover "aim" index — a lighter preview border only.
+    /// Does NOT change `selectedIndex` and does NOT trigger the live stream
+    /// switch. Pass `nil` to clear the aim when the mouse leaves a cell.
+    func setHover(_ index: Int?) {
+        guard let index else {
+            hoverIndex = nil
+            return
+        }
+        guard items.indices.contains(index) else { return }
+        hoverIndex = index
+    }
+
+    /// Mouse-click selection: update selection to the clicked cell.
     func select(_ index: Int) {
         guard items.indices.contains(index) else { return }
         selectedIndex = index
@@ -123,8 +153,27 @@ final class OverlayPanelController: ObservableObject {
 
     // MARK: - Private
 
+    /// Selects the screen the switcher panel appears on, based on the
+    /// configured `displayTarget`:
+    /// - `.active`:  `NSScreen.main` — the screen with keyboard focus
+    /// - `.mouse`:   the screen under the current mouse cursor
+    /// - `.menuBar`: the screen that contains the menu bar (primary display)
+    private func selectScreen() -> NSScreen? {
+        switch displayTarget {
+        case .active:
+            return NSScreen.main
+        case .mouse:
+            let mouseLocation = NSEvent.mouseLocation
+            return NSScreen.screens.first { $0.frame.contains(mouseLocation) } ?? NSScreen.main
+        case .menuBar:
+            // The menu bar lives at the top of the primary display, whose
+            // frame.origin.y == 0 (menu bar occupies y < 0 in flipped coords).
+            return NSScreen.screens.first { $0.frame.minY >= 0 } ?? NSScreen.main
+        }
+    }
+
     private func positionPanel() {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = selectScreen() else { return }
         let screenRect = screen.visibleFrame
 
         // 与 SwitcherOverlayView/WindowThumbnailCell 一致的布局参数。

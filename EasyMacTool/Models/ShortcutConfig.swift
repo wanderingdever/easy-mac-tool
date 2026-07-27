@@ -13,6 +13,10 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
     var showHidden: Bool
     var showEmptyApps: Bool
     var releaseBehavior: ReleaseBehavior
+    /// Per-shortcut preview thumbnail size. Different shortcuts can use
+    /// different sizes — e.g. a primary shortcut uses small previews while
+    /// a secondary shortcut uses large ones.
+    var previewSize: AppSettings.PreviewSize
     /// Default shortcuts cannot be renamed or deleted.
     var isDefault: Bool
 
@@ -37,6 +41,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
          showHidden: Bool = false,
          showEmptyApps: Bool = false,
          releaseBehavior: ReleaseBehavior = .focus,
+         previewSize: AppSettings.PreviewSize = .small,
          isDefault: Bool = false) {
         self.id = id
         self.name = name
@@ -46,12 +51,51 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         self.showHidden = showHidden
         self.showEmptyApps = showEmptyApps
         self.releaseBehavior = releaseBehavior
+        self.previewSize = previewSize
         self.isDefault = isDefault
     }
 
     var modifiers: CGEventFlags {
         get { CGEventFlags(rawValue: modifiersRaw) }
         set { modifiersRaw = newValue.rawValue }
+    }
+
+    // MARK: - Codable (backward compatibility)
+
+    /// Custom decoder: tolerates persisted shortcuts from older versions that
+    /// lack the `previewSize` field by falling back to `.small`.
+    private enum CodingKeys: String, CodingKey {
+        case id, name, keyCode, modifiersRaw
+        case showMinimized, showHidden, showEmptyApps
+        case releaseBehavior, previewSize, isDefault
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        keyCode = try c.decode(CGKeyCode.self, forKey: .keyCode)
+        modifiersRaw = try c.decode(UInt64.self, forKey: .modifiersRaw)
+        showMinimized = try c.decodeIfPresent(Bool.self, forKey: .showMinimized) ?? false
+        showHidden = try c.decodeIfPresent(Bool.self, forKey: .showHidden) ?? false
+        showEmptyApps = try c.decodeIfPresent(Bool.self, forKey: .showEmptyApps) ?? false
+        releaseBehavior = try c.decodeIfPresent(ReleaseBehavior.self, forKey: .releaseBehavior) ?? .focus
+        previewSize = try c.decodeIfPresent(AppSettings.PreviewSize.self, forKey: .previewSize) ?? .small
+        isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(keyCode, forKey: .keyCode)
+        try c.encode(modifiersRaw, forKey: .modifiersRaw)
+        try c.encode(showMinimized, forKey: .showMinimized)
+        try c.encode(showHidden, forKey: .showHidden)
+        try c.encode(showEmptyApps, forKey: .showEmptyApps)
+        try c.encode(releaseBehavior, forKey: .releaseBehavior)
+        try c.encode(previewSize, forKey: .previewSize)
+        try c.encode(isDefault, forKey: .isDefault)
     }
 
     /// `true` for the Cmd+Shift+Tab-style backward variant (Shift is part of the

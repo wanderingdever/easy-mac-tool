@@ -1,17 +1,17 @@
 import SwiftUI
 
-/// Window-switcher settings: preview-size picker at the top, and below it a
-/// master-detail list of configurable shortcuts.
+/// Window-switcher settings: a global multi-screen target picker at the top,
+/// and below it a master-detail list of configurable shortcuts.
 struct WindowSwitcherSettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var selectedShortcutID: ShortcutConfig.ID?
-    /// Tracks the proportional width of the left column. Default 0.3 (30%),
-    /// so the shortcut list is narrow and the detail editor is wide.
-    @State private var splitFraction: CGFloat = 0.3
+    /// Tracks the proportional width of the left column. Default 0.2 (20%),
+    /// so the shortcut list is narrow and the detail editor is wide (80%).
+    @State private var splitFraction: CGFloat = 0.2
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            previewSizeSection
+            displayTargetSection
             Divider()
             shortcutSection
         }
@@ -26,31 +26,23 @@ struct WindowSwitcherSettingsView: View {
         }
     }
 
-    // MARK: - Preview size
+    // MARK: - Multi-screen target (global)
 
-    private var previewSizeSection: some View {
+    private var displayTargetSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("预览图大小", systemImage: "rectangle.expand.vertical")
+            Label("多屏幕", systemImage: "display")
                 .font(.headline)
-            Picker("预览图大小", selection: previewSizeBinding) {
-                ForEach(AppSettings.PreviewSize.allCases) { size in
-                    Text(size.displayName).tag(size)
+            Picker("显示于", selection: $settings.displayTarget) {
+                ForEach(AppSettings.DisplayTarget.allCases) { target in
+                    Text(target.displayName).tag(target)
                 }
             }
             .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 320)
-            Text("切换窗口时缩略图的大小。当前：\(settings.previewSize.displayName)")
+            .frame(maxWidth: 480)
+            Text("切换窗口面板在哪个屏幕弹出。当前：\(settings.displayTarget.displayName)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-    }
-
-    private var previewSizeBinding: Binding<AppSettings.PreviewSize> {
-        Binding(
-            get: { settings.previewSize },
-            set: { settings.previewSize = $0 }
-        )
     }
 
     // MARK: - Shortcuts
@@ -61,7 +53,7 @@ struct WindowSwitcherSettingsView: View {
                 .font(.headline)
 
             // Custom split: left column at `splitFraction` of width, draggable
-            // divider in the middle, right column fills the rest. Default 30/70.
+            // divider in the middle, right column fills the rest. Default 20/80.
             GeometryReader { geo in
                 let totalWidth = geo.size.width
                 let dividerWidth: CGFloat = 8
@@ -85,7 +77,7 @@ struct WindowSwitcherSettingsView: View {
                                         .onChanged { value in
                                             let proposed = leftWidth + value.translation.width
                                             let newFraction = proposed / totalWidth
-                                            splitFraction = max(0.2, min(0.6, newFraction))
+                                            splitFraction = max(0.15, min(0.6, newFraction))
                                         }
                                 )
                         )
@@ -218,12 +210,27 @@ struct ShortcutDetailView: View {
                                     ))
                 }
             }
+            
+            Section("预览图大小") {
+                Picker("大小", selection: $shortcut.previewSize) {
+                    ForEach(AppSettings.PreviewSize.allCases) { size in
+                        Text(size.displayName).tag(size)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("此快捷键切换窗口时的缩略图大小。当前：\(shortcut.previewSize.displayName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Section("显示窗口") {
                 Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
                 Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
                 Toggle("显示没有打开窗口的应用", isOn: $shortcut.showEmptyApps)
             }
+
+           
 
             Section("释放行为") {
                 Picker("快捷键释放后", selection: $shortcut.releaseBehavior) {

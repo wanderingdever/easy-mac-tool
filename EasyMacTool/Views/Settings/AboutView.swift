@@ -20,7 +20,7 @@ struct AboutView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("macOS 窗口切换管理工具")
+            Text("让您轻松使用Mac")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

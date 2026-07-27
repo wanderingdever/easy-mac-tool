@@ -98,7 +98,10 @@ final class AppCoordinator: ObservableObject {
             self?.activateItem(item)
         }
         panelController.onSelectChanged = { [weak self] item in
-            self?.captureManager.setLiveWindow(item, previewSize: self?.settings.previewSize ?? .small)
+            // Use the previewSize captured during present() — each shortcut
+            // has its own preview size, set on the panelController at open.
+            self?.captureManager.setLiveWindow(item,
+                                               previewSize: self?.panelController.previewSize ?? .small)
         }
         // 点击面板外部时关闭切换器，避免常驻遮挡。
         panelController.onDismiss = { [weak self] in
@@ -167,8 +170,10 @@ final class AppCoordinator: ObservableObject {
                 activeShortcut = nil
                 return
             }
-            panelController.present(with: items, previewSize: settings.previewSize)
-            captureManager.startCapture(for: items, previewSize: settings.previewSize)
+            panelController.present(with: items,
+                                    previewSize: shortcut.previewSize,
+                                    displayTarget: settings.displayTarget)
+            captureManager.startCapture(for: items, previewSize: shortcut.previewSize)
             // Windows Alt+Tab mode: first key press moves selection to the
             // NEXT window (not the current one). For backward shortcuts,
             // start at the last item.
@@ -178,7 +183,7 @@ final class AppCoordinator: ObservableObject {
                 panelController.selectedIndex = 1
             }
             // Start a live stream for the initially selected window.
-            captureManager.setLiveWindow(panelController.selectedItem, previewSize: settings.previewSize)
+            captureManager.setLiveWindow(panelController.selectedItem, previewSize: shortcut.previewSize)
         }
     }
 

@@ -2,8 +2,11 @@ import SwiftUI
 
 /// The visual switcher strip: a wrapping flow of live window thumbnails.
 /// Implements Windows Alt+Tab interaction:
-/// - Mouse hover over a cell moves the selection to that cell.
-/// - Single click activates the window immediately.
+/// - Mouse hover over a cell shows a LIGHTER "aim" border (preview only).
+///   Hover does NOT select — keyboard Tab/Shift+Tab has higher priority.
+/// - Single click promotes the hovered cell to selection AND activates it.
+/// - Releasing the hotkey activates the keyboard-selected cell, not the
+///   hovered one.
 /// No entrance animation — loads instantly like Windows.
 ///
 /// Layout: thumbnails wrap to the next row when the current row is full.
@@ -12,7 +15,9 @@ import SwiftUI
 /// size and any window count.
 struct SwitcherOverlayView: View {
     @ObservedObject var controller: OverlayPanelController
-    var onSelect: (Int) -> Void
+    /// Called on mouse hover to set the visual aim index (lighter border).
+    var onHoverChange: (Int?) -> Void
+    /// Called on click to select + activate the clicked window.
     var onActivate: (Int) -> Void
 
     var body: some View {
@@ -21,16 +26,18 @@ struct SwitcherOverlayView: View {
                 WindowThumbnailCell(
                     item: item,
                     isSelected: index == controller.selectedIndex,
+                    isHover: index == controller.hoverIndex,
                     size: controller.previewSize
                 )
                 .contentShape(Rectangle())
                 .onHover { hovering in
-                    if hovering {
-                        onSelect(index)
-                    }
+                    // Hover only sets the visual aim — does NOT change
+                    // selectedIndex or trigger the live stream. Click is
+                    // required to commit the selection.
+                    onHoverChange(hovering ? index : nil)
                 }
                 .onTapGesture {
-                    onSelect(index)
+                    // Click promotes hover→selection AND activates the window.
                     onActivate(index)
                 }
             }
@@ -59,5 +66,6 @@ struct SwitcherOverlayView: View {
         .transaction { $0.animation = nil }
         .animation(nil, value: controller.items.count)
         .animation(nil, value: controller.selectedIndex)
+        .animation(nil, value: controller.hoverIndex)
     }
 }

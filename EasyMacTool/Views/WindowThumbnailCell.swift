@@ -3,9 +3,17 @@ import SwiftUI
 /// A single live window preview cell. The cell's frame matches the window's
 /// actual aspect ratio — no background padding or borders around the content.
 /// The currently active window is marked with a subtle accent border.
+///
+/// Selection states (priority high→low):
+/// 1. `isSelected` (keyboard Tab): strong accent border + fill — this is what
+///    releasing the hotkey will activate.
+/// 2. `isHover` (mouse aim): lighter accent border only — visual preview of
+///    where a click would land. Does NOT override keyboard selection.
+/// 3. neither: no border.
 struct WindowThumbnailCell: View {
     @ObservedObject var item: WindowItem
     let isSelected: Bool
+    let isHover: Bool
     let size: AppSettings.PreviewSize
 
     /// Compute the actual thumbnail dimensions from the window's aspect ratio,
@@ -57,13 +65,20 @@ struct WindowThumbnailCell: View {
         }
         .padding(10)
         .background(
-            // 选中态：accentColor 填充（macOS 原生高亮风格），不用 scaleEffect。
+            // 选中态（键盘 Tab）：accentColor 填充（macOS 原生高亮风格）。
+            // 悬停态（鼠标预瞄）：极淡填充，比选中态浅很多，仅作视觉标记。
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.25) : .clear)
+                .fill(isSelected ? Color.accentColor.opacity(0.25)
+                      : (isHover ? Color.accentColor.opacity(0.08) : .clear))
         )
         .overlay(
+            // 边框优先级：选中（强）> 悬停（浅）> 无。
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(isSelected ? Color.accentColor.opacity(0.9) : .clear, lineWidth: 2)
+                .strokeBorder(
+                    isSelected ? Color.accentColor.opacity(0.9)
+                    : (isHover ? Color.accentColor.opacity(0.45) : .clear),
+                    lineWidth: isSelected ? 2 : 1.5
+                )
         )
         // Disable animation so selection changes feel instant.
         .transaction { $0.animation = nil }

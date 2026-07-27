@@ -69,7 +69,7 @@ struct ClipboardSettingsView: View {
             Toggle(isOn: $settings.clipboardAutoPaste) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("自动粘贴")
-                    Text("选中条目后自动将其粘贴到当前应用（Paste 风格）。关闭则只写回剪切板。")
+                    Text("选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

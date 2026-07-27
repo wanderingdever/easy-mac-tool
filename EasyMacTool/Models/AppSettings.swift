@@ -6,7 +6,9 @@ import Foundation
 /// SwiftUI settings window (via `@EnvironmentObject`) and the runtime services
 /// (`HotkeyManager`, `WindowEnumerator`, `ScreenCaptureManager`).
 final class AppSettings: ObservableObject {
-    @Published var previewSize: PreviewSize = .small { didSet { persist() } }
+    /// Which screen the switcher panel appears on (global — applies to all
+    /// shortcuts). Per-shortcut preview size lives on `ShortcutConfig`.
+    @Published var displayTarget: DisplayTarget = .active { didSet { persist() } }
     @Published var shortcuts: [ShortcutConfig] = ShortcutConfig.defaults { didSet { persist() } }
     /// Global hotkey to summon the clipboard history panel.
     @Published var clipboardShortcut: ShortcutConfig = AppSettings.defaultClipboardShortcut { didSet { persist() } }
@@ -33,6 +35,21 @@ final class AppSettings: ObservableObject {
         modifiers: [.maskCommand, .maskShift],
         isDefault: true
     )
+
+    /// Which screen the switcher panel appears on.
+    enum DisplayTarget: String, Codable, CaseIterable, Identifiable {
+        case active   // 活跃屏幕（键盘焦点所在）
+        case mouse    // 包含鼠标的屏幕
+        case menuBar  // 包含菜单栏的屏幕（主屏幕）
+        var id: String { rawValue }
+        var displayName: String {
+            switch self {
+            case .active:  return "活跃屏幕"
+            case .mouse:   return "包含鼠标的屏幕"
+            case .menuBar:  return "包含菜单栏的屏幕"
+            }
+        }
+    }
 
     enum PreviewSize: String, Codable, CaseIterable, Identifiable {
         case small, medium, large
@@ -70,7 +87,7 @@ final class AppSettings: ObservableObject {
     // MARK: - Persistence
 
     private struct Persisted: Codable {
-        var previewSize: PreviewSize
+        var displayTarget: DisplayTarget?
         var shortcuts: [ShortcutConfig]
         var clipboardShortcut: ShortcutConfig?
         var clipboardHistoryLimit: Int?
@@ -79,7 +96,7 @@ final class AppSettings: ObservableObject {
 
     private func persist() {
         let snapshot = Persisted(
-            previewSize: previewSize,
+            displayTarget: displayTarget,
             shortcuts: shortcuts,
             clipboardShortcut: clipboardShortcut,
             clipboardHistoryLimit: clipboardHistoryLimit,
@@ -92,7 +109,7 @@ final class AppSettings: ObservableObject {
     private func load() {
         guard let data = defaults.data(forKey: storageKey),
               let snapshot = try? JSONDecoder().decode(Persisted.self, from: data) else { return }
-        previewSize = snapshot.previewSize
+        if let dt = snapshot.displayTarget { displayTarget = dt }
         shortcuts = snapshot.shortcuts
         if let cs = snapshot.clipboardShortcut { clipboardShortcut = cs }
         if let limit = snapshot.clipboardHistoryLimit { clipboardHistoryLimit = limit }

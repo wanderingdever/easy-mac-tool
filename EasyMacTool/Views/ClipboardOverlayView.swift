@@ -18,6 +18,11 @@ struct ClipboardOverlayView: View {
     @State private var activeFilter: ClipboardItem.ContentKind?
     @State private var showFilterMenu: Bool = false
 
+    /// 键盘选中索引：焦点默认在卡片上（非搜索框），用户可用 ←/→ 切换，
+    /// 回车直接复制选中卡片。鼠标 hover 同步更新此索引，使键盘与鼠标
+    /// 视觉状态一致。nil 表示无选中（仅当列表为空时）。
+    @State private var selectedIndex: Int = 0
+
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
     /// opacity 弹入动画。不改变面板高度——内容过长时由 RTFTextView 内部
     /// 上下滚动处理。
@@ -91,8 +96,21 @@ struct ClipboardOverlayView: View {
                 previewOverlay(item: item)
             }
         }
-        // 空格键预览监听（局部 NSEvent monitor，随视图生命周期安装/卸载）。
-        .background(SpaceKeyObserver(onSpace: { handleSpaceKey() }).frame(width: 0, height: 0))
+        // 键盘事件监听（局部 NSEvent monitor，随视图生命周期安装/卸载）。
+        // 支持 ←/→ 切换卡片、回车复制选中卡片、空格预览。当搜索框有焦点
+        // 时不拦截 ←/→/Enter，让 TextField 自然处理光标移动与提交。
+        .background(ClipboardKeyObserver(
+            onArrowLeft:  { handleArrow(direction: -1) },
+            onArrowRight: { handleArrow(direction: +1) },
+            onEnter:      { handleEnter() },
+            onSpace:      { handleSpaceKey() }
+        ).frame(width: 0, height: 0))
+        // 搜索/筛选变化导致列表缩短时，把 selectedIndex 拉回有效范围。
+        .onChange(of: query) { _, _ in clampSelection() }
+        .onChange(of: activeFilter) { _, _ in
+            selectedIndex = 0
+            hoverID = nil
+        }
     }
 
     /// 卡片高度：以屏幕 1/4 高度推算，并卡死在 [120, 220] 区间。
@@ -280,14 +298,20 @@ struct ClipboardOverlayView: View {
             GeometryReader { geo in
                 HorizontalWheelScrollView {
                     HStack(spacing: 12) {
-                        ForEach(filtered) { item in
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
+                            // 卡片高亮 = 鼠标 hover OR 键盘选中（任一为 true）。
+                            // 视觉上鼠标与键盘状态合并，避免双重边框冲突。
+                            let isHighlighted = hoverID == item.id || index == selectedIndex
                             ClipboardCard(item: item,
-                                         isHover: hoverID == item.id,
+                                         isHover: isHighlighted,
                                          isDimmed: previewIsOpen && previewItem?.id != item.id,
                                          height: min(220, max(120, geo.size.height - 22)))
                                 .onHover { hovering in
                                     if hovering {
                                         hoverID = item.id
+                                        // 鼠标 hover 同步键盘选中索引，使回车
+                                        // 复制时与视觉选中卡片一致。
+                                        selectedIndex = index
                                         // 启动 1 秒悬停计时器自动打开预览。
                                         hoverTimer?.invalidate()
                                         hoverTimer = Timer.scheduledTimer(
@@ -305,12 +329,19 @@ struct ClipboardOverlayView: View {
                                     }
                                 }
                                 .onTapGesture {
+                                    selectedIndex = index
                                     if previewIsOpen { closePreview() }
                                     else { onReapply(item) }
                                 }
                                 .contextMenu {
-                                    Button("预览") { openPreview(item) }
-                                    Button("复制") { onReapply(item) }
+                                    Button("预览") {
+                                        selectedIndex = index
+                                        openPreview(item)
+                                    }
+                                    Button("复制") {
+                                        selectedIndex = index
+                                        onReapply(item)
+                                    }
                                     Divider()
                                     Button("删除") { manager.remove(item) }
                                 }
@@ -388,27 +419,61 @@ struct ClipboardOverlayView: View {
         }
     }
 
-    /// 空格键触发：若预览已开则关闭；否则在未编辑文本时预览当前悬浮卡片。
+    /// 空格键触发：若预览已开则关闭；否则预览当前选中卡片。
     private func handleSpaceKey() {
         let editingText = NSApp.keyWindow?.firstResponder is NSTextView
         if previewIsOpen {
             closePreview()
         } else if !editingText,
-                  let hid = hoverID,
-                  let item = filtered.first(where: { $0.id == hid }) {
-            openPreview(item)
+                  filtered.indices.contains(selectedIndex) {
+            openPreview(filtered[selectedIndex])
         }
+    }
+
+    /// ←/→ 切换选中卡片。搜索框聚焦时不拦截，让 TextField 处理光标移动。
+    private func handleArrow(direction: Int) {
+        let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+        guard !editingText, !filtered.isEmpty else { return }
+        if previewIsOpen { closePreview() }
+        // 循环导航：到达边界后绕回另一端。
+        let count = filtered.count
+        selectedIndex = (selectedIndex + direction + count) % count
+    }
+
+    /// 回车复制当前选中卡片。搜索框聚焦时不拦截（让 TextField 提交）。
+    private func handleEnter() {
+        let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+        guard !editingText, filtered.indices.contains(selectedIndex) else { return }
+        let item = filtered[selectedIndex]
+        if previewIsOpen { closePreview() }
+        onReapply(item)
+    }
+
+    /// 搜索/筛选导致列表缩短时，把 selectedIndex 拉回有效范围；
+    /// 列表为空时置 0（cardStrip 空状态会兜底）。
+    private func clampSelection() {
+        guard !filtered.isEmpty else { selectedIndex = 0; return }
+        if selectedIndex >= filtered.count { selectedIndex = filtered.count - 1 }
+        if selectedIndex < 0 { selectedIndex = 0 }
     }
 }
 
-/// 局部 NSEvent 监听空格键（keyCode 49）。随宿主视图生命周期安装/卸载。
-/// 仅在面板内捕获；不拦截其他键。
-private struct SpaceKeyObserver: NSViewRepresentable {
+/// 局部 NSEvent 监听键盘事件。随宿主视图生命周期安装/卸载。
+/// 监听键：←(123) →(124) Enter(36) Space(49)。仅在面板内捕获；
+/// 当 firstResponder 是 NSTextView（搜索框）时不拦截 ←/→/Enter，
+/// 让 TextField 自然处理光标移动与提交。
+private struct ClipboardKeyObserver: NSViewRepresentable {
     final class Coordinator {
+        var onArrowLeft: () -> Void = {}
+        var onArrowRight: () -> Void = {}
+        var onEnter: () -> Void = {}
         var onSpace: () -> Void = {}
         var monitor: Any?
     }
 
+    var onArrowLeft: () -> Void
+    var onArrowRight: () -> Void
+    var onEnter: () -> Void
     var onSpace: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -417,23 +482,45 @@ private struct SpaceKeyObserver: NSViewRepresentable {
         let view = NSView()
         let coordinator = context.coordinator
         coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.keyCode == 49 {  // space
+            // keyCode: 123=←, 124=→, 36=Enter, 49=Space
+            switch event.keyCode {
+            case 123:  // left arrow
+                let editing = NSApp.keyWindow?.firstResponder is NSTextView
+                if editing { return event }
+                coordinator.onArrowLeft()
+                return nil
+            case 124:  // right arrow
+                let editing = NSApp.keyWindow?.firstResponder is NSTextView
+                if editing { return event }
+                coordinator.onArrowRight()
+                return nil
+            case 36:   // Enter
+                let editing = NSApp.keyWindow?.firstResponder is NSTextView
+                if editing { return event }
+                coordinator.onEnter()
+                return nil
+            case 49:   // space
                 coordinator.onSpace()
                 return nil
+            default:
+                return event
             }
-            return event
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.onSpace = onSpace
+        let coordinator = context.coordinator
+        coordinator.onArrowLeft = onArrowLeft
+        coordinator.onArrowRight = onArrowRight
+        coordinator.onEnter = onEnter
+        coordinator.onSpace = onSpace
     }
 
-    func dismantleNSView(_ nsView: NSView, context: Context) {
-        if let monitor = context.coordinator.monitor {
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let monitor = coordinator.monitor {
             NSEvent.removeMonitor(monitor)
-            context.coordinator.monitor = nil
+            coordinator.monitor = nil
         }
     }
 }

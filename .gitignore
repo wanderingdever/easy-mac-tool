@@ -27,6 +27,9 @@ Pods/
 # Generated files
 *.icns
 
+# Build output for distribution
+dist/
+
 # Plans / docs (internal planning, not source code)
 .trae/
 .codex/
