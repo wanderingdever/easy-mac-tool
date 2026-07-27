@@ -386,7 +386,10 @@ struct ClipboardOverlayView: View {
             // 卡片容器绑定 @FocusState：默认 focusTarget=.cards（在 onAppear 中设置）。
             // SwiftUI 的 .focusable + .focused 让卡片容器成为 firstResponder 候选，
             // 阻止 NSPanel 默认把 TextField 设为 firstResponder。
+            // 注意：.focusable() 会自动给获得焦点的视图加默认蓝色 focus ring，
+            // 用 .focusEffectDisabled() 关掉——选中态由卡片自身的 isHover 边框表达。
             .focusable()
+            .focusEffectDisabled()
             .focused($focusTarget, equals: .cards)
         }
     }
