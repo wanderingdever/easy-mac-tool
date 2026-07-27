@@ -18,7 +18,12 @@ struct ClipboardOverlayView: View {
     @State private var activeFilter: ClipboardItem.ContentKind?
     @State private var showFilterMenu: Bool = false
 
-    /// 键盘选中索引：焦点默认在卡片上（非搜索框），用户可用 ←/→ 切换，
+    /// 焦点管理：参考 Paste，默认焦点在卡片而非搜索框——这样用户呼出
+    /// 面板后即可用 ←/→ 切换卡片、Enter 复制。需要搜索时主动点击搜索框
+    /// 或按 ⌘F。Esc 在搜索态返回卡片，在卡片态关闭面板。
+    @FocusState private var focusTarget: FocusTarget?
+
+    /// 键盘选中索引：与 focusTarget=.cards 联动，用户可用 ←/→ 切换，
     /// 回车直接复制选中卡片。鼠标 hover 同步更新此索引，使键盘与鼠标
     /// 视觉状态一致。nil 表示无选中（仅当列表为空时）。
     @State private var selectedIndex: Int = 0
@@ -99,17 +104,37 @@ struct ClipboardOverlayView: View {
         // 键盘事件监听（局部 NSEvent monitor，随视图生命周期安装/卸载）。
         // 支持 ←/→ 切换卡片、回车复制选中卡片、空格预览。当搜索框有焦点
         // 时不拦截 ←/→/Enter，让 TextField 自然处理光标移动与提交。
+        // 额外处理 ⌘F（切到搜索框）、Esc（搜索态返回卡片，卡片态关闭面板）。
         .background(ClipboardKeyObserver(
             onArrowLeft:  { handleArrow(direction: -1) },
             onArrowRight: { handleArrow(direction: +1) },
             onEnter:      { handleEnter() },
-            onSpace:      { handleSpaceKey() }
+            onSpace:      { handleSpaceKey() },
+            onCmdF:       { focusTarget = .search },
+            onEsc: {
+                if focusTarget == .search {
+                    // 搜索态：清空查询 + 焦点回到卡片（不关闭面板）。
+                    query = ""
+                    focusTarget = .cards
+                } else {
+                    // 卡片态：关闭面板。
+                    onDismiss()
+                }
+            }
         ).frame(width: 0, height: 0))
         // 搜索/筛选变化导致列表缩短时，把 selectedIndex 拉回有效范围。
         .onChange(of: query) { _, _ in clampSelection() }
         .onChange(of: activeFilter) { _, _ in
             selectedIndex = 0
             hoverID = nil
+        }
+        // 面板出现时默认焦点在卡片（非搜索框）。
+        // 用 DispatchQueue.main.async 确保 SwiftUI 已完成首次布局，
+        // 此时设置 focusTarget 才能正确推动 firstResponder。
+        .onAppear {
+            DispatchQueue.main.async {
+                focusTarget = .cards
+            }
         }
     }
 
@@ -153,6 +178,9 @@ struct ClipboardOverlayView: View {
                     .font(.system(size: 14))
                     .frame(width: 160)
                     .lineLimit(1)
+                    // 与卡片共享 @FocusState：仅当用户主动点击此处或按 ⌘F
+                    // 时才获得焦点，避免面板出现时自动抢占焦点导致 ←/→ 失效。
+                    .focused($focusTarget, equals: .search)
                 filterButton
             }
             .padding(.horizontal, 10)
@@ -330,16 +358,20 @@ struct ClipboardOverlayView: View {
                                 }
                                 .onTapGesture {
                                     selectedIndex = index
+                                    // 点击卡片后焦点切回卡片区，便于后续键盘操作。
+                                    focusTarget = .cards
                                     if previewIsOpen { closePreview() }
                                     else { onReapply(item) }
                                 }
                                 .contextMenu {
                                     Button("预览") {
                                         selectedIndex = index
+                                        focusTarget = .cards
                                         openPreview(item)
                                     }
                                     Button("复制") {
                                         selectedIndex = index
+                                        focusTarget = .cards
                                         onReapply(item)
                                     }
                                     Divider()
@@ -351,6 +383,11 @@ struct ClipboardOverlayView: View {
                     .padding(.vertical, 10)
                 }
             }
+            // 卡片容器绑定 @FocusState：默认 focusTarget=.cards（在 onAppear 中设置）。
+            // SwiftUI 的 .focusable + .focused 让卡片容器成为 firstResponder 候选，
+            // 阻止 NSPanel 默认把 TextField 设为 firstResponder。
+            .focusable()
+            .focused($focusTarget, equals: .cards)
         }
     }
 
@@ -459,15 +496,17 @@ struct ClipboardOverlayView: View {
 }
 
 /// 局部 NSEvent 监听键盘事件。随宿主视图生命周期安装/卸载。
-/// 监听键：←(123) →(124) Enter(36) Space(49)。仅在面板内捕获；
-/// 当 firstResponder 是 NSTextView（搜索框）时不拦截 ←/→/Enter，
-/// 让 TextField 自然处理光标移动与提交。
+/// 监听键：←(123) →(124) Enter(36) Space(49) ⌘F(3+cmdMask) Esc(53)。
+/// 仅在面板内捕获；当 firstResponder 是 NSTextView（搜索框）时不拦截
+/// ←/→/Enter，让 TextField 自然处理光标移动与提交。⌘F 与 Esc 全局拦截。
 private struct ClipboardKeyObserver: NSViewRepresentable {
     final class Coordinator {
         var onArrowLeft: () -> Void = {}
         var onArrowRight: () -> Void = {}
         var onEnter: () -> Void = {}
         var onSpace: () -> Void = {}
+        var onCmdF: () -> Void = {}
+        var onEsc: () -> Void = {}
         var monitor: Any?
     }
 
@@ -475,6 +514,8 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
     var onArrowRight: () -> Void
     var onEnter: () -> Void
     var onSpace: () -> Void
+    var onCmdF: () -> Void
+    var onEsc: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -482,6 +523,17 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         let view = NSView()
         let coordinator = context.coordinator
         coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Esc 始终拦截：搜索态清空查询回卡片，卡片态关闭面板。
+            // ClipboardPanelController 不再监听 Esc，全部由此处统一处理。
+            if event.keyCode == 53 {  // Esc
+                coordinator.onEsc()
+                return nil
+            }
+            // ⌘F：切换到搜索框。keyCode 3 = 'F'。
+            if event.keyCode == 3 && event.modifierFlags.contains(.command) {
+                coordinator.onCmdF()
+                return nil
+            }
             // keyCode: 123=←, 124=→, 36=Enter, 49=Space
             switch event.keyCode {
             case 123:  // left arrow
@@ -515,6 +567,8 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         coordinator.onArrowRight = onArrowRight
         coordinator.onEnter = onEnter
         coordinator.onSpace = onSpace
+        coordinator.onCmdF = onCmdF
+        coordinator.onEsc = onEsc
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -523,6 +577,14 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
             coordinator.monitor = nil
         }
     }
+}
+
+/// 焦点目标：卡片容器（默认）或搜索框。配合 @FocusState 让面板出现时
+/// firstResponder 是卡片容器，而非 TextField——这样 ←/→/Enter 直接生效，
+/// 不会被 TextField 拦截。用户点击搜索框或按 ⌘F 才切换到搜索态。
+private enum FocusTarget: Hashable {
+    case cards
+    case search
 }
 
 /// 放大预览卡片：与常规 ClipboardCard 同结构（header/middle/footer），

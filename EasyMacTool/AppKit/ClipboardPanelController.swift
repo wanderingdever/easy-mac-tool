@@ -9,7 +9,6 @@ import SwiftUI
 final class ClipboardPanelController: ObservableObject {
     private let panel = OverlayPanel()
     private var hostingController: NSHostingController<ClipboardOverlayView>?
-    private var localMonitor: Any?
     private var globalMonitor: Any?
 
     /// Set by AppCoordinator; called when the user picks an item. AppCoordinator
@@ -63,15 +62,9 @@ final class ClipboardPanelController: ObservableObject {
     }
 
     private func installDismissMonitors() {
-        // Esc dismisses.
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            guard let self else { return event }
-            if event.keyCode == 53 {  // Escape
-                self.dismiss()
-                return nil
-            }
-            return event
-        }
+        // Esc 处理已下放到 ClipboardOverlayView 的 ClipboardKeyObserver——
+        // 视图层根据 focusTarget 决定是清空查询回卡片还是关闭面板。
+        // 这里只保留点击面板外部关闭。
         // Click outside the panel dismisses it. Use a small delay after
         // presentation so the initial click that summoned the panel (if any)
         // doesn't immediately dismiss it.
@@ -83,10 +76,6 @@ final class ClipboardPanelController: ObservableObject {
     }
 
     private func dismissInternal() {
-        if let local = localMonitor {
-            NSEvent.removeMonitor(local)
-            localMonitor = nil
-        }
         if let global = globalMonitor {
             NSEvent.removeMonitor(global)
             globalMonitor = nil
