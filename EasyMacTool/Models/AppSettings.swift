@@ -5,6 +5,7 @@ import Foundation
 /// App-wide settings, persisted to `UserDefaults` as JSON. Shared with both the
 /// SwiftUI settings window (via `@EnvironmentObject`) and the runtime services
 /// (`HotkeyManager`, `WindowEnumerator`, `ScreenCaptureManager`).
+@MainActor
 final class AppSettings: ObservableObject {
     /// Which screen the switcher panel appears on (global — applies to all
     /// shortcuts). Per-shortcut preview size lives on `ShortcutConfig`.

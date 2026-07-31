@@ -58,22 +58,30 @@ final class WindowActivator {
     }
 
     /// Closes the window by pressing its AX close button.
+    /// 禁用 frame 兜底匹配：close 涉及数据丢失风险（未保存文档被关），
+    /// 仅允许真实 windowID 精确匹配。无 AXWindowID 的窗口放弃关闭——
+    /// 安全的 no-op 优于误关近似窗口。
     func close(_ item: WindowItem) {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item) else { return }
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return }
         pressButton(window, attribute: kAXCloseButtonAttribute as CFString)
     }
 
     /// Minimizes the window by pressing its AX minimize button.
+    /// 同 close：禁用 frame 兜底，避免误最小化近似窗口。
     func minimize(_ item: WindowItem) {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item) else { return }
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return }
         pressButton(window, attribute: kAXMinimizeButtonAttribute as CFString)
     }
 
     // MARK: - Private
 
-    private func findAXWindow(_ axApp: AXUIElement, matching item: WindowItem) -> AXUIElement? {
+    /// 在 AX 窗口列表中查找匹配 item 的窗口。
+    /// - Parameter allowFrameFallback: 无 AXWindowID 时是否允许 frame 兜底匹配。
+    ///   activate 允许（激活错误窗口无数据丢失风险）；close/minimize 禁用
+    ///   （误关/误最小化有数据丢失风险）。
+    private func findAXWindow(_ axApp: AXUIElement, matching item: WindowItem, allowFrameFallback: Bool = true) -> AXUIElement? {
         var count: CFIndex = 0
         AXUIElementGetAttributeValueCount(axApp, kAXWindowsAttribute as CFString, &count)
         var windowsRef: CFArray?
@@ -90,21 +98,40 @@ final class WindowActivator {
             }
         }
 
+        // 无 AXWindowID 的窗口：仅 activate 允许 frame 兜底匹配。
+        // close/minimize 传入 allowFrameFallback=false，直接返回 nil（安全 no-op）。
+        guard allowFrameFallback else { return nil }
+
         // A small number of apps do not expose AXWindowID. Keep a conservative
-        // fallback for them, requiring both origin and size to match.
+        // fallback for them, requiring origin + size + title 全部匹配。
+        // 仅 frame 匹配会误匹配同 app 近似窗口（如两个全屏终端），
+        // 增加 title 辅助校验降低误匹配概率。
         for axWindow in axWindows {
             guard let position = cgPoint(axWindow, kAXPositionAttribute as CFString),
                   let size = cgSize(axWindow, kAXSizeAttribute as CFString) else { continue }
             let frame = CGRect(origin: position, size: size)
             let target = item.frame
-            if abs(frame.origin.x - target.origin.x) < 2,
-               abs(frame.origin.y - target.origin.y) < 2,
-               abs(frame.size.width - target.size.width) < 2,
-               abs(frame.size.height - target.size.height) < 2 {
+            guard abs(frame.origin.x - target.origin.x) < 2,
+                  abs(frame.origin.y - target.origin.y) < 2,
+                  abs(frame.size.width - target.size.width) < 2,
+                  abs(frame.size.height - target.size.height) < 2 else { continue }
+            // frame 匹配后追加 title 校验：同 app 近似窗口通常 title 不同
+            // （如 "Terminal — bash" vs "Terminal — ssh"），可进一步排除。
+            // title 为空时（少数 app 不暴露 title）回退为仅 frame 匹配。
+            let axTitle = title(of: axWindow)
+            if axTitle.isEmpty || item.title.isEmpty || axTitle == item.title {
                 return axWindow
             }
         }
         return nil
+    }
+
+    /// 读取 AX 窗口的 title 属性，失败返回空字符串。
+    private func title(of element: AXUIElement) -> String {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &ref) == .success,
+              let title = ref as? String else { return "" }
+        return title
     }
 
     private func windowID(of element: AXUIElement) -> CGWindowID? {

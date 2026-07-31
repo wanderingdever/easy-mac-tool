@@ -130,7 +130,7 @@ struct SettingsRootView: View {
             for window in NSApp.windows where window.canBecomeMain {
                 window.makeKeyAndOrderFront(nil)
             }
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
         }
     }
 }

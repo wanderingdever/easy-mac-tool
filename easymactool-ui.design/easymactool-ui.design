@@ -154,7 +154,7 @@
       "canvasData": {
         "x": 0,
         "y": 1116,
-        "overrideWidth": 384,
+        "overrideWidth": 360,
         "naturalSize": {
           "width": 1024,
           "height": 1024
@@ -175,8 +175,8 @@
         "x": 516,
         "y": 1080,
         "naturalSize": {
-          "width": 512,
-          "height": 512
+          "width": 1024,
+          "height": 1024
         }
       },
       "devMetadata": {
@@ -194,8 +194,8 @@
         "x": 1044,
         "y": 1092,
         "naturalSize": {
-          "width": 512,
-          "height": 512
+          "width": 1024,
+          "height": 1024
         }
       },
       "devMetadata": {

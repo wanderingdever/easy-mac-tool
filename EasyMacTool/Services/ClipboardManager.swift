@@ -30,6 +30,9 @@ final class ClipboardManager: ObservableObject {
     /// to 1000. Images retain their original TIFF data, so a count-only limit
     /// is insufficient to protect the process from memory pressure.
     private static let maximumImagePayloadBytes = 20 * 1024 * 1024
+    /// 文本条目单条大小上限：防止用户复制超大文本（如导出的 JSON、日志全选）
+    /// 导致内存尖峰 + JSON 编码耗时（主线程）+ 搜索过滤卡顿。与图片上限对称。
+    private static let maximumTextPayloadBytes = 5 * 1024 * 1024
     private static let maximumHistoryPayloadBytes = 150 * 1024 * 1024
     /// 热数据阈值：7 天内的 image 条目在启动时加载 data/thumbnail 到内存；
     /// 超过 7 天的 image 条目仅加载元数据，访问时通过 warmUp() 从磁盘恢复。
@@ -49,10 +52,17 @@ final class ClipboardManager: ObservableObject {
 
     // MARK: - Persistence URLs
 
+    /// Application Support 目录是否可用。获取失败时（极罕见）不持久化，
+    /// 避免明文剪贴板历史落入 NSTemporaryDirectory（/var/folders）——
+    /// 临时目录语义不适合持久化数据，且更易被系统清理导致数据丢失。
+    private static var storageIsAvailable: Bool {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first != nil
+    }
+
     /// 持久化根目录：~/Library/Application Support/EasyMacTool/Clipboard/
+    /// 仅在 storageIsAvailable 为 true 时调用。
     private static var storageDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("EasyMacTool/Clipboard", isDirectory: true)
     }
     private static var metadataURL: URL {
@@ -166,6 +176,7 @@ final class ClipboardManager: ObservableObject {
     /// sync 会等待所有 pending 的异步 saveToDisk 完成，再执行自己的写入，
     /// 避免旧异步 Task 覆盖最新数据。牺牲几十毫秒的主线程时间换取数据安全。
     private func saveToDiskSync() {
+        guard Self.storageIsAvailable else { return }
         let dir = Self.storageDirectory
         let imgDir = Self.imagesDirectoryURL
         let metaURL = Self.metadataURL
@@ -203,6 +214,10 @@ final class ClipboardManager: ObservableObject {
                     // .atomic：写临时文件后 rename，进程中途被杀不会留下
                     // 半截 TIFF（否则 warmUp 静默失败，图片条目永久空白）。
                     try data.write(to: url, options: .atomic)
+                    // TIFF 文件同样收紧为 0600，与 metadata.json 保持一致
+                    //（.atomic 写入继承 umask 通常为 0644，纵深防御补齐）。
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                           ofItemAtPath: url.path)
                 }
                 try jsonData.write(to: metaURL, options: .atomic)
                 try? FileManager.default.setAttributes([.posixPermissions: 0o600],
@@ -429,8 +444,9 @@ final class ClipboardManager: ObservableObject {
 
         // Plain text (also catches URLs copied as plain text).
         if let text = pb.string(forType: .string) {
-            // 捕获 RTF 富文本数据（若来源应用支持）。VSCode/Xcode 等代码
-            // 编辑器复制时会写入 RTF 类型，保留语法高亮颜色。
+            // 单条文本大小上限：超大文本（如导出的 JSON、日志全选复制）会
+            // 导致内存尖峰 + JSON 编码耗时 + 搜索卡顿，跳过记录。
+            // 颜色/URL 启发式判断在大小检查之前，短字符串不受影响。
             let rtfData = pb.data(forType: .rtf)
             // Heuristic: looks like a color string (#RRGGBB / rgb() / hsl()) —
             // render as a color card.
@@ -449,6 +465,9 @@ final class ClipboardManager: ObservableObject {
                                      sourceAppName: appName,
                                      sourceAppTint: appTint)
             }
+            // 文本单条大小上限：超过 maximumTextPayloadBytes 的巨型文本跳过记录，
+            // 避免内存尖峰 + JSON 编码耗时 + 搜索卡顿。
+            guard text.utf8.count <= Self.maximumTextPayloadBytes else { return nil }
             return ClipboardItem(kind: .text(text),
                                  sourceAppBundleID: appBundleID,
                                  sourceAppName: appName,
@@ -513,6 +532,7 @@ final class ClipboardManager: ObservableObject {
     /// - 清理已删除条目对应的磁盘图片文件（pendingImageDeletions）
     /// 文件 I/O 在后台队列执行，避免阻塞主线程。
     private func saveToDisk() {
+        guard Self.storageIsAvailable else { return }
         let dir = Self.storageDirectory
         let imgDir = Self.imagesDirectoryURL
         let metaURL = Self.metadataURL
@@ -552,6 +572,9 @@ final class ClipboardManager: ObservableObject {
                 // 写入图片文件（.atomic：避免进程被杀留下半截 TIFF）
                 for (url, data) in imagesToWrite {
                     try data.write(to: url, options: .atomic)
+                    // TIFF 文件同样收紧为 0600，与 metadata.json 保持一致。
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                           ofItemAtPath: url.path)
                 }
                 // 写入元数据 JSON
                 try jsonData.write(to: metaURL, options: .atomic)
@@ -587,6 +610,7 @@ final class ClipboardManager: ObservableObject {
     /// 可导致 app 启动时主线程冻结数百毫秒到数秒。现在 JSON 读取在后台，
     /// 解码后立即设置 items（UI 瞬时显示卡片占位），热图异步加载填入。
     private func loadFromDisk() {
+        guard Self.storageIsAvailable else { return }
         let metaURL = Self.metadataURL
         let imgDir = Self.imagesDirectoryURL
         guard FileManager.default.fileExists(atPath: metaURL.path) else { return }
@@ -626,16 +650,17 @@ final class ClipboardManager: ObservableObject {
                         Task { await item.warmUpAsync() }
                     }
                 }
-                // 先保存 poll 期间新增的条目（self.items 此时可能已被 poll 写入新内容），
-                // 再用 loaded 覆盖，最后把新增条目合并回头部。
-                // 之前直接 self.items = loaded 后再遍历 self.items 合并，
-                // 但此时 self.items 已是 loaded，循环条件永远为空，新增条目被丢弃。
+                // 合并 poll 期间新增的条目到 loaded 头部，然后一次性赋值。
+                // 之前分两步（先 self.items = loaded，再逐条 insert），SwiftUI
+                // 会观察到中间态导致卡片闪烁/选中错位。现在构建完整数组后
+                // 单次 @Published 变更，避免中间态。
                 let pendingNew = self.items
-                self.items = loaded
                 let loadedIDs = Set(loaded.map { $0.id })
+                var merged = loaded
                 for item in pendingNew where !loadedIDs.contains(item.id) {
-                    self.items.insert(item, at: 0)
+                    merged.insert(item, at: 0)
                 }
+                self.items = merged
             }
         }
     }

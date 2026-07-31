@@ -61,7 +61,7 @@ struct MenuBarView: View {
     private func openSettings() {
         openWindow(id: "settings")
         DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
         }
     }
 }

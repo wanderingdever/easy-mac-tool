@@ -64,6 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 之前 AppCoordinator 从不调用 stop()，退出时最近 1 秒的复制会丢失。
         coordinator?.flushClipboardForTermination()
     }
+
+    /// macOS 13+ 推荐 NSApplicationDelegate 实现此方法并返回 true，
+    /// 支持安全状态恢复，消除启动时的运行时警告日志。
+    func applicationSupportsSecureRestorableState(_ application: NSApplication) -> Bool {
+        return true
+    }
 }
 
 extension Notification.Name {
@@ -192,7 +198,9 @@ final class AppCoordinator {
     /// 退出时同步 flush 剪贴板历史到磁盘。
     /// 由 AppDelegate.applicationWillTerminate 调用，确保防抖窗口内的
     /// 变更和未完成的 IO 在进程终止前落盘。
+    /// 同时显式停止 SCStream，避免依赖进程死亡清理（更合规的资源管理）。
     func flushClipboardForTermination() {
+        captureManager.stopAll()
         clipboardManager.stop()
     }
 

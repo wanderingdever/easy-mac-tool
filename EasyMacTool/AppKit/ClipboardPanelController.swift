@@ -109,6 +109,12 @@ final class ClipboardPanelController: ObservableObject {
         // Click outside the panel dismisses it. Use a small delay after
         // presentation so the initial click that summoned the panel (if any)
         // doesn't immediately dismiss it.
+        //
+        // 设计说明：与 OverlayPanelController（切换器）不同，此处直接调
+        // self.dismiss() 而非通过 onDismiss 回调 AppCoordinator。原因是
+        // 剪贴板面板不涉及 capture 资源/openTask/activeShortcut 等协调清理，
+        // dismiss 仅 orderOut + 移除 monitor 即可。切换器需要 AppCoordinator
+        // 完整清理 capture/activeShortcut/openTask，故走 onDismiss 回调。
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             // Only dismiss if the panel is actually showing.
             guard let self, self.panel.isVisible else { return }
