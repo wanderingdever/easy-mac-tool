@@ -33,3 +33,14 @@ dist/
 # Plans / docs (internal planning, not source code)
 .trae/
 .codex/
+.workbuddy/
+
+# Xcode internal caches
+com.apple.DeveloperTools/
+
+# Temporary archives
+*-前置.zip
+*.zip.tmp
+
+# Code review reports (internal documents)
+code-review-*.md

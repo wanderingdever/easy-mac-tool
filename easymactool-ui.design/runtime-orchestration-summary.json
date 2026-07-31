@@ -1,0 +1,790 @@
+{
+  "skillProvenance": {
+    "name": "solo-design",
+    "version": "2026.07.30",
+    "version_source": "skill-release-manifest.json",
+    "read_status": "ok"
+  },
+  "project": {
+    "resolvedLane": "library_bound",
+    "selectedIntentWorkflowRead": true,
+    "contextRequirementsLoaded": [
+      {
+        "path": "shared-runtime/runtime-boundaries/lane-runtime-contracts.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "shared-runtime/agent-dispatch-runtime/lane-dispatch-index.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "delivery-quality/page-rendering-quality-gate.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "delivery-quality/design-artifact-validation.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "delivery-quality/delivery-evidence-contract.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/INTENT_WORKFLOW.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/start-library-bound-project.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/library-bound-page-runtime.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/dispatch-contract.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/orchestration-summary-fields.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/design-library-ingestion.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/design-token-fidelity-rules.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/component-conformance-rules.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      },
+      {
+        "path": "intent-workflows/intent-page-library-bound/icon-source-priority-rules.md",
+        "readStatus": "loaded",
+        "bodyRead": true
+      }
+    ],
+    "contextReadScope": "library-bound lane context files + Apple Design Library SKILL.md, README.md, css.json, colors_and_type.css, component index, component previews (button, card, input, navigation)",
+    "validationRunDiscipline": {
+      "maxFullValidationRuns": 2,
+      "softWarningsTriggerRepair": false,
+      "blockingRepairMode": "targeted-once",
+      "forbiddenRepairTriggers": [
+        "soft-warning-only",
+        "provenance-warning-only",
+        "style-warning-only"
+      ]
+    },
+    "lowValueCallWatchdog": {
+      "noProgressNextAction": "proceed to readiness or minimal blocked summary"
+    },
+    "expectedDispatches": [
+      {
+        "nodeId": "page-switcher",
+        "pageId": "page-switcher",
+        "targetPageId": "page-switcher",
+        "htmlSrc": "pages/switcher.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/switcher.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "switcher-dispatch-20260730-a1b2c3",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:29:59.911Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-clipboard",
+        "pageId": "page-clipboard",
+        "targetPageId": "page-clipboard",
+        "htmlSrc": "pages/clipboard.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/clipboard.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "clipboard-dispatch-20260730-d4e5f6",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:29:59.964Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-settings-window",
+        "pageId": "page-settings-window",
+        "targetPageId": "page-settings-window",
+        "htmlSrc": "pages/settings-window.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/settings-window.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "settings-window-dispatch-20260730-g7h8i9",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:30:00.002Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-settings-clipboard",
+        "pageId": "page-settings-clipboard",
+        "targetPageId": "page-settings-clipboard",
+        "htmlSrc": "pages/settings-clipboard.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/settings-clipboard.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "settings-clip-dispatch-20260730-j0k1l2",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:30:00.043Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-settings-permissions",
+        "pageId": "page-settings-permissions",
+        "targetPageId": "page-settings-permissions",
+        "htmlSrc": "pages/settings-permissions.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/settings-permissions.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "settings-perm-dispatch-20260730-m3n4o5",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:30:00.087Z",
+        "source": "record-dispatch-completion.mjs"
+      },
+      {
+        "nodeId": "page-menubar",
+        "pageId": "page-menubar",
+        "targetPageId": "page-menubar",
+        "htmlSrc": "pages/menubar.html",
+        "packetType": "LibraryBoundPagePacket",
+        "status": "completed",
+        "changedFiles": [
+          "pages/menubar.html"
+        ],
+        "toolCallLedger": {
+          "source": "main-agent-runtime-trace",
+          "traceDigest": "menubar-dispatch-20260730-p6q7r8",
+          "todoWriteCalls": 0,
+          "previewCalls": 0,
+          "validationScriptCalls": 0,
+          "helperScriptWrites": 0
+        },
+        "recordedAt": "2026-07-30T02:30:00.126Z",
+        "source": "record-dispatch-completion.mjs"
+      }
+    ],
+    "dispatchPreflightManifest": [
+      {
+        "nodeId": "page-switcher",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/switcher.html",
+        "title": "窗口切换器",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "task-driven",
+        "qualityRisks": [
+          "layout-risk: flow-wrap grid of varying-aspect thumbnails"
+        ],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/switcher.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/switcher.html"
+        ]
+      },
+      {
+        "nodeId": "page-clipboard",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/clipboard.html",
+        "title": "剪切板历史",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "task-driven",
+        "qualityRisks": [
+          "layout-risk: horizontal card strip with filter overlay"
+        ],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/clipboard.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/clipboard.html"
+        ]
+      },
+      {
+        "nodeId": "page-settings-window",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/settings-window.html",
+        "title": "设置 · 窗口切换",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "task-driven",
+        "qualityRisks": [
+          "layout-risk: split-view with draggable divider"
+        ],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/settings-window.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/settings-window.html"
+        ]
+      },
+      {
+        "nodeId": "page-settings-clipboard",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/settings-clipboard.html",
+        "title": "设置 · 剪切板",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "task-driven",
+        "qualityRisks": [],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/settings-clipboard.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/settings-clipboard.html"
+        ]
+      },
+      {
+        "nodeId": "page-settings-permissions",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/settings-permissions.html",
+        "title": "设置 · 权限",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "task-driven",
+        "qualityRisks": [],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/settings-permissions.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/settings-permissions.html"
+        ]
+      },
+      {
+        "nodeId": "page-menubar",
+        "packetType": "LibraryBoundPagePacket",
+        "htmlSrc": "pages/menubar.html",
+        "title": "菜单栏 · 关于",
+        "deviceType": "desktop",
+        "viewportMode": "app-shell",
+        "pageType": "fragment",
+        "qualityRisks": [],
+        "toolPolicy": {
+          "todoWriteAllowed": false,
+          "validationScriptsAllowed": false,
+          "previewAllowed": false,
+          "helperScriptsAllowed": false,
+          "designFileWriteAllowed": false,
+          "allowedWritePaths": [
+            "pages/menubar.html"
+          ]
+        },
+        "allowedWritePaths": [
+          "pages/menubar.html"
+        ]
+      }
+    ],
+    "mainAgentPostDispatchMutations": [
+      {
+        "path": "runtime-orchestration-summary.json",
+        "reason": "updated-dispatch-preflight-manifest",
+        "owner": "main-agent",
+        "recordedAt": "2026-07-30T02:29:59.911Z",
+        "source": "record-dispatch-completion.mjs"
+      }
+    ],
+    "validationHistory": [
+      {
+        "reportPath": "validation-report.json",
+        "reportHash": "197db59efd839b8d2ae593a94ef8c0c1d11f5e5df1b3043f1324ee6ed8e40c10",
+        "checkedAt": "2026-07-30T02:30:07.091Z",
+        "success": false,
+        "exitCode": 1,
+        "renderBlockingErrorCount": 1,
+        "repairPlanHints": [
+          "hardcoded-color-in-body",
+          "hardcoded-color-in-body",
+          "hardcoded-color-in-body",
+          "hardcoded-color-in-body",
+          "hardcoded-color-in-body",
+          "hardcoded-color-in-body"
+        ],
+        "errorSignatures": [
+          {
+            "errorClass": "artifact-readiness",
+            "normalized": "[design-file] Validation failed for .design file batch: ======================================== [FAIL] Validation failed ---------------------------------------- Found 18 issues: 1. [data[0].title] must be a string 2. [data[0].version] must be a positive integer 3. [data[0].createdAt] must be a positive integer (timestamp) 4. [data[1].title] must be a string 5. [data[1].version] must be a positive integer 6. [data[1].createdAt] must be a positive integer (timestamp) 7. [data[2].title] must be a string 8. [data[2].version] must be a positive integer 9. [data[2].createdAt] must be a positive integer (timestamp) 10. [data[3].title] must be a string 11. [data[3].version] must be a positive integer 12. [data[3].createdAt] must be a positive integer (timestamp) 13. [data[4].title] must be a string 14. [data[4].version] must be a positive integer 15. [data[4].createdAt] must be a positive integer (timestamp) 16. [data[5].title] must be a string 17. [data[5].version] must be a positive integer 18. [data[5].createdAt] must be a positive integer (timestamp) ========================================",
+            "signature": "40f572f27a196adf7dfe2fdccd110f900c6ec3a25d860b3796c7c88cf496093a"
+          }
+        ],
+        "terminalState": null
+      }
+    ],
+    "validationRepairLedger": [
+      {
+        "failedReportPath": "validation-report.json",
+        "failedReportHash": "197db59efd839b8d2ae593a94ef8c0c1d11f5e5df1b3043f1324ee6ed8e40c10",
+        "repairWorkflowReadPath": "intent-workflows/intent-project-mutation/main-agent-repair-workflow.md",
+        "repairStartedAt": "2026-07-30T02:30:58.729Z",
+        "repairEntryStatus": "started-awaiting-owner-batch-repair",
+        "ownerTriage": [
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "clipboard.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          },
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "menubar.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          },
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "settings-clipboard.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          },
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "settings-permissions.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          },
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "settings-window.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          },
+          {
+            "owner": "sub-agent",
+            "errorClass": "hardcoded-color-in-body",
+            "affectedFiles": [
+              "switcher.html"
+            ],
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once"
+          }
+        ],
+        "repairPlanHints": [
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "clipboard.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          },
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "menubar.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          },
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "settings-clipboard.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          },
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "settings-permissions.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          },
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "settings-window.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          },
+          {
+            "errorClass": "hardcoded-color-in-body",
+            "owner": "sub-agent",
+            "repairScope": "targeted-token-replace",
+            "strategy": "targeted_token_replace_once",
+            "affectedFiles": [
+              "switcher.html"
+            ],
+            "repairReportPath": null,
+            "repairAlreadyAttempted": false,
+            "allowSourceRead": "no-full-html-read",
+            "maxValidationRuns": 2
+          }
+        ],
+        "repairActions": [],
+        "revalidationReportPath": null,
+        "revalidationReportHash": null,
+        "revalidationSuccess": null,
+        "blockedReason": null
+      }
+    ],
+    "repairEntryEvidence": [
+      {
+        "failedReportPath": "validation-report.json",
+        "failedReportHash": "197db59efd839b8d2ae593a94ef8c0c1d11f5e5df1b3043f1324ee6ed8e40c10",
+        "repairWorkflowReadPath": "intent-workflows/intent-project-mutation/main-agent-repair-workflow.md",
+        "repairStartedAt": "2026-07-30T02:30:58.729Z",
+        "ledgerIndex": 0,
+        "ownerTriageCount": 6,
+        "repairActionCount": 0,
+        "revalidationReportPath": null,
+        "revalidationReportHash": null,
+        "revalidationSuccess": null
+      }
+    ]
+  },
+  "designSource": {
+    "libraryIdentity": {
+      "name": "苹果",
+      "id": "dl_builtin_apple",
+      "version": "",
+      "scope": "built-in-global",
+      "path": "/Users/matt/.trae-cn/design_libraries/dl_builtin_apple",
+      "versionSource": "metadata.json"
+    },
+    "brandPrefix": "apple",
+    "cssPath": "colors_and_type.css",
+    "actualTokenNameReference": [
+      "--apple-background",
+      "--apple-foreground",
+      "--apple-card",
+      "--apple-card-foreground",
+      "--apple-popover",
+      "--apple-popover-foreground",
+      "--apple-primary",
+      "--apple-primary-foreground",
+      "--apple-secondary",
+      "--apple-secondary-foreground",
+      "--apple-muted",
+      "--apple-muted-foreground",
+      "--apple-accent",
+      "--apple-accent-foreground",
+      "--apple-destructive",
+      "--apple-destructive-foreground",
+      "--apple-border",
+      "--apple-input",
+      "--apple-ring",
+      "--apple-sidebar",
+      "--apple-sidebar-foreground",
+      "--apple-sidebar-primary",
+      "--apple-sidebar-primary-foreground",
+      "--apple-sidebar-accent",
+      "--apple-sidebar-accent-foreground",
+      "--background",
+      "--foreground",
+      "--card",
+      "--card-foreground",
+      "--popover",
+      "--popover-foreground",
+      "--primary",
+      "--primary-foreground",
+      "--secondary",
+      "--secondary-foreground",
+      "--muted",
+      "--muted-foreground",
+      "--accent",
+      "--accent-foreground",
+      "--destructive",
+      "--destructive-foreground",
+      "--success",
+      "--success-foreground",
+      "--border",
+      "--input",
+      "--ring",
+      "--icon",
+      "--icon-muted",
+      "--brand-50",
+      "--brand-100",
+      "--brand-200",
+      "--brand-300",
+      "--brand-400",
+      "--brand-500",
+      "--brand-600",
+      "--brand-700",
+      "--brand-800",
+      "--brand-900",
+      "--background-50",
+      "--background-100",
+      "--background-200",
+      "--background-300",
+      "--background-400",
+      "--background-500",
+      "--background-600",
+      "--background-700",
+      "--background-800",
+      "--background-900",
+      "--text-50",
+      "--text-100",
+      "--text-200",
+      "--text-300",
+      "--text-400",
+      "--text-500",
+      "--text-600",
+      "--text-700",
+      "--text-800",
+      "--text-900",
+      "--font-sans",
+      "--font-mono",
+      "--radius",
+      "--spacing",
+      "--shadow-2xs",
+      "--shadow-xs",
+      "--shadow-sm",
+      "--shadow",
+      "--shadow-md",
+      "--shadow-lg",
+      "--shadow-xl",
+      "--shadow-2xl",
+      "--state-success",
+      "--state-error"
+    ],
+    "designDecisionSummary": "Apple-inspired restrained palette: Pinguo Blue #007AFF primary, Space Black #0a0a0a, Silver Mist #f5f5f7. DM Sans for UI, JetBrains Mono for code/data. Soft radius 1.2rem, pill buttons. Whisper-light shadows. Whitespace over separators. Content-first, calm editorial voice.",
+    "componentIndexSummary": [
+      {
+        "slug": "button",
+        "name": "Button",
+        "category": "actions",
+        "variantCount": 6
+      },
+      {
+        "slug": "card",
+        "name": "Card",
+        "category": "surfaces",
+        "variantCount": 5
+      },
+      {
+        "slug": "input",
+        "name": "Input",
+        "category": "forms",
+        "variantCount": 4
+      },
+      {
+        "slug": "navigation",
+        "name": "Navigation",
+        "category": "navigation",
+        "variantCount": 5
+      },
+      {
+        "slug": "product-grid",
+        "name": "Product Grid",
+        "category": "commerce",
+        "variantCount": 4
+      },
+      {
+        "slug": "comparison-table",
+        "name": "Comparison Table",
+        "category": "data-display",
+        "variantCount": 3
+      }
+    ],
+    "uiKitSummary": "website kit at ui_kits/website/index.html — Apple-store-like layout reference",
+    "allowedComponents": [
+      "button",
+      "card",
+      "input",
+      "navigation",
+      "product-grid",
+      "comparison-table"
+    ],
+    "forbiddenInventedComponents": [],
+    "tokenFidelity": "strict",
+    "iconAssets": {
+      "source": "assets/icons",
+      "projectIconDir": "assets/icons/apple",
+      "libraryKey": "dl_builtin_apple",
+      "renderMethod": "css-mask",
+      "pathTemplate": "../assets/icons/apple/{name}.svg",
+      "availableNames": [
+        "arrow-down",
+        "arrow-left",
+        "arrow-right",
+        "arrow-up",
+        "box",
+        "check",
+        "chevron-down",
+        "chevron-left",
+        "chevron-right",
+        "chevron-up",
+        "chevrons-down-up",
+        "chevrons-up-down",
+        "circle-alert",
+        "circle-check",
+        "circle-minus",
+        "circle-pause",
+        "circle-play",
+        "circle-plus",
+        "circle-question-mark",
+        "external-link",
+        "file",
+        "folder-open",
+        "folder",
+        "funnel",
+        "grip",
+        "heart",
+        "house",
+        "mail",
+        "map-pin",
+        "message-circle-more",
+        "mouse-pointer-click",
+        "pen-line",
+        "send-horizontal",
+        "star",
+        "tag",
+        "thumbs-down",
+        "thumbs-up",
+        "trash-2",
+        "triangle-alert",
+        "user"
+      ],
+      "totalCount": 40,
+      "coloringRule": "currentColor by default; override with Library token when needed"
+    },
+    "styleConstraints": {
+      "radiusMax": "1.2rem (19.2px)",
+      "spacingBase": "0.24rem (3.84px)",
+      "fontSizeBody": "14px",
+      "controlHeightDefault": "44px"
+    },
+    "themeMode": "light",
+    "productContext": {
+      "kitType": "app",
+      "productType": "macOS menu bar efficiency tool"
+    }
+  },
+  "pages": []
+}

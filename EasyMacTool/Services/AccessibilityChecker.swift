@@ -14,36 +14,31 @@ enum AccessibilityChecker {
     /// Preflight (no prompt) for Screen Recording permission.
     static var isScreenRecordingTrusted: Bool { CGPreflightScreenCaptureAccess() }
 
-    /// Preflight (no prompt) for Input Monitoring permission.
-    /// Returns true if the app is already trusted to monitor input events.
-    static var isInputMonitoringTrusted: Bool {
-        // IOHIDCheckAccess returns kIOHIDAccessTypeGranted when granted.
-        // kIOHIDRequestTypeListenEvent = 1 (observe input events).
-        return IOHIDCheckAccess(IOHIDRequestType(rawValue: 1)) == kIOHIDAccessTypeGranted
-    }
-
     /// Returns the set of permissions that are currently MISSING — empty
     /// if all required permissions are granted. Used to decide whether to
     /// trigger the system's native permission request flow.
+    ///
+    /// 输入监控（Input Monitoring）已彻底移除：app 使用 .defaultTap 的
+    /// CGEventTap，运行时只需要辅助功能权限（AX 是 IM 的超集，AX 授权后
+    /// IM 自动通过）。IM 权限仅 .listenOnly tap 需要，app 未使用；
+    /// 设置页也不再展示 IM 状态，避免误导用户追逐非必需权限。
     static var missingPermissions: [PermissionKind] {
         var missing: [PermissionKind] = []
         if !isTrusted { missing.append(.accessibility) }
         if !isScreenRecordingTrusted { missing.append(.screenRecording) }
-        if !isInputMonitoringTrusted { missing.append(.inputMonitoring) }
         return missing
     }
 
     /// Triggers the system's NATIVE permission request flow for ALL missing
     /// permissions, opens EasyMacTool's settings window (to the 系统设置
-    /// section so the user sees the three permissions' green/red status), AND
+    /// section so the user sees the permissions' green/red status), AND
     /// opens macOS System Settings to the FIRST missing permission's pane
     /// (one pane at a time to avoid opening multiple System Settings windows).
     ///
-    /// On macOS 15+ (Sequoia), `CGRequestScreenCaptureAccess()` 和
-    /// `IOHIDRequestAccess()` 经常静默失败，不会把 app 加入系统列表。
-    /// 辅助功能的 `AXIsProcessTrustedWithOptions` 会弹系统对话框所以能成功。
-    /// 修复：录屏请求时实际触发一次 CGDisplayCreateImage（会触发 TCC 注册），
-    /// 输入监控请求时实际创建一次 CGEventTap（会触发系统把 app 加入列表）。
+    /// On macOS 15+ (Sequoia), `CGRequestScreenCaptureAccess()` 常静默失败，
+    /// 不会把 app 加入系统列表。辅助功能的 `AXIsProcessTrustedWithOptions`
+    /// 会弹系统对话框所以能成功。修复：录屏请求时实际触发一次
+    /// SCShareableContent.current（会触发 TCC 注册）。
     ///
     /// Returns true if any permission was missing (and thus requested),
     /// false if all permissions are already granted.
@@ -60,7 +55,7 @@ enum AccessibilityChecker {
             switch kind {
             case .screenRecording:
                 // CGRequestScreenCaptureAccess 在 macOS 15+ 常静默失败。
-                // 实际触发一次 SCScreenshotManager 屏幕捕获会强制 TCC
+                // 实际触发一次 SCShareableContent.current 会强制 TCC
                 // 把 app 加入屏幕录制列表，用户在系统设置中可见。
                 _ = CGRequestScreenCaptureAccess()
                 triggerScreenCaptureRegistration()
@@ -69,30 +64,40 @@ enum AccessibilityChecker {
                     kAXTrustedCheckOptionPrompt.takeUnretainedValue(): kCFBooleanTrue
                 ] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(options)
-            case .inputMonitoring:
-                // IOHIDRequestAccess 在 macOS 15+ 常静默失败。
-                // 实际创建一次 CGEventTap（.listenOnly）会强制 TCC 把 app
-                // 加入输入监控列表。创建后立即停止，只用于触发注册。
-                _ = IOHIDRequestAccess(IOHIDRequestType(rawValue: 1))
-                triggerInputMonitoringRegistration()
             }
         }
 
         // Open macOS System Settings to the FIRST missing permission's pane.
         // Opening one pane at a time avoids multiple System Settings windows.
-        let order: [PermissionKind] = [.screenRecording, .accessibility, .inputMonitoring]
-        if let firstKind = order.first(where: { missing.contains($0) }) {
-            let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_\(firstKind.paneAnchor)"
+        // AX 缺失时系统对话框自带"打开系统设置"按钮，不重复跳转避免竞态。
+        let order: [PermissionKind] = [.screenRecording, .accessibility]
+        if let firstKind = order.first(where: { missing.contains($0) }), firstKind != .accessibility {
+            let urlString = "x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_\(firstKind.paneAnchor)"
             if let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
             }
         }
 
         // Open EasyMacTool's own settings window and switch to the 系统设置
-        // section so the user can see the three permissions' status icons.
+        // section so the user can see the permissions' status icons.
+        // .openSettings 触发 openWindow（异步），SettingsRootView 需时间挂载，
+        // 延迟发送 .focusPermissionSection 避免通知丢失。
         NotificationCenter.default.post(name: .openSettings, object: nil)
-        NotificationCenter.default.post(name: .focusPermissionSection, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .focusPermissionSection, object: nil)
+        }
         return true
+    }
+
+    /// 仅触发 TCC 注册副作用（不弹设置页、不打开系统设置）。
+    /// 用于启动时权限检查的重试阶段：当 missingPermissions 非空时，
+    /// 主动调用 SCShareableContent.current 让 TCC 把当前进程 cdhash
+    /// 重新加入数据库。对 ad-hoc 签名下的 cdhash 失配有修复作用。
+    ///
+    /// 只触发屏幕录制注册：辅助功能通过 AXIsProcessTrustedWithOptions
+    /// 弹对话框触发（已在 requestAllMissingPermissions 中处理）。
+    static func triggerRegistrationOnly() {
+        triggerScreenCaptureRegistration()
     }
 
     /// 用 SCShareableContent.current 触发 TCC 把 app 注册到屏幕录制列表。
@@ -100,15 +105,11 @@ enum AccessibilityChecker {
     /// app 加入系统列表。SCShareableContent.current 首次调用时会触发系统
     /// 注册 app 到 TCC 数据库（即使最终抛错），用户在系统设置中可见。
     ///
-    /// 使用 Task.detached 确保不依赖主 actor，可在主线程被阻塞时运行。
-    /// CGDisplayCreateImage/CGDisplayStream 在 macOS 15+ 已不可用，
-    /// ScreenCaptureKit 是唯一的现代 API。
+    /// 使用 Task.detached 异步触发——TCC 注册是异步副作用，不依赖主线程
+    /// 同步等待。之前的 semaphore.wait(3s) 在主线程会冻结 UI 最长 3 秒
+    /// （用户按 Cmd+Tab 缺权限时尤其严重）。
     private static func triggerScreenCaptureRegistration() {
-        // 用信号量让 async 调用同步等待完成，确保 TCC 注册在打开
-        // 系统设置之前完成。最多等 3 秒避免 UI 长时间卡顿。
-        let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
-            defer { semaphore.signal() }
             do {
                 // 首次调用会触发系统注册 app 到 TCC 屏幕录制列表。
                 _ = try await SCShareableContent.current
@@ -118,47 +119,16 @@ enum AccessibilityChecker {
                 print("[TCC] SCShareableContent.current threw (expected if not authorized): \(error)")
             }
         }
-        _ = semaphore.wait(timeout: .now() + 3.0)
-    }
-
-    /// 创建一个临时的 CGEventTap（headInsertEventTap, defaultTap）来强制
-    /// TCC 把 app 加入输入监控列表。创建后立即停止并释放，只用于触发注册。
-    /// 如果没有辅助功能权限会返回 nil（CGEventTap 需要 AX 权限才能创建）。
-    ///
-    /// 注意：必须用 .defaultTap 而非 .listenOnly。在 macOS 15+ 上，
-    /// .listenOnly 创建的 tap 不会触发 TCC 把 app 加入"输入监控"列表，
-    /// 用户在系统设置中看不到应用。.defaultTap 才会触发系统注册。
-    private static func triggerInputMonitoringRegistration() {
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
-        // CGEventTapCallBack 回调签名需要4个参数：proxy, type, event, userInfo
-        let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
-                                    place: .headInsertEventTap,
-                                    options: .defaultTap,
-                                    eventsOfInterest: CGEventMask(eventMask),
-                                    callback: { _, _, _, _ in nil },
-                                    userInfo: nil)
-        guard let eventTap = tap else {
-            // 创建失败：可能缺少辅助功能权限（CGEventTap 需先有 AX 权限）。
-            return
-        }
-        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
-        // 短暂启用让 TCC 注册，然后移除。
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-        CGEvent.tapEnable(tap: eventTap, enable: false)
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
     }
 
     enum PermissionKind: String {
         case accessibility
         case screenRecording
-        case inputMonitoring
 
         var displayName: String {
             switch self {
             case .accessibility: return "辅助功能"
             case .screenRecording: return "屏幕录制"
-            case .inputMonitoring: return "输入监控"
             }
         }
 
@@ -166,7 +136,6 @@ enum AccessibilityChecker {
             switch self {
             case .accessibility: return "Privacy_Accessibility"
             case .screenRecording: return "Privacy_ScreenCapture"
-            case .inputMonitoring: return "Privacy_ListenEvent"
             }
         }
     }
@@ -175,7 +144,7 @@ enum AccessibilityChecker {
 extension Notification.Name {
     /// Posted when permissions are missing on launch/hotkey; SettingsRootView
     /// listens and switches its sidebar selection to the 系统设置 section so
-    /// the user immediately sees the three permissions' status icons.
+    /// the user immediately sees the permissions' status icons.
     static let focusPermissionSection = Notification.Name("EasyMacToolFocusPermissionSection")
 }
 

@@ -9,6 +9,15 @@ struct RTFTextView: NSViewRepresentable {
     let plainText: String
     let font: NSFont
 
+    final class Coordinator {
+        var lastRTFData: Data?
+        var lastPlainText: String?
+        var lastFontName: String?
+        var lastFontSize: CGFloat?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
         scrollView.drawsBackground = false
@@ -17,7 +26,7 @@ struct RTFTextView: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
-        let textView = scrollView.documentView as! NSTextView
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
@@ -29,7 +38,14 @@ struct RTFTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        let textView = scrollView.documentView as! NSTextView
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        let coordinator = context.coordinator
+        let contentUnchanged = coordinator.lastRTFData == rtfData &&
+            coordinator.lastPlainText == plainText
+        let fontUnchanged = coordinator.lastFontName == font.fontName &&
+            coordinator.lastFontSize == font.pointSize
+        guard !(contentUnchanged && fontUnchanged) else { return }
+
         textView.font = font
         textView.textColor = .labelColor
 
@@ -42,5 +58,9 @@ struct RTFTextView: NSViewRepresentable {
         } else {
             textView.string = plainText
         }
+        coordinator.lastRTFData = rtfData
+        coordinator.lastPlainText = plainText
+        coordinator.lastFontName = font.fontName
+        coordinator.lastFontSize = font.pointSize
     }
 }

@@ -5,13 +5,17 @@ import SwiftUI
 /// Bottom-of-screen clipboard history panel, Paste-style. A horizontal strip
 /// of preview cards. Click a card to copy/restore that clipboard entry.
 ///
-/// Layout: pinned to the bottom of the screen, full width, height = 1/5 of the
+/// Layout: pinned to the bottom of the screen, full width, height = 1/4 of the
 /// screen height. Cards scroll horizontally. Esc or click-outside dismisses.
+///
+/// 性能优化：
+/// - `controller` 改用 @ObservedObject，回调通过 controller 方法调用——
+///   避免 present 时构造新闭包导致 SwiftUI diff 与重渲染。
+/// - `filtered` 缓存到 @State，仅在 query/items/filter 变化时重算，
+///   避免每次 body 访问都重过滤（多次访问：isEmpty / count / ForEach）。
 struct ClipboardOverlayView: View {
     @ObservedObject var manager: ClipboardManager
-    var autoPaste: Bool
-    var onDismiss: () -> Void
-    var onReapply: (ClipboardItem) -> Void
+    @ObservedObject var controller: ClipboardPanelController
 
     @State private var query: String = ""
     @State private var hoverID: UUID?
@@ -29,24 +33,26 @@ struct ClipboardOverlayView: View {
     @State private var selectedIndex: Int = 0
 
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
-    /// opacity 弹入动画。不改变面板高度——内容过长时由 RTFTextView 内部
+    /// opacity/scale 弹入动画。不改变面板高度——内容过长时由 RTFTextView 内部
     /// 上下滚动处理。
     /// 无全屏遮罩——预览悬浮在卡片上方，用阴影 + 圆角区分背景（tooltip 式）。
+    /// 仅通过右键菜单「预览」或空格键触发，不再 hover 自动弹出。
     @State private var previewItem: ClipboardItem?
     @State private var previewVisible: Bool = false
 
-    /// 悬停 1 秒自动打开预览的计时器。鼠标进入卡片时启动，离开时取消。
-    /// 计时器触发后调 openPreview。移走鼠标后延迟 0.3 秒关闭预览
-    /// （给鼠标移到预览卡片上的时间）。
-    @State private var hoverTimer: Timer?
-    /// 关闭预览的延迟计时器。鼠标离开卡片后延迟 0.3 秒关闭，
-    /// 若鼠标在此期间进入预览卡片则取消关闭。
-    @State private var closeTimer: Timer?
-    /// 鼠标是否在预览卡片内（用于延迟关闭的取消判断）。
-    @State private var mouseInPreview: Bool = false
+    /// 面板出现动画驱动：onAppear 时切换为 true，触发 opacity + 上移动画。
+    @State private var panelAppeared: Bool = false
 
-    private var previewIsOpen: Bool { previewItem != nil }
+    /// 清空全部历史前的确认弹窗。
+    @State private var showClearAlert: Bool = false
 
+    /// 过滤后的卡片列表（计算属性）。
+    /// 之前用 @State filtered + onReceive(manager.$items) 手动更新，但右键菜单
+    /// (NSMenu) 的 modal session 会延迟 onReceive 回调，导致删除/新增后 UI 不
+    /// 立即刷新。改为计算属性后，manager.items（@Published）的任何变化都会
+    /// 通过 @ObservedObject 自动触发 body 重绘，filtered 随之重算。
+    /// 性能：body 中多次访问 filtered 会多次计算，但 manager.items 通常 ≤ 100，
+    /// filter 闭包开销可忽略；真正昂贵的是卡片渲染（已用 LazyHStack 懒加载）。
     private var filtered: [ClipboardItem] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         return manager.items.filter { item in
@@ -55,6 +61,8 @@ struct ClipboardOverlayView: View {
             return item.title.lowercased().contains(q) || item.footerText.lowercased().contains(q)
         }
     }
+
+    private var previewIsOpen: Bool { previewItem != nil }
 
     var body: some View {
         ZStack {
@@ -95,17 +103,28 @@ struct ClipboardOverlayView: View {
             // 独立动画，不受此 transaction 影响。
             .transaction { $0.animation = nil }
             .animation(nil, value: manager.items.count)
+            // 面板出现动画：opacity + 轻微上移，spring 更流畅。
+            .opacity(panelAppeared ? 1 : 0)
+            .offset(y: panelAppeared ? 0 : 24)
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: panelAppeared)
 
             // 预览浮层：在所有内容之上，垂直居中弹入。
             if let item = previewItem {
                 previewOverlay(item: item)
             }
         }
+        .alert("清空全部剪切板历史？", isPresented: $showClearAlert) {
+            Button("取消", role: .cancel) { }
+            Button("清空", role: .destructive) { manager.clearHistory() }
+        } message: {
+            Text("此操作不可撤销，将删除所有 \(manager.items.count) 条记录。")
+        }
         // 键盘事件监听（局部 NSEvent monitor，随视图生命周期安装/卸载）。
         // 支持 ←/→ 切换卡片、回车复制选中卡片、空格预览。当搜索框有焦点
         // 时不拦截 ←/→/Enter，让 TextField 自然处理光标移动与提交。
         // 额外处理 ⌘F（切到搜索框）、Esc（搜索态返回卡片，卡片态关闭面板）。
         .background(ClipboardKeyObserver(
+            isActive: controller.isPresented,
             onArrowLeft:  { handleArrow(direction: -1) },
             onArrowRight: { handleArrow(direction: +1) },
             onEnter:      { handleEnter() },
@@ -118,22 +137,67 @@ struct ClipboardOverlayView: View {
                     focusTarget = .cards
                 } else {
                     // 卡片态：关闭面板。
-                    onDismiss()
+                    controller.dismiss()
                 }
-            }
+            },
+            isEditingText: { focusTarget == .search }
         ).frame(width: 0, height: 0))
         // 搜索/筛选变化导致列表缩短时，把 selectedIndex 拉回有效范围。
-        .onChange(of: query) { _, _ in clampSelection() }
+        // filtered 是计算属性，manager.items 变化时自动重算，无需手动刷新。
+        .onChange(of: query) { _, _ in
+            clampSelection()
+        }
         .onChange(of: activeFilter) { _, _ in
             selectedIndex = 0
             hoverID = nil
         }
+        // 删除卡片后 manager.items.count 变化，selectedIndex 可能越界——clamp 回有效范围。
+        .onChange(of: manager.items.count) { _, _ in
+            clampSelection()
+        }
         // 面板出现时默认焦点在卡片（非搜索框）。
-        // 用 DispatchQueue.main.async 确保 SwiftUI 已完成首次布局，
-        // 此时设置 focusTarget 才能正确推动 firstResponder。
+        // 策略：ClipboardPanelController.present() 在 panel.makeKey() 后主动
+        // makeFirstResponder(hosting.view)，阻止 NSPanel 默认抢设搜索框；
+        // 这里在 onAppear 中显式设置 focusTarget = .cards，让 SwiftUI 的
+        // .focused($focusTarget, equals: .cards) 把 firstResponder 推到卡片容器。
+        // 用 DispatchQueue.main.async 确保 SwiftUI 已完成首次布局，且 panel
+        // 的 makeFirstResponder 调用已落地，此时设置 focusTarget 才能正确推动。
         .onAppear {
+            // 触发面板出现动画：下一 render pass 切换 panelAppeared=true，
+            // 让 .animation(.spring...) 观察 opacity/offset 的变化并播放。
             DispatchQueue.main.async {
+                panelAppeared = true
                 focusTarget = .cards
+            }
+        }
+        // 面板每次重新打开（isPresented false→true）时重置视图状态：
+        // 让焦点回到第一张（最新）卡片，清空搜索/筛选/预览。
+        // hostingController 常驻导致 @State 在 dismiss 后仍保留，若不重置
+        // 用户每次打开都会看到上次的位置/搜索词/预览状态。
+        // filtered 是计算属性，自动反映 manager.items 最新状态，无需手动刷新。
+        .onChange(of: controller.isPresented) { _, isPresented in
+            if isPresented {
+                selectedIndex = 0
+                hoverID = nil
+                query = ""
+                activeFilter = nil
+                previewItem = nil
+                previewVisible = false
+                showFilterMenu = false
+                focusTarget = .cards
+                // 修复：onAppear 只在首次 present 触发（hostingController 常驻），
+                // 必须在此处重新置 true，否则 dismiss 后 panelAppeared 永远为 false，
+                // 面板内容 opacity=0、再次 present 时不可见。
+                // 用 DispatchQueue.main.async 延后一拍，让 opacity/offset 先回到
+                // 初值再触发 spring 动画重放（与 onAppear 写法一致）。
+                DispatchQueue.main.async {
+                    panelAppeared = true
+                }
+            } else {
+                // dismiss 后重置 panelAppeared，使下次 present 时入场动画
+                // （spring 滑入）能正常播放。之前不重置导致第二次打开
+                // 面板时直接显示而无动画。
+                panelAppeared = false
             }
         }
     }
@@ -155,20 +219,22 @@ struct ClipboardOverlayView: View {
 
     private var searchBar: some View {
         HStack(spacing: 12) {
-            // 1. 统计数量（左）
-            HStack(spacing: 5) {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 15))
+            // 1. 统计数量（左）：剪切板图标 + 计数（设计稿规范）。
+            HStack(spacing: 6) {
+                Image(systemName: "clipboard")
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                 Text("\(filtered.count)/\(manager.items.count)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
             Spacer(minLength: 0)
 
             // 2. 搜索框 + 筛选按钮（中）。
+            // 设计稿：height 34, bg --apple-muted(controlBackgroundColor),
+            // 0.5px border (black 6% light / white 8% dark)。
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 13))
@@ -184,17 +250,21 @@ struct ClipboardOverlayView: View {
                 filterButton
             }
             .padding(.horizontal, 10)
-            .frame(height: 40)
+            .frame(height: 34)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(.quaternary.opacity(0.4))
+                    .fill(Color(NSColor.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.5)
             )
             // 筛选菜单 overlay 锚定在这个搜索框组的右上角，菜单紧贴筛选
-            // 按钮下方出现。offset(y: 46) 让菜单越过 40pt 高度 + 一点间隙。
+            // 按钮下方出现。offset(y: 40) 让菜单越过 34pt 高度 + 一点间隙。
             .overlay(alignment: .topTrailing) {
                 if showFilterMenu {
                     filterMenu
-                        .offset(y: 46)
+                        .offset(y: 40)
                         .zIndex(999)
                         .transition(.opacity)
                         .transaction { $0.animation = nil }
@@ -204,8 +274,8 @@ struct ClipboardOverlayView: View {
 
             Spacer(minLength: 0)
 
-            // 3. 删除按钮（右）
-            Button(action: { manager.clearHistory() }) {
+            // 3. 删除按钮（右）—— 点击弹出确认 alert，不直接清空。
+            Button(action: { showClearAlert = true }) {
                 Image(systemName: "trash")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
@@ -214,7 +284,7 @@ struct ClipboardOverlayView: View {
             .help("清空历史")
         }
         .padding(.horizontal, 16)
-        // 头部高度加倍到 56pt，所有元素垂直居中。
+        // 头部高度 56pt，所有元素垂直居中。
         .frame(height: 56, alignment: .center)
         .zIndex(1)
     }
@@ -233,10 +303,10 @@ struct ClipboardOverlayView: View {
 
     private var filterMenu: some View {
         VStack(alignment: .leading, spacing: 2) {
-            filterRow(nil, label: "全部", symbol: "tray.full")
+            filterRow(nil, label: "全部")
             Divider().padding(.vertical, 2)
             ForEach(ClipboardItem.ContentKind.allCases) { kind in
-                filterRow(kind, label: kind.label, symbol: kind.symbol)
+                filterRow(kind, label: kind.label)
             }
         }
         .padding(8)
@@ -252,38 +322,34 @@ struct ClipboardOverlayView: View {
         .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
     }
 
-    private func filterRow(_ kind: ClipboardItem.ContentKind?, label: String, symbol: String) -> some View {
+    private func filterRow(_ kind: ClipboardItem.ContentKind?, label: String) -> some View {
         let isActive = (kind == nil && activeFilter == nil) || (kind != nil && activeFilter == kind)
-        let tint = kind?.tint ?? NSColor.systemGray
+        // 设计稿指定 6 色固定圆点色值（不再依赖 kind.tint 派生色）。
+        let dotColor = filterDotColor(for: kind)
         return Button {
             activeFilter = kind
             showFilterMenu = false
         } label: {
             HStack(spacing: 8) {
-                // 彩色圆形图标背景：用种类颜色区分，选中时加深
-                ZStack {
-                    Circle()
-                        .fill(Color(nsColor: tint).opacity(isActive ? 1.0 : 0.7))
-                    Image(systemName: symbol)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 18, height: 18)
+                // 设计稿：纯色圆形圆点（18×18），无内部图标，用颜色区分种类
+                Circle()
+                    .fill(dotColor.opacity(isActive ? 1.0 : 0.7))
+                    .frame(width: 18, height: 18)
 
                 Text(label)
-                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
                     .foregroundStyle(isActive ? .primary : .secondary)
 
                 Spacer()
 
                 if isActive {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.accentColor)
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(isActive ? Color.accentColor.opacity(0.1) : .clear)
@@ -291,6 +357,18 @@ struct ClipboardOverlayView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// 设计稿固定的筛选圆点颜色（6 类）。
+    private func filterDotColor(for kind: ClipboardItem.ContentKind?) -> Color {
+        switch kind {
+        case nil:       return DesignTokens.FilterDot.all
+        case .text:     return DesignTokens.FilterDot.text
+        case .link:     return DesignTokens.FilterDot.link
+        case .image:    return DesignTokens.FilterDot.image
+        case .file:     return DesignTokens.FilterDot.file
+        case .color:    return DesignTokens.FilterDot.color
+        }
     }
 
     // MARK: - Card strip
@@ -325,7 +403,11 @@ struct ClipboardOverlayView: View {
             // 同时卡死上限 220pt，避免面板在预览模式下被拉高时卡片跟着变大。
             GeometryReader { geo in
                 HorizontalWheelScrollView {
-                    HStack(spacing: 12) {
+                    // LazyHStack 仅渲染可见卡片 + 缓冲区，避免 100 条卡片
+                    // 同时渲染导致的内存浪费与滚动卡顿。HStack 会一次性构建
+                    // 所有子视图，每张卡片的 RTF 解析/图片解码都立即执行，
+                    // 100 条历史时滚动明显掉帧。
+                    LazyHStack(spacing: 12) {
                         ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
                             // 卡片高亮 = 鼠标 hover OR 键盘选中（任一为 true）。
                             // 视觉上鼠标与键盘状态合并，避免双重边框冲突。
@@ -340,20 +422,8 @@ struct ClipboardOverlayView: View {
                                         // 鼠标 hover 同步键盘选中索引，使回车
                                         // 复制时与视觉选中卡片一致。
                                         selectedIndex = index
-                                        // 启动 1 秒悬停计时器自动打开预览。
-                                        hoverTimer?.invalidate()
-                                        hoverTimer = Timer.scheduledTimer(
-                                            withTimeInterval: 1.0, repeats: false
-                                        ) { _ in
-                                            openPreview(item)
-                                        }
                                     } else {
                                         if hoverID == item.id { hoverID = nil }
-                                        // 鼠标离开卡片：取消悬停计时器，
-                                        // 延迟 0.3 秒关闭预览（给鼠标移到
-                                        // 预览卡片上的时间）。
-                                        hoverTimer?.invalidate()
-                                        scheduleClosePreview()
                                     }
                                 }
                                 .onTapGesture {
@@ -361,7 +431,7 @@ struct ClipboardOverlayView: View {
                                     // 点击卡片后焦点切回卡片区，便于后续键盘操作。
                                     focusTarget = .cards
                                     if previewIsOpen { closePreview() }
-                                    else { onReapply(item) }
+                                    else { reapply(item) }
                                 }
                                 .contextMenu {
                                     Button("预览") {
@@ -372,7 +442,7 @@ struct ClipboardOverlayView: View {
                                     Button("复制") {
                                         selectedIndex = index
                                         focusTarget = .cards
-                                        onReapply(item)
+                                        reapply(item)
                                     }
                                     Divider()
                                     Button("删除") { manager.remove(item) }
@@ -397,8 +467,9 @@ struct ClipboardOverlayView: View {
     // MARK: - Preview
 
     /// 预览浮层：tooltip 式悬浮在面板上方，无全屏遮罩。
-    /// 用阴影 + 圆角边框区分预览与背景。鼠标可移入预览区域
-    /// （进入时取消关闭计时器，离开时关闭预览）。
+    /// 用阴影 + 圆角边框区分预览与背景。
+    /// 仅通过右键菜单「预览」或空格键触发，关闭方式：
+    /// 关闭按钮 / Esc / 点击面板背景 / 点击其他卡片。
     @ViewBuilder
     private func previewOverlay(item: ClipboardItem) -> some View {
         // 无全屏遮罩——预览直接悬浮在卡片上方。
@@ -408,60 +479,53 @@ struct ClipboardOverlayView: View {
             ClipboardPreviewCard(item: item,
                                 isExpanded: previewVisible,
                                 onClose: { closePreview() },
-                                onApply: { onReapply(item); closePreview() })
+                                onApply: { reapply(item); closePreview() })
                 .frame(width: 560, height: max(240, maxH))
                 .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                // 鼠标进入预览：取消关闭计时器
-                .onHover { hovering in
-                    if hovering {
-                        mouseInPreview = true
-                        closeTimer?.invalidate()
-                    } else {
-                        mouseInPreview = false
-                        scheduleClosePreview()
-                    }
-                }
         }
         .opacity(previewVisible ? 1 : 0)
+        .scaleEffect(previewVisible ? 1.0 : 0.92, anchor: .center)
+        .animation(.spring(response: 0.42, dampingFraction: 0.6), value: previewVisible)
         .zIndex(1000)
     }
 
     private func openPreview(_ item: ClipboardItem) {
-        // 取消任何待关闭的计时器
-        closeTimer?.invalidate()
         previewItem = item
-        withAnimation(.easeOut(duration: 0.2)) {
-            previewVisible = true
+        // 两阶段渲染：先设 previewVisible=false（初始 scale 0.92/opacity 0），
+        // 下一 render pass 切换为 true，让 SwiftUI 观察到值变化播放 spring 动画。
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.6)) {
+                previewVisible = true
+            }
         }
     }
 
     private func closePreview() {
-        hoverTimer?.invalidate()
-        closeTimer?.invalidate()
-        withAnimation(.easeOut(duration: 0.2)) {
+        let closedID = previewItem?.id
+        withAnimation(.easeOut(duration: 0.18)) {
             previewVisible = false
         }
         // 等动画结束后再移除视图，避免突兀消失。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-            if !previewVisible {
+        // 捕获关闭时的 item id，0.2s 后比较才置 nil——防止快速关再开预览时
+        // 旧 closePreview 的 asyncAfter 误清新的 previewItem。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if !previewVisible, previewItem?.id == closedID {
                 previewItem = nil
             }
         }
     }
 
-    /// 延迟 0.3 秒关闭预览。若鼠标在此期间进入预览卡片则取消关闭。
-    private func scheduleClosePreview() {
-        closeTimer?.invalidate()
-        closeTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
-            if !mouseInPreview {
-                closePreview()
-            }
-        }
+    /// 触发复制/重应用：通过 controller 路由，避免在视图内捕获大量闭包。
+    private func reapply(_ item: ClipboardItem) {
+        controller.dismiss()
+        controller.onReapply?(item)
     }
 
     /// 空格键触发：若预览已开则关闭；否则预览当前选中卡片。
     private func handleSpaceKey() {
-        let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+        // 用 focusTarget 判断搜索框聚焦，避免 NSApp.keyWindow 在 nonactivatingPanel
+        // 场景下取错导致误判。
+        let editingText = focusTarget == .search
         if previewIsOpen {
             closePreview()
         } else if !editingText,
@@ -472,7 +536,7 @@ struct ClipboardOverlayView: View {
 
     /// ←/→ 切换选中卡片。搜索框聚焦时不拦截，让 TextField 处理光标移动。
     private func handleArrow(direction: Int) {
-        let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+        let editingText = focusTarget == .search
         guard !editingText, !filtered.isEmpty else { return }
         if previewIsOpen { closePreview() }
         // 循环导航：到达边界后绕回另一端。
@@ -482,11 +546,11 @@ struct ClipboardOverlayView: View {
 
     /// 回车复制当前选中卡片。搜索框聚焦时不拦截（让 TextField 提交）。
     private func handleEnter() {
-        let editingText = NSApp.keyWindow?.firstResponder is NSTextView
+        let editingText = focusTarget == .search
         guard !editingText, filtered.indices.contains(selectedIndex) else { return }
         let item = filtered[selectedIndex]
         if previewIsOpen { closePreview() }
-        onReapply(item)
+        reapply(item)
     }
 
     /// 搜索/筛选导致列表缩短时，把 selectedIndex 拉回有效范围；
@@ -510,58 +574,73 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         var onSpace: () -> Void = {}
         var onCmdF: () -> Void = {}
         var onEsc: () -> Void = {}
+        /// 由父视图传入的焦点判断闭包。用 focusTarget == .search 替代
+        /// NSApp.keyWindow?.firstResponder is NSTextView——后者在 nonactivatingPanel
+        /// 场景下可能取错 key window 导致误判，且会被预览态的 selectable NSTextView 干扰。
+        var isEditingText: () -> Bool = { false }
         var monitor: Any?
+
+        func updateMonitoring(isActive: Bool) {
+            if isActive, monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self else { return event }
+                    return self.handle(event)
+                }
+            } else if !isActive, let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func handle(_ event: NSEvent) -> NSEvent? {
+            if event.keyCode == 53 {  // Esc
+                onEsc()
+                return nil
+            }
+            if event.keyCode == 3 && event.modifierFlags.contains(.command) {
+                onCmdF()
+                return nil
+            }
+            switch event.keyCode {
+            case 123:
+                if isEditingText() { return event }
+                onArrowLeft()
+                return nil
+            case 124:
+                if isEditingText() { return event }
+                onArrowRight()
+                return nil
+            case 36:
+                if isEditingText() { return event }
+                onEnter()
+                return nil
+            case 49:
+                if isEditingText() { return event }
+                onSpace()
+                return nil
+            default:
+                return event
+            }
+        }
+
+        func stopMonitoring() {
+            updateMonitoring(isActive: false)
+        }
     }
 
+    var isActive: Bool
     var onArrowLeft: () -> Void
     var onArrowRight: () -> Void
     var onEnter: () -> Void
     var onSpace: () -> Void
     var onCmdF: () -> Void
     var onEsc: () -> Void
+    var isEditingText: () -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        let coordinator = context.coordinator
-        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Esc 始终拦截：搜索态清空查询回卡片，卡片态关闭面板。
-            // ClipboardPanelController 不再监听 Esc，全部由此处统一处理。
-            if event.keyCode == 53 {  // Esc
-                coordinator.onEsc()
-                return nil
-            }
-            // ⌘F：切换到搜索框。keyCode 3 = 'F'。
-            if event.keyCode == 3 && event.modifierFlags.contains(.command) {
-                coordinator.onCmdF()
-                return nil
-            }
-            // keyCode: 123=←, 124=→, 36=Enter, 49=Space
-            switch event.keyCode {
-            case 123:  // left arrow
-                let editing = NSApp.keyWindow?.firstResponder is NSTextView
-                if editing { return event }
-                coordinator.onArrowLeft()
-                return nil
-            case 124:  // right arrow
-                let editing = NSApp.keyWindow?.firstResponder is NSTextView
-                if editing { return event }
-                coordinator.onArrowRight()
-                return nil
-            case 36:   // Enter
-                let editing = NSApp.keyWindow?.firstResponder is NSTextView
-                if editing { return event }
-                coordinator.onEnter()
-                return nil
-            case 49:   // space
-                coordinator.onSpace()
-                return nil
-            default:
-                return event
-            }
-        }
-        return view
+        NSView()
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -572,13 +651,12 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         coordinator.onSpace = onSpace
         coordinator.onCmdF = onCmdF
         coordinator.onEsc = onEsc
+        coordinator.isEditingText = isEditingText
+        coordinator.updateMonitoring(isActive: isActive)
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        if let monitor = coordinator.monitor {
-            NSEvent.removeMonitor(monitor)
-            coordinator.monitor = nil
-        }
+        coordinator.stopMonitoring()
     }
 }
 
@@ -602,11 +680,8 @@ private struct ClipboardPreviewCard: View {
     /// 异步加载的图片文件预览（仅 .file kind 且为图片文件时）。
     @State private var loadedFileImage: NSImage?
 
-    private var headerForeground: Color {
-        let ns = item.sourceAppTint.usingColorSpace(.sRGB) ?? NSColor.systemBlue.usingColorSpace(.sRGB)!
-        let luminance = 0.299 * ns.redComponent + 0.587 * ns.greenComponent + 0.114 * ns.blueComponent
-        return luminance > 0.6 ? .black : .white
-    }
+    // 直接复用 ClipboardItem 缓存的 headerForeground，避免每次 body 重算 luminance。
+    private var headerForeground: Color { item.headerForeground }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -626,19 +701,30 @@ private struct ClipboardPreviewCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.3), radius: 16, y: 4)
         .task {
-            // 若为单图片文件，异步加载 NSImage 预览。
+            // 若为单图片文件，后台加载避免阻塞主线程。
+            // NSImage(contentsOf:) 是同步磁盘 I/O，在 .task（@MainActor）中
+            // 直接调用会冻结 UI。改用 Task.detached 在后台读取 Data，
+            // 再回主线程创建 NSImage(data:)。
             if case .file(let urls) = item.kind,
                let url = urls.first,
                urls.count == 1,
                ClipboardItem.isImageFile(url) {
-                let img = NSImage(contentsOf: url)
-                await MainActor.run { loadedFileImage = img }
+                let data = await Task.detached { try? Data(contentsOf: url) }.value
+                if let data {
+                    await MainActor.run { loadedFileImage = NSImage(data: data) }
+                }
+            }
+            // 冷数据图片（>7天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
+            // 预览卡片同样需要触发 warmUp，否则全屏预览显示空白。
+            if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
+                await item.warmUpAsync()
             }
         }
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        // 设计稿：[icon][name][badge]  [time][close-btn]
+        HStack(spacing: 8) {
             if let icon = item.sourceAppIcon {
                 Image(nsImage: icon)
                     .resizable()
@@ -648,16 +734,25 @@ private struct ClipboardPreviewCard: View {
             Text(item.sourceAppName ?? "未知")
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
-            Spacer(minLength: 0)
             Text(item.typeLabel)
                 .font(.system(size: 10, weight: .semibold))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(Capsule().fill(headerForeground.opacity(0.2)))
+                .background(Capsule().fill(headerForeground.opacity(0.22)))
+            Spacer(minLength: 0)
+            Text(RelativeTimeFormatter.string(from: item.createdAt, now: Date()))
+                .font(.system(size: 11))
+                .foregroundStyle(headerForeground.opacity(0.9))
+            // 设计稿：close-btn 22×22，bg rgba(255,255,255,0.2)，白色 X 图标
             Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(headerForeground.opacity(0.8))
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(0.2))
+                    )
             }
             .buttonStyle(.borderless)
             .help("关闭")
@@ -685,8 +780,8 @@ private struct ClipboardPreviewCard: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .image(let img):
-            Image(nsImage: img)
+        case .image:
+            Image(nsImage: item.imageThumbnail ?? NSImage())
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .padding(12)
@@ -805,14 +900,8 @@ private struct ClipboardCard: View {
 
     /// Decide whether the header text should be light or dark based on the
     /// tint's luminance — keeps the type/time legible on any app color.
-    private var headerForeground: Color {
-        // Convert to sRGB first — catalog colors (e.g. .systemBlue fallback)
-        // don't expose redComponent/greenComponent/blueComponent directly and
-        // will raise an exception if accessed without a color-space conversion.
-        let ns = item.sourceAppTint.usingColorSpace(.sRGB) ?? NSColor.systemBlue.usingColorSpace(.sRGB)!
-        let luminance = 0.299 * ns.redComponent + 0.587 * ns.greenComponent + 0.114 * ns.blueComponent
-        return luminance > 0.6 ? .black : .white
-    }
+    // 直接复用 ClipboardItem 缓存的 headerForeground，避免每次 body 重算 luminance。
+    private var headerForeground: Color { item.headerForeground }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -822,29 +911,41 @@ private struct ClipboardCard: View {
         }
         .frame(width: cardWidth, height: height)
         .background(
-            // 背景不透明：用接近白色的不透明背景增强卡片层次感，
-            // 避免扁平化。深色模式下用稍深的背景区分。
+            // 设计稿：卡片背景始终为 card 色，hover 不改变背景填充
             RoundedRectangle(cornerRadius: 12)
-                .fill(isHover ? Color.accentColor.opacity(0.15) : Color(nsColor: .windowBackgroundColor))
+                .fill(Color(nsColor: .windowBackgroundColor))
         )
         .overlay(
+            // 设计稿：默认 transparent 边框，hover 时 primary 边框 2px
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(isHover ? Color.accentColor.opacity(0.7) : .black.opacity(0.1),
-                              lineWidth: 1)
+                .strokeBorder(isHover ? Color.accentColor : .clear,
+                              lineWidth: isHover ? 2 : 0)
         )
-        // 增加阴影增强层次感，避免扁平化
-        .shadow(color: .black.opacity(0.15), radius: isHover ? 8 : 4, y: 2)
+        // 设计稿：hover 时 shadow-lg（更大阴影），默认 shadow-md
+        .shadow(color: .black.opacity(0.08), radius: isHover ? 8 : 4, y: isHover ? 4 : 2)
         .scaleEffect(isHover ? 1.04 : 1.0)
         .opacity(isDimmed ? 0.4 : 1.0)
         .transaction { $0.animation = nil }
         .task {
-            // 单图片文件异步加载缩略图，避免阻塞 UI。
+            // 单图片文件后台加载缩略图，避免阻塞主线程。
+            // NSImage(contentsOf:) 是同步磁盘 I/O，在 .task（@MainActor）中
+            // 直接调用会冻结 UI。改用 Task.detached 在后台读取 Data，
+            // 再回主线程创建 NSImage(data:)。
             if case .file(let urls) = item.kind,
                let url = urls.first,
                urls.count == 1,
                ClipboardItem.isImageFile(url) {
-                let img = NSImage(contentsOf: url)
-                await MainActor.run { loadedFileImage = img }
+                let data = await Task.detached { try? Data(contentsOf: url) }.value
+                if let data {
+                    await MainActor.run { loadedFileImage = NSImage(data: data) }
+                }
+            }
+            // 冷数据图片（>7天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
+            // 之前卡片渲染路径完全不触发 warmUp，冷数据图片显示空白 NSImage()。
+            // warmUpAsync 内部用 Task.detached 在后台读盘，回主线程更新 kind，
+            // 避免阻塞主线程。
+            if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
+                await item.warmUpAsync()
             }
         }
     }
@@ -852,7 +953,9 @@ private struct ClipboardCard: View {
     // MARK: - Top header
 
     private var header: some View {
-        HStack(spacing: 8) {
+        // 设计稿：[icon][app-name][type-badge]  [card-time(margin-left:auto)]
+        // badge 紧跟 name，时间用 Spacer 推到最右
+        HStack(spacing: 6) {
             if let icon = item.sourceAppIcon {
                 Image(nsImage: icon)
                     .resizable()
@@ -862,19 +965,19 @@ private struct ClipboardCard: View {
             Text(item.sourceAppName ?? "未知")
                 .font(.system(size: 12, weight: .semibold))
                 .lineLimit(1)
-            Spacer(minLength: 0)
             Text(item.typeLabel)
                 .font(.system(size: 10, weight: .semibold))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Capsule().fill(headerForeground.opacity(0.2)))
+                .background(Capsule().fill(headerForeground.opacity(0.22)))
+            Spacer(minLength: 0)
             Text(RelativeTimeFormatter.string(from: item.createdAt, now: Date()))
                 .font(.system(size: 10))
-                .foregroundStyle(headerForeground.opacity(0.8))
+                .foregroundStyle(headerForeground.opacity(0.85))
         }
         .foregroundStyle(headerForeground)
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .background(
             LinearGradient(
                 colors: [Color(nsColor: item.sourceAppTint), Color(nsColor: item.sourceAppTint).opacity(0.72)],
@@ -896,15 +999,12 @@ private struct ClipboardCard: View {
     private var previewContent: some View {
         switch item.kind {
         case .text(let s):
-            // 若有 RTF 富文本（如 VSCode/Xcode 复制的代码），用 AttributedString
-            // 渲染保留颜色/字体样式；否则回退普通 Text。Text 不可交互，不拦截
-            // 卡片的点击/右键。
-            if let rtf = item.rtfData,
-               let nsAttr = try? NSAttributedString(
-                   data: rtf,
-                   options: [.documentType: NSAttributedString.DocumentType.rtf],
-                   documentAttributes: nil) {
-                Text(AttributedString(nsAttr))
+            // 若有 RTF 富文本（如 VSCode/Xcode 复制的代码），用缓存的
+            // AttributedString 渲染保留颜色/字体样式；否则回退普通 Text。
+            // 之前每次 body 都重新解析 RTF，100 张卡片滚动时严重卡顿。
+            // 现在从 ClipboardItem.cachedAttributedString 取缓存结果。
+            if let attr = item.cachedAttributedString {
+                Text(attr)
                     .font(.system(size: 12, design: .monospaced))
                     .lineLimit(12)
                     .multilineTextAlignment(.leading)
@@ -930,8 +1030,8 @@ private struct ClipboardCard: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
             }
-        case .image(let img):
-            Image(nsImage: img)
+        case .image:
+            Image(nsImage: item.fullImage ?? NSImage())
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .padding(8)

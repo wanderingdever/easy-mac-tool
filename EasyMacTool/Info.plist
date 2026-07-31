@@ -31,6 +31,6 @@
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>EasyMacTool needs Screen Recording access to show live window previews in the switcher.</string>
+	<string>EasyMacTool 需要屏幕录制权限，才能在窗口切换器中显示窗口实时预览。</string>
 </dict>
 </plist>

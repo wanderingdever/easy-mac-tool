@@ -1,0 +1,220 @@
+{
+  "data": [
+    {
+      "id": "page-switcher",
+      "type": "page",
+      "name": "窗口切换器",
+      "title": "窗口切换器",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 0,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 752,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-d3b2ae44",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/switcher.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-clipboard",
+      "type": "page",
+      "name": "剪切板历史",
+      "title": "剪切板历史",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 620,
+        "y": 0,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-b274c176",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/clipboard.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-settings-window",
+      "type": "page",
+      "name": "设置 · 窗口切换",
+      "title": "设置 · 窗口切换",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 0,
+        "y": 377,
+        "group": 1,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-b629cc2d",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/settings-window.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-settings-clipboard",
+      "type": "page",
+      "name": "设置 · 剪切板",
+      "title": "设置 · 剪切板",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 620,
+        "y": 377,
+        "group": 1,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-f4b2e43a",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/settings-clipboard.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-settings-permissions",
+      "type": "page",
+      "name": "设置 · 权限",
+      "title": "设置 · 权限",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 1236,
+        "y": 377,
+        "group": 1,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-115bce99",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/settings-permissions.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "page-menubar",
+      "type": "page",
+      "name": "菜单栏 · 关于",
+      "title": "菜单栏 · 关于",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 0,
+        "y": 754,
+        "group": 2,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-f4bcb1b7",
+          "measuredAt": 1785483103485
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/menubar.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "image-001",
+      "type": "image",
+      "name": "App 图标",
+      "title": "App 图标",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 0,
+        "y": 1116,
+        "overrideWidth": 384,
+        "naturalSize": {
+          "width": 1024,
+          "height": 1024
+        }
+      },
+      "devMetadata": {
+        "imageSrc": "assets/app-icon-v3.png"
+      }
+    },
+    {
+      "id": "image-002",
+      "type": "image",
+      "name": "菜单栏图标 · 黑白",
+      "title": "菜单栏图标 · 黑白 (Template)",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 516,
+        "y": 1080,
+        "naturalSize": {
+          "width": 512,
+          "height": 512
+        }
+      },
+      "devMetadata": {
+        "imageSrc": "assets/menubar-icon-bw-v3.png"
+      }
+    },
+    {
+      "id": "image-003",
+      "type": "image",
+      "name": "菜单栏图标 · 彩色",
+      "title": "菜单栏图标 · 彩色",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 1044,
+        "y": 1092,
+        "naturalSize": {
+          "width": 512,
+          "height": 512
+        }
+      },
+      "devMetadata": {
+        "imageSrc": "assets/menubar-icon-color-v3.png"
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": false,
+    "deviceType": "desktop",
+    "designLibrary": {
+      "name": "苹果",
+      "id": "dl_builtin_apple",
+      "version": "",
+      "scope": "built-in-global",
+      "path": "/Users/matt/.trae-cn/design_libraries/dl_builtin_apple",
+      "versionSource": "metadata.json"
+    },
+    "visualEditorEnabled": false,
+    "showEdge": false
+  }
+}

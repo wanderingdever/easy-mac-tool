@@ -24,7 +24,7 @@ struct WindowThumbnailCell: View {
         let maxWidth = size.thumbnailWidth
         let maxHeight = size.thumbnailHeight
         // Placeholder apps have frame .zero — use the full preview box.
-        if item.isPlaceholder || item.frame == .zero {
+        if item.frame == .zero {
             return CGSize(width: maxWidth, height: maxHeight)
         }
         let aspect = item.aspectRatio
@@ -42,11 +42,11 @@ struct WindowThumbnailCell: View {
             // the thumbnail's varying height (driven by per-window aspect
             // ratio). Previously the title sat below the thumbnail, causing
             // title rows to land at different vertical positions — "高低错落".
-            HStack(spacing: 6) {
+            HStack(spacing: DesignTokens.Spacing.sm) {
                 if let icon = item.appIcon {
                     Image(nsImage: icon)
                         .resizable()
-                        .frame(width: 16, height: 16)
+                        .frame(width: 18, height: 18)
                 }
                 Text(item.title)
                     .font(.system(size: 13, weight: .medium))
@@ -63,21 +63,33 @@ struct WindowThumbnailCell: View {
                         .strokeBorder(item.isActiveWindow ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 2)
                 )
         }
-        .padding(10)
+        // Padding compensation: selected state uses 2pt border vs default 1pt,
+        // so reduce padding by 1pt to keep the cell's total size constant
+        // (design spec: .is-selected padding 10→9). This prevents layout shift.
+        .padding(isSelected ? 9 : 10)
         .background(
             // 选中态（键盘 Tab）：accentColor 填充（macOS 原生高亮风格）。
             // 悬停态（鼠标预瞄）：极淡填充，比选中态浅很多，仅作视觉标记。
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)
                 .fill(isSelected ? Color.accentColor.opacity(0.25)
                       : (isHover ? Color.accentColor.opacity(0.08) : .clear))
         )
         .overlay(
             // 边框优先级：选中（强）> 悬停（浅）> 无。
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            // 设计稿：selected = 2px solid primary（不透明），hover = 1.5px primary 55%。
+            RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)
                 .strokeBorder(
-                    isSelected ? Color.accentColor.opacity(0.9)
-                    : (isHover ? Color.accentColor.opacity(0.45) : .clear),
+                    isSelected ? Color.accentColor
+                    : (isHover ? Color.accentColor.opacity(0.55) : .clear),
                     lineWidth: isSelected ? 2 : 1.5
+                )
+        )
+        .overlay(
+            // Default (non-selected, non-hover) subtle border: foreground 7%.
+            RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)
+                .strokeBorder(
+                    (!isSelected && !isHover) ? Color.primary.opacity(0.07) : .clear,
+                    lineWidth: 1
                 )
         )
         // Disable animation so selection changes feel instant.
@@ -85,17 +97,25 @@ struct WindowThumbnailCell: View {
     }
 
     /// The thumbnail content, sized exactly to the window's aspect ratio.
+    ///
+    /// 呈现策略：
+    /// - visible 窗口有捕获图：显示实时/缓存预览（无角标）
+    /// - minimized/hidden/placeholder：统一显示 app icon + 状态角标
+    ///   ScreenCaptureKit 无法实时捕获离屏窗口，缓存预览可能过时误导用户，
+    ///   因此离屏窗口一律显示 app icon（与 placeholder 一致）。
+    ///   用户通过窗口标题和状态角标区分各离屏窗口。
     @ViewBuilder
     private var thumbnail: some View {
-        if let image = item.latestImage {
+        if !item.isOffScreen, let image = item.latestImage {
+            // visible 窗口有捕获图：显示实时/缓存预览
             Image(decorative: image, scale: 1.0)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-        } else if item.isPlaceholder || item.isOffScreen {
-            // Placeholder apps OR minimized/hidden windows: show a large app
-            // icon on a subtle background. Capturing hidden windows via
-            // ScreenCaptureKit fails or returns a black frame, so we never
-            // attempt it — the icon is a clear, stable placeholder.
+        } else if item.isOffScreen {
+            // placeholder / minimized / hidden：统一 app icon 占位 + 状态角标
+            // Capturing hidden/minimized windows via ScreenCaptureKit fails or
+            // returns a black frame, so we never attempt it — the icon is a
+            // clear, stable placeholder. 不显示缓存预览，避免过时画面误导用户。
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(.quaternary.opacity(0.3))
@@ -112,8 +132,11 @@ struct WindowThumbnailCell: View {
                 }
             }
             .frame(width: thumbnailSize.width, height: thumbnailSize.height)
+            .overlay(alignment: .bottomTrailing) {
+                stateBadge
+            }
         } else {
-            // 首次启动缓存为空时短暂显示淡色 app icon 占位。
+            // visible 窗口首次启动缓存为空时短暂显示淡色 app icon 占位。
             // 由于 WindowEnumerator 已从 WindowPreviewCache 预填充，此分支
             // 仅在缓存完全未命中时短暂可见——并行捕获完成后批量替换。
             // 不用 ProgressView 转圈，视觉上更接近系统原生切换器。
@@ -131,5 +154,34 @@ struct WindowThumbnailCell: View {
             }
             .frame(width: thumbnailSize.width, height: thumbnailSize.height)
         }
+    }
+
+    /// 状态角标：minimized/hidden 窗口显示对应 SF Symbol，让用户一眼区分窗口状态。
+    /// visible 窗口和 placeholder 不显示角标。
+    /// 设计稿：22×22 圆形徽标，位于缩略图右下角 (right:8, bottom:8)，内部图标 13×13。
+    @ViewBuilder
+    private var stateBadge: some View {
+        switch item.windowState {
+        case .visible:
+            EmptyView()
+        case .minimized:
+            stateBadgeContent(systemName: "minus.rectangle.fill")
+        case .hidden:
+            stateBadgeContent(systemName: "eye.slash.fill")
+        }
+    }
+
+    /// 共用的徽标视图：13pt 图标 + 4.5pt padding → 22pt 圆形，背景半透明材质 + 细边框。
+    @ViewBuilder
+    private func stateBadgeContent(systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13))
+            .foregroundStyle(.primary)
+            .frame(width: 22, height: 22)
+            .background(Circle().fill(.regularMaterial))
+            .overlay(
+                Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+            .padding(8)
     }
 }

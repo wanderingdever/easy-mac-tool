@@ -19,19 +19,24 @@ struct BlackEMenuBarIcon: View {
 
 /// 用 NSImage 绘制"E"字母：SF Pro Rounded 字体（系统圆体），饱满居中，
 /// isTemplate=true 让菜单栏自动用单色渲染（深色模式白、浅色模式黑）。
+///
+/// 画布 22pt、字形 17pt heavy weight——让 E 字形高度约 13pt，与菜单栏
+/// 监控数值（10pt light monospaced 字形约 7pt 高）形成清晰的视觉权重：
+/// E 图标更显著，但仍能与右侧数值垂直对齐。
 enum BlackEIconRenderer {
     static func render() -> NSImage {
-        // 画布 18pt：菜单栏 status item 标准尺寸。
-        let size = NSSize(width: 18, height: 18)
+        // 画布 22pt：略大于系统 status item 默认高度（22pt），保证 E 形
+        // 在菜单栏中视觉饱满。
+        let size = NSSize(width: 22, height: 22)
         let image = NSImage(size: size)
         image.lockFocus()
 
         // 圆体设计字体（SF Pro Rounded），契合 macOS 视觉语言。
-        // weight=.heavy 保证 E 在 18pt 下视觉饱满少留白；size=15 让字形几乎
-        // 填满画布高度（实际字形高度约 11pt，留上下边距以视觉居中）。
-        let baseFont = NSFont.systemFont(ofSize: 15, weight: .heavy)
+        // weight=.heavy 让 E 形在小尺寸下笔画饱满；size=18 让字形几乎填满
+        // 画布高度（实际字形高度约 13pt，留上下边距以视觉居中）。
+        let baseFont = NSFont.systemFont(ofSize: 18, weight: .heavy)
         let descriptor = baseFont.fontDescriptor.withDesign(.rounded) ?? baseFont.fontDescriptor
-        let font = NSFont(descriptor: descriptor, size: 15) ?? baseFont
+        let font = NSFont(descriptor: descriptor, size: 18) ?? baseFont
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,

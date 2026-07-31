@@ -15,7 +15,14 @@ import Foundation
 
 let output = CommandLine.arguments.count > 1
     ? CommandLine.arguments[1]
-    : "/Users/matt/Documents/programs/EasyMacTool/EasyMacTool/Assets.xcassets/AppIcon.appiconset/AppIcon_1024.png"
+    : {
+        // 基于脚本所在目录推导默认输出路径，避免硬编码绝对路径
+        // 在仓库迁移或他人构建时失效。
+        let scriptDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        return scriptDir
+            .appendingPathComponent("../EasyMacTool/Assets.xcassets/AppIcon.appiconset/AppIcon_1024.png")
+            .standardizedFileURL.path
+    }()
 
 let size = 1024
 let cs = CGColorSpaceCreateDeviceRGB()

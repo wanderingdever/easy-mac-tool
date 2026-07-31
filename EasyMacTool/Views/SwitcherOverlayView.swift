@@ -9,10 +9,9 @@ import SwiftUI
 ///   hovered one.
 /// No entrance animation — loads instantly like Windows.
 ///
-/// Layout: thumbnails wrap to the next row when the current row is full.
-/// There is NEVER a scroll bar — the panel grows vertically to fit all rows
-/// (see OverlayPanelController.positionPanel). This works for any preview
-/// size and any window count.
+/// Layout: header (indicator + title + count) → wrapping thumbnail grid →
+/// footer (keyboard hint bar). The panel grows vertically to fit all rows
+/// (see OverlayPanelController.positionPanel).
 struct SwitcherOverlayView: View {
     @ObservedObject var controller: OverlayPanelController
     /// Called on mouse hover to set the visual aim index (lighter border).
@@ -21,41 +20,43 @@ struct SwitcherOverlayView: View {
     var onActivate: (Int) -> Void
 
     var body: some View {
-        FlowLayout(spacing: 12) {
-            ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
-                WindowThumbnailCell(
-                    item: item,
-                    isSelected: index == controller.selectedIndex,
-                    isHover: index == controller.hoverIndex,
-                    size: controller.previewSize
-                )
-                .contentShape(Rectangle())
-                .onHover { hovering in
-                    // Hover only sets the visual aim — does NOT change
-                    // selectedIndex or trigger the live stream. Click is
-                    // required to commit the selection.
-                    onHoverChange(hovering ? index : nil)
-                }
-                .onTapGesture {
-                    // Click promotes hover→selection AND activates the window.
-                    onActivate(index)
+        VStack(spacing: 0) {
+            FlowLayout(spacing: DesignTokens.Spacing.md) {
+                ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
+                    WindowThumbnailCell(
+                        item: item,
+                        isSelected: index == controller.selectedIndex,
+                        isHover: index == controller.hoverIndex,
+                        size: controller.previewSize
+                    )
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        // Hover only sets the visual aim — does NOT change
+                        // selectedIndex or trigger the live stream. Click is
+                        // required to commit the selection.
+                        onHoverChange(hovering ? index : nil)
+                    }
+                    .onTapGesture {
+                        // Click promotes hover→selection AND activates the window.
+                        onActivate(index)
+                    }
                 }
             }
         }
-        .padding(20)
+        .padding(DesignTokens.Spacing.lg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             // macOS 原生 HUD/Spotlight 风格毛玻璃：ultraThinMaterial 最通透，
-            // 叠加一层极淡白色让整体有玻璃质感。背景撑满 hosting.view，
+            // 可加一层极淡白色让整体有玻璃质感。背景撑满 hosting.view，
             // 四角圆角由 hosting.view.layer cornerRadius=24 裁剪，完全一致。
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
                         .fill(.white.opacity(0.06))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
                         .strokeBorder(.white.opacity(0.15), lineWidth: 1)
                 )
         )
@@ -67,5 +68,28 @@ struct SwitcherOverlayView: View {
         .animation(nil, value: controller.items.count)
         .animation(nil, value: controller.selectedIndex)
         .animation(nil, value: controller.hoverIndex)
+    }
+
+
+    /// A single keyboard hint: a kbd badge + a description label.
+    @ViewBuilder
+    private func kbdHint(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 6) {
+            Text(key)
+                .font(.system(size: 10.5, weight: .semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                )
+            Text(label)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+        }
     }
 }

@@ -47,6 +47,12 @@ final class WheelRedirectScrollView: NSScrollView {
     }
 }
 
+/// Type-erased coordinator (extracted from generic context to avoid
+/// Swift 6.3 SIL optimizer crash on generic class deinit).
+final class HWSVCoordinator {
+    var hostingController: Any?
+}
+
 /// 用 NSHostingController 承载 SwiftUI 内容的横向滚动视图。
 /// documentView 的宽度自动跟随 SwiftUI 内容的 intrinsic 大小，
 /// 高度锚定到 contentView 高度。
@@ -57,12 +63,8 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
         self.content = content()
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    final class Coordinator {
-        var hostingController: NSHostingController<Content>?
+    func makeCoordinator() -> HWSVCoordinator {
+        HWSVCoordinator()
     }
 
     func makeNSView(context: Context) -> WheelRedirectScrollView {
@@ -95,6 +97,6 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WheelRedirectScrollView, context: Context) {
-        context.coordinator.hostingController?.rootView = content
+        (context.coordinator.hostingController as? NSHostingController<Content>)?.rootView = content
     }
 }

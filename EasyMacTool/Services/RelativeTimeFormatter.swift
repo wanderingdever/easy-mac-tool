@@ -10,6 +10,15 @@ import Foundation
 /// - older this week: N天前 (3天前 … 5天前 …)
 /// - older: absolute short date (e.g. 6月12日)
 enum RelativeTimeFormatter {
+    /// 复用 DateFormatter：初始化昂贵，每张剪贴板卡片渲染都会调用，
+    /// 之前每次新建导致历史较多时性能浪费。
+    private static let absoluteDateFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "M月d日"
+        return fmt
+    }()
+
     static func string(from date: Date, now: Date = Date()) -> String {
         let cal = Calendar.current
         let interval = now.timeIntervalSince(date)
@@ -34,10 +43,7 @@ enum RelativeTimeFormatter {
             return "\(dayDiff)天前"
         }
         // Beyond a week: fall back to an absolute date without year.
-        let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "zh_CN")
-        fmt.dateFormat = "M月d日"
-        return fmt.string(from: date)
+        return Self.absoluteDateFormatter.string(from: date)
     }
 }
 
@@ -245,5 +251,38 @@ enum ColorStringParser {
         guard let open = s.firstIndex(of: "("),
               let close = s.lastIndex(of: ")") else { return "" }
         return String(s[s.index(after: open)..<close])
+    }
+}
+
+/// Caches app icons by bundle identifier so ClipboardItem doesn't need to
+/// hold its own NSImage copy per entry. Without this cache, copying 100
+/// items from the same app would retain 100 copies of its icon NSImage.
+///
+/// Lookup is O(1) on cache hit; on miss it scans NSWorkspace.runningApplications
+/// (acceptable since most apps are cached after first hit).
+@MainActor
+enum AppIconCache {
+    private static var cache: [String: NSImage] = [:]
+
+    /// Returns the cached icon for the given bundle ID, or looks it up from
+    /// NSWorkspace and caches it. Returns nil for unknown / not-running apps.
+    static func icon(for bundleID: String?) -> NSImage? {
+        guard let bundleID else { return nil }
+        if let cached = cache[bundleID] { return cached }
+        // Scan running applications for the matching bundle ID.
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+              let icon = app.icon else { return nil }
+        cache[bundleID] = icon
+        return icon
+    }
+
+    /// Pre-warms the cache for the given bundle ID + icon pair (used when
+    /// ClipboardManager captures the source app icon at snapshot time — we
+    /// already have the icon, no need to re-scan running apps).
+    static func prewarm(_ icon: NSImage, for bundleID: String?) {
+        guard let bundleID else { return }
+        if cache[bundleID] == nil {
+            cache[bundleID] = icon
+        }
     }
 }

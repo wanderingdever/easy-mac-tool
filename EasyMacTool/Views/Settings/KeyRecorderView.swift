@@ -2,47 +2,120 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 
-/// A control that displays the current key combo and, when "录制" is clicked,
-/// captures the next key press and updates the bound `keyCode`/`modifiers`.
-/// During recording, the global CGEventTap is disabled so key presses are not
-/// intercepted by the switcher.
+/// A single button-like key-combo recorder matching `设置 · 剪切板.html`'s
+/// `.key-recorder`: bordered box, mono font, inset shadow, shows the current
+/// combo (e.g. ⌘⇧V); click to start recording, click again / Esc / 10s
+/// timeout to cancel. While recording, the global CGEventTap is disabled so
+/// key presses are not intercepted by the switcher.
 struct KeyRecorderView: View {
     @Binding var keyCode: CGKeyCode
     @Binding var modifiers: CGEventFlags
+    /// Return a user-facing reason to reject a recorded combination.
+    var validationMessage: (CGKeyCode, CGEventFlags) -> String? = { _, _ in nil }
 
     @State private var isRecording = false
     @State private var monitor: Any?
+    @State private var rejectionMessage: String?
+    /// 录制超时 timer：10 秒后自动取消录制，防止 isRecording 卡住
+    /// （如设置窗口在录制期间被非正常关闭，.onDisappear 未触发）。
+    /// isRecording 卡住会导致 HotkeyManager 所有按键 pass through，
+    /// 包括 Cmd+Shift+V 呼出剪切板快捷键。
+    @State private var recordingTimeout: Timer?
 
     var body: some View {
-        HStack(spacing: 8) {
-            if isRecording {
-                Text("按下快捷键…")
-                    .foregroundStyle(.secondary)
-                Button("取消") { stopRecording() }
-                    .buttonStyle(.borderless)
-            } else {
-                Text(KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
-                    .font(.system(.body, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(.quaternary))
-                Button("录制") { startRecording() }
-                    .buttonStyle(.borderless)
+        VStack(alignment: .leading, spacing: 4) {
+            button
+            if let rejectionMessage {
+                Text(rejectionMessage)
+                    .font(.caption)
+                    .foregroundStyle(DesignTokens.Colors.error)
             }
         }
         .onDisappear { stopRecording() }
     }
 
+    private var button: some View {
+        Button {
+            if isRecording {
+                stopRecording()
+            } else {
+                startRecording()
+            }
+        } label: {
+            Group {
+                if isRecording {
+                    Text("按下快捷键…")
+                        .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
+                        .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                } else {
+                    // kbd: 15pt mono, 0.04em letter-spacing (~0.6 tracking).
+                    Text(KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
+                        .font(.system(size: 15, design: .monospaced))
+                        .tracking(0.6)
+                        .foregroundStyle(DesignTokens.Colors.foreground)
+                }
+            }
+            .frame(minWidth: 90)
+            .padding(.vertical, 5)
+            .padding(.horizontal, 14)
+            .background(
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
+                    .fill(DesignTokens.Colors.background)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
+                    .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
+            )
+            // Subtle inset shadow for the recessed control look (design: inset 0 1px 2px rgba(0,0,0,0.06)).
+            .overlay(
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.06), Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 1
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous))
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onExitCommand {
+            // Esc cancels recording (only meaningful while recording).
+            if isRecording { stopRecording() }
+        }
+    }
+
     private func startRecording() {
+        // 防重入守卫：SwiftUI 重绘是异步的，用户在按钮变为「取消」前可能连点
+        // 两次，导致旧 monitor 引用被覆盖而永久泄漏。泄漏的 monitor 会持续
+        // 拦截按键并悄悄修改快捷键，用户难以察觉。
+        guard monitor == nil else { return }
+        rejectionMessage = nil
         isRecording = true
         // Disable the global event tap so it doesn't intercept the key being
         // recorded. The recorder needs to see the raw keypress.
-        HotkeyManager.shared.isRecording = true
+        // 引用计数语义：多个录制器同时处于录制态时互不干扰。
+        HotkeyManager.shared.beginRecording()
 
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             // Ignore bare modifier presses; wait for the actual key.
             if event.type == .flagsChanged { return event }
             guard event.type == .keyDown else { return event }
+
+            // Esc cancels recording without recording a combo.
+            if event.keyCode == 53 {
+                stopRecording()
+                return nil
+            }
 
             let nsFlags = event.modifierFlags.intersection([.command, .option, .shift, .control])
             // Require at least one modifier (otherwise it's a normal keypress).
@@ -56,20 +129,33 @@ struct KeyRecorderView: View {
             if nsFlags.contains(.option)  { cgFlags.insert(.maskAlternate) }
             if nsFlags.contains(.shift)  { cgFlags.insert(.maskShift) }
             if nsFlags.contains(.control) { cgFlags.insert(.maskControl) }
-            keyCode = CGKeyCode(event.keyCode)
+            let keyCode = CGKeyCode(event.keyCode)
+            if let message = validationMessage(keyCode, cgFlags) {
+                rejectionMessage = message
+                NSSound.beep()
+                return nil
+            }
+            self.keyCode = keyCode
             modifiers = cgFlags
             stopRecording()
             return nil
         }
+        // 10 秒超时自动取消录制。防止设置窗口在录制期间被 Cmd+W 关闭、
+        // .onDisappear 未触发导致 isRecording 永久为 true、所有快捷键失效。
+        recordingTimeout = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in
+            stopRecording()
+        }
     }
 
     private func stopRecording() {
+        recordingTimeout?.invalidate()
+        recordingTimeout = nil
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
         }
         isRecording = false
-        // Re-enable the global event tap.
-        HotkeyManager.shared.isRecording = false
+        // Re-enable the global event tap（引用计数 -1，归零才恢复拦截）。
+        HotkeyManager.shared.endRecording()
     }
 }
