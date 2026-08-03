@@ -152,36 +152,60 @@ final class WindowEnumerator {
             // Step 1: 处理 SCShareableContent 返回的 visible 窗口
             var hasVisibleItem = false
             // 过滤弹出层 UI（Edge 地址栏下拉、IME 候选框、菜单、tooltip 等）。
+            // 多信号检测，任一命中即判为弹出层：
             //
-            // 主判断：kCGWindowLayer != 0 → 弹出层/浮动面板/菜单。
+            // 信号 1：kCGWindowLayer != 0 → 弹出层/浮动面板/菜单。
             //   layer == 0：普通文档窗口（主窗口、次级文档窗口、全屏游戏）。
             //   layer  > 0：浮动层（Cmd+Tab 和 Mission Control 也不显示这些）。
             //   这与 macOS 原生 Cmd+Tab 行为一致——不是启发式，是系统语义。
             //   SCWindow.windowID 与 kCGWindowNumber 是同一个 WindowServer ID，
             //   可直接匹配，开销极低。
             //
-            // 兜底：frame 被同 app 更大窗口完全包含 → 也判为弹出层。
-            //   仅在 layer 信息缺失（CGWindowList 未返回该窗口）时生效。
+            // 信号 2：frame 被同 app 更大窗口完全包含 → 弹出层。
+            //   Edge/Chrome 地址栏下拉（omnibox popup）是主窗口的子窗口，
+            //   kCGWindowLayer 为 0，但 frame 完全落在主窗口内。
+            //
+            // 信号 3：无标题 且与同 app 更大窗口重叠面积 ≥60% → 弹出层。
+            //   覆盖"半包含"场景：窗口较矮时地址栏下拉会从窗口底边探出
+            //   （完全包含判定失败）；JetBrains IDE 的补全/文档弹窗也是
+            //   layer 0、无标题、与编辑器窗口部分重叠的重量级窗口。
+            //   合法文档窗口几乎都有标题，误伤风险低。
             let largeWindows = visibleWindows.filter {
                 $0.frame.width >= 400 && $0.frame.height >= 300
             }
             let validVisibleWindows = visibleWindows.filter { window in
                 guard window.frame.width >= 80 && window.frame.height >= 80 else { return false }
-                // 主判断：layer != 0 是弹出层
-                if let layer = layerMap[window.windowID] {
-                    if layer != 0 {
-                        Self.logger.debug("  filtered out by layer=\(layer, privacy: .public): title=\(window.title ?? "nil", privacy: .public)")
+                // 信号 1：layer != 0 是弹出层
+                if let layer = layerMap[window.windowID], layer != 0 {
+                    Self.logger.debug("  filtered out by layer=\(layer, privacy: .public): title=\(window.title ?? "nil", privacy: .public)")
+                    return false
+                }
+                let windowArea = window.frame.width * window.frame.height
+                // 比 window 更大的同 app 窗口（等大的不算，避免两个主窗口互判）
+                let biggerWindows = largeWindows.filter {
+                    $0.windowID != window.windowID
+                        && $0.frame.width * $0.frame.height > windowArea
+                }
+                // 信号 2：被更大窗口完全包含
+                let isContained = biggerWindows.contains { $0.frame.contains(window.frame) }
+                if isContained {
+                    Self.logger.debug("  filtered out as contained popup: title=\(window.title ?? "nil", privacy: .public)")
+                    return false
+                }
+                // 信号 3：无标题 + 与更大窗口高重叠（探出边界的下拉/补全弹窗）
+                let hasTitle = !(window.title?.isEmpty ?? true)
+                if !hasTitle {
+                    let isOverlappingPopup = biggerWindows.contains { main in
+                        let overlap = main.frame.intersection(window.frame)
+                        guard !overlap.isNull else { return false }
+                        return (overlap.width * overlap.height) / windowArea >= 0.6
+                    }
+                    if isOverlappingPopup {
+                        Self.logger.debug("  filtered out as untitled overlapping popup for app \(appName, privacy: .public)")
                         return false
                     }
-                    // layer == 0：普通文档窗口，直接通过
-                    return true
                 }
-                // 兜底：layer 信息缺失时（CGWindowList 未返回该窗口），
-                // 用 frame 被更大窗口包含判断弹出层
-                let isContained = largeWindows.contains { main in
-                    main.windowID != window.windowID && main.frame.contains(window.frame)
-                }
-                return !isContained
+                return true
             }
 
             for window in validVisibleWindows {
