@@ -68,6 +68,7 @@ final class HotkeyManager {
 
     /// 退出快捷键录制（引用计数 -1，归零才真正恢复 event tap 拦截）。
     func endRecording() {
+        assert(recordingSessions > 0, "beginRecording/endRecording not paired")
         recordingSessions = max(0, recordingSessions - 1)
         isRecording = recordingSessions > 0
     }
@@ -268,9 +269,9 @@ final class HotkeyManager {
             case VK.rightArrow, VK.downArrow:
                 onEvent?(.next); return nil
             case VK.q:
-                if currentFlags.contains(.maskCommand) { onEvent?(.close); return nil }
+                if modifiers.contains(.maskCommand) { onEvent?(.close); return nil }
             case VK.w:
-                if currentFlags.contains(.maskCommand) { onEvent?(.minimize); return nil }
+                if modifiers.contains(.maskCommand) { onEvent?(.minimize); return nil }
             default:
                 break
             }

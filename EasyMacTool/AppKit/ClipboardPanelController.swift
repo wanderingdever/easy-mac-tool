@@ -22,6 +22,10 @@ final class ClipboardPanelController: ObservableObject {
     /// 导致 toggleClipboard 方向错误。
     @Published private(set) var isPresented = false
 
+    deinit {
+        if let global = globalMonitor { NSEvent.removeMonitor(global) }
+    }
+
     /// Set by AppCoordinator; called when the user picks an item. AppCoordinator
     /// is responsible for re-applying the payload and (optionally) pasting.
     var onReapply: ((ClipboardItem) -> Void)?
@@ -116,12 +120,15 @@ final class ClipboardPanelController: ObservableObject {
         // dismiss 仅 orderOut + 移除 monitor 即可。切换器需要 AppCoordinator
         // 完整清理 capture/activeShortcut/openTask，故走 onDismiss 回调。
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            // Only dismiss if the panel is actually showing.
-            guard let self, self.panel.isVisible else { return }
-            // Non-activating panels may receive their own click through a
-            // global monitor. Do not dismiss before the card/button handles it.
-            if self.panel.frame.contains(NSEvent.mouseLocation) { return }
-            self.dismiss()
+            guard let self else { return }
+            let mouseLocation = NSEvent.mouseLocation
+            let panelFrame = self.panel.frame
+            let isVisible = self.panel.isVisible
+            Task { @MainActor [weak self] in
+                guard let self, isVisible else { return }
+                if panelFrame.contains(mouseLocation) { return }
+                self.dismiss()
+            }
         }
     }
 }

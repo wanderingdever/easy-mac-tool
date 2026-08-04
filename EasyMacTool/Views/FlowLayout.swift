@@ -9,9 +9,18 @@ import SwiftUI
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    struct CacheData {
+        var rows: [Row] = []
+    }
+
+    func makeCache(subviews: Subviews) -> CacheData {
+        CacheData()
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout CacheData) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
         let rows = computeRows(subviews: subviews, maxWidth: maxWidth)
+        cache.rows = rows
         guard !rows.isEmpty else { return .zero }
 
         let totalHeight = rows.reduce(CGFloat.zero) { partial, row in
@@ -21,8 +30,8 @@ struct FlowLayout: Layout {
         return CGSize(width: min(totalWidth, maxWidth), height: totalHeight)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let rows = computeRows(subviews: subviews, maxWidth: bounds.width)
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout CacheData) {
+        let rows = cache.rows
         var y = bounds.minY
         for row in rows {
             var x = bounds.minX
@@ -37,7 +46,7 @@ struct FlowLayout: Layout {
         }
     }
 
-    private struct Row {
+    struct Row {
         var indices: [Int] = []
         var width: CGFloat = 0
         var height: CGFloat = 0

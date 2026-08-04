@@ -83,16 +83,18 @@ final class AppUsageTracker {
     /// windowID 会一直占据 MRU 位次（直到 128 上限淘汰），让活窗口排序靠后。
     /// 由 WindowEnumerator.snapshot 在每次呼出切换器时调用（每次仅一次
     /// CGWindowList 查询，开销可忽略）。
-    /// 注意：kCGWindowListOptionAll 包含离屏（最小化/隐藏）窗口，
-    /// 不会误清理它们的 MRU 记录。
-    func pruneStaleWindows() {
+    ///
+    /// - Parameter protectedIDs: 已知的离屏窗口 ID（minimized/hidden），
+    ///   即使不在 CGWindowList 中也保留其 MRU 记录。隐藏 app unmapped 的窗口
+    ///   不会被 .optionAll 返回，不保护会被误清理 → MRU 排序失效。
+    func pruneStaleWindows(protectedIDs: Set<CGWindowID> = []) {
         guard let array = CGWindowListCopyWindowInfo(
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else { return }
         let alive = Set(array.compactMap { info -> CGWindowID? in
             (info[kCGWindowNumber as String] as? Int).map { CGWindowID($0) }
-        })
+        }).union(protectedIDs)
         let stale = windowOrder.filter { !alive.contains($0) }
         guard !stale.isEmpty else { return }
         for windowID in stale {
@@ -131,6 +133,7 @@ final class AppUsageTracker {
             // capturing `pid` from the enclosing scope.
             var extractedPid: pid_t = 0
             AXUIElementGetPid(element, &extractedPid)
+            guard extractedPid != 0 else { return }
             guard let refcon else { return }
             let tracker = Unmanaged<AppUsageTracker>
                 .fromOpaque(refcon)

@@ -3,10 +3,12 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
+import os
 
 /// Wraps the TCC permission checks/prompts required for the event tap and AX APIs.
 @MainActor
 enum AccessibilityChecker {
+    private static let logger = Logger(subsystem: "com.easymactool", category: "AccessibilityChecker")
     /// True iff the app has been granted Accessibility (required for CGEventTap `.defaultTap`
     /// and for cross-process AXUIElement use).
     static var isTrusted: Bool { AXIsProcessTrusted() }
@@ -113,10 +115,10 @@ enum AccessibilityChecker {
             do {
                 // 首次调用会触发系统注册 app 到 TCC 屏幕录制列表。
                 _ = try await SCShareableContent.current
-                print("[TCC] SCShareableContent.current succeeded — app should be in Screen Recording list")
+                logger.info("[TCC] SCShareableContent.current succeeded — app should be in Screen Recording list")
             } catch {
                 // 抛错是正常的（用户尚未授权），但 TCC 注册应该已发生。
-                print("[TCC] SCShareableContent.current threw (expected if not authorized): \(error)")
+                logger.info("[TCC] SCShareableContent.current threw (expected if not authorized): \(error.localizedDescription)")
             }
         }
     }

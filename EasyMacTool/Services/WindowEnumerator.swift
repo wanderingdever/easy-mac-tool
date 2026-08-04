@@ -104,10 +104,6 @@ final class WindowEnumerator {
             return set
         }()
 
-        // 对账清理 MRU 中"窗口已关闭但 app 未退出"的 stale 条目，
-        // 避免活窗口排序被不再存在的 windowID 顶后。
-        AppUsageTracker.shared.pruneStaleWindows()
-
         // 当前焦点 windowID（window 级）：用于精确标记 active 窗口。
         let focusedWindowID = AppUsageTracker.shared.focusedWindowID
 
@@ -156,6 +152,23 @@ final class WindowEnumerator {
         } else {
             axSnapshots = [:]
         }
+
+        // 对账清理 MRU 中"窗口已关闭但 app 未退出"的 stale 条目。
+        // 移到 AX 预取之后：可以从 axStates 中提取离屏窗口（minimized/hidden）
+        // 的 windowID 作为 protectedIDs 传给 pruneStaleWindows，避免隐藏 app 的
+        // unmapped 窗口（不在 CGWindowList 中）被误清理 → MRU 排序失效。
+        let offScreenWindowIDs: Set<CGWindowID> = {
+            var ids = Set<CGWindowID>()
+            for snapshot in axSnapshots.values {
+                for state in snapshot.states {
+                    if let wid = state.info.windowID {
+                        ids.insert(wid)
+                    }
+                }
+            }
+            return ids
+        }()
+        AppUsageTracker.shared.pruneStaleWindows(protectedIDs: offScreenWindowIDs)
 
         for runningApp in candidateApps {
             let pid = runningApp.processIdentifier

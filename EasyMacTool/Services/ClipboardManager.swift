@@ -61,8 +61,10 @@ final class ClipboardManager: ObservableObject {
 
     /// 持久化根目录：~/Library/Application Support/EasyMacTool/Clipboard/
     /// 仅在 storageIsAvailable 为 true 时调用。
+    /// 防御性编程：极端沙盒/容器环境下 urls 可能返回空数组，回退到临时目录。
     private static var storageDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         return appSupport.appendingPathComponent("EasyMacTool/Clipboard", isDirectory: true)
     }
     private static var metadataURL: URL {
@@ -202,6 +204,21 @@ final class ClipboardManager: ObservableObject {
         }
         let deletions = pendingImageDeletions
         pendingImageDeletions.removeAll()
+        // 扫描 images/ 目录，清理不在 metadata.json 中的孤儿 TIFF 文件
+        var orphanPaths: [String] = []
+        if FileManager.default.fileExists(atPath: imgDir.path) {
+            let allItemPaths = Set(items.compactMap { $0.imageFileURL?.path })
+            if let enumerator = FileManager.default.enumerator(atPath: imgDir.path) {
+                for case let fileName as String in enumerator {
+                    if fileName.hasSuffix(".tiff") {
+                        let fullPath = imgDir.appendingPathComponent(fileName).path
+                        if !allItemPaths.contains(fullPath) {
+                            orphanPaths.append(fullPath)
+                        }
+                    }
+                }
+            }
+        }
         // sync 派发：等待所有 pending 异步保存完成后再执行，确保最终写入的是最新数据
         saveQueue.sync {
             do {
@@ -224,6 +241,10 @@ final class ClipboardManager: ObservableObject {
                                                        ofItemAtPath: metaURL.path)
                 // 清理已删除条目对应的磁盘图片文件
                 for path in deletions {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+                // 清理孤儿 TIFF 文件（不在 metadata.json 中）
+                for path in orphanPaths {
                     try? FileManager.default.removeItem(atPath: path)
                 }
             } catch {
@@ -702,12 +723,14 @@ final class ClipboardManager: ObservableObject {
     /// must be dismissed BEFORE calling this so the target app receives focus.
     fileprivate func simulatePaste() {
         let src = CGEventSource(stateID: .combinedSessionState)
-        let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true)  // V
-        cmdDown?.flags = .maskCommand
-        let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false)
-        cmdUp?.flags = .maskCommand
-        cmdDown?.post(tap: .cghidEventTap)
-        cmdUp?.post(tap: .cghidEventTap)
+        // CGEvent(keyboardEventSource:) 在极端内存不足时可能返回 nil，
+        // guard 防护避免隐式解包崩溃。
+        guard let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true),
+              let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) else { return }
+        cmdDown.flags = .maskCommand
+        cmdUp.flags = .maskCommand
+        cmdDown.post(tap: .cghidEventTap)
+        cmdUp.post(tap: .cghidEventTap)
         // 合成事件经过自己的 .cgSessionEventTap 可能触发 tap 被系统临时禁用
         // （tapDisabledByTimeout）。派发独立 Task 在 50ms 后检查 tap 健康，
         // 失效则立即 restart() 恢复，不等 0.5s hotkeyRetryTimer。

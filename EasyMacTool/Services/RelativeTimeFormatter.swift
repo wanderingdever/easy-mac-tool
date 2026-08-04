@@ -262,17 +262,17 @@ enum ColorStringParser {
 /// (acceptable since most apps are cached after first hit).
 @MainActor
 enum AppIconCache {
-    private static var cache: [String: NSImage] = [:]
+    private static let cache = NSCache<NSString, NSImage>()
 
     /// Returns the cached icon for the given bundle ID, or looks it up from
     /// NSWorkspace and caches it. Returns nil for unknown / not-running apps.
     static func icon(for bundleID: String?) -> NSImage? {
         guard let bundleID else { return nil }
-        if let cached = cache[bundleID] { return cached }
+        if let cached = cache.object(forKey: bundleID as NSString) { return cached }
         // Scan running applications for the matching bundle ID.
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
               let icon = app.icon else { return nil }
-        cache[bundleID] = icon
+        cache.setObject(icon, forKey: bundleID as NSString)
         return icon
     }
 
@@ -281,8 +281,8 @@ enum AppIconCache {
     /// already have the icon, no need to re-scan running apps).
     static func prewarm(_ icon: NSImage, for bundleID: String?) {
         guard let bundleID else { return }
-        if cache[bundleID] == nil {
-            cache[bundleID] = icon
+        if cache.object(forKey: bundleID as NSString) == nil {
+            cache.setObject(icon, forKey: bundleID as NSString)
         }
     }
 }

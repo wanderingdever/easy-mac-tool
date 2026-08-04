@@ -38,6 +38,11 @@ final class OverlayPanelController: ObservableObject {
         HotkeyManager.shared.setSwitcherPanel(panel)
     }
 
+    deinit {
+        if let global = globalMonitor { NSEvent.removeMonitor(global) }
+        axWatchTimer?.invalidate()
+    }
+
     /// Set by `AppCoordinator` so clicks can activate the target window.
     var onActivateItem: ((WindowItem) -> Void)?
     /// Set by `AppCoordinator` so selection changes trigger live stream switch.
@@ -129,15 +134,14 @@ final class OverlayPanelController: ObservableObject {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] _ in
             guard let self else { return }
-            // 关键修复：globalMonitor 监听的是"派发给其他 App 的事件"。
-            // OverlayPanel 是 .nonactivatingPanel，App 未激活时点击 panel 自身
-            // 也可能被 AppKit 视为"派发给其他 App"触发这里 → onDismiss 误关闭。
-            // 检查鼠标位置是否在 panel frame 内：若在 panel 内则不 dismiss，
-            // 让 SwiftUI 的 .onTapGesture 正常处理卡片点击。
             let mouseLocation = NSEvent.mouseLocation
-            if self.panel.frame.contains(mouseLocation) { return }
-            // 通知 AppCoordinator 执行完整关闭流程。
-            self.onDismiss?()
+            let panelFrame = self.panel.frame
+            // 检查鼠标位置是否在 panel frame 内：若在 panel 内则不 dismiss
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if panelFrame.contains(mouseLocation) { return }
+                self.onDismiss?()
+            }
         }
     }
 
@@ -204,7 +208,6 @@ final class OverlayPanelController: ObservableObject {
             }
         }
         hoverIndex = nil
-        notifySelectionChanged()
     }
 
     /// Mouse-click activation: select then commit (activate the window).

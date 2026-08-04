@@ -70,26 +70,4 @@ struct SwitcherOverlayView: View {
         .animation(nil, value: controller.hoverIndex)
     }
 
-
-    /// A single keyboard hint: a kbd badge + a description label.
-    @ViewBuilder
-    private func kbdHint(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 6) {
-            Text(key)
-                .font(.system(size: 10.5, weight: .semibold))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.primary.opacity(0.07))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-                )
-            Text(label)
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-        }
-    }
 }

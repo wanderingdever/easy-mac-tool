@@ -12,7 +12,7 @@ struct AboutView: View {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(DesignTokens.aboutIconGradient)
                 Text("E")
-                    .font(.system(size: 86	, weight: .bold, design: .rounded))
+                    .font(.system(size: 86, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
             }
             .frame(width: 96, height: 96)

@@ -97,6 +97,10 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WheelRedirectScrollView, context: Context) {
-        (context.coordinator.hostingController as? NSHostingController<Content>)?.rootView = content
+        guard let hosting = context.coordinator.hostingController as? NSHostingController<Content> else {
+            assertionFailure("hostingController type mismatch")
+            return
+        }
+        hosting.rootView = content
     }
 }
