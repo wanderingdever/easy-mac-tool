@@ -191,9 +191,11 @@ final class HotkeyManager {
         let oldFlags = currentFlags
         currentFlags = event.flags
 
-        // If a shortcut opened the switcher and that shortcut uses a hold-modifier,
-        // detect its release and apply the configured release behavior.
-        if isSwitcherOpen, let shortcut = activeShortcut {
+        // 检测修饰键释放并应用释放行为。
+        // 之前用 isSwitcherOpen 作为前置条件，但 activeShortcut 在 handleKeyDown
+        // 中设置后、openSwitcher 异步 snapshot 完成前，面板尚未 visible（isSwitcherOpen=false），
+        // 此时用户释放修饰键会导致释放检测被跳过，面板永远无法自动关闭（竞态条件）。
+        if let shortcut = activeShortcut {
             let requiredModifiers = shortcut.modifiers
                 .intersection([.maskCommand, .maskControl, .maskAlternate])
             if !requiredModifiers.isEmpty {
