@@ -85,6 +85,25 @@ final class WindowEnumerator {
         let layerMap = windowLayerMap()
         Self.logger.debug("windowLayerMap: \(layerMap.count) entries")
 
+        // 屏幕上的真实窗口 ID 集合（C2 分类兜底用）：
+        // isAppHidden 可能误判（kAXHiddenAttribute 查询失败返回 false），
+        // 此时 AX 返回的窗口既非 minimized 也非 hidden 会被直接 continue 跳过。
+        // 若窗口确实不在屏幕上（CGWindowList 无此 ID 或 onscreen == false），
+        // 归为 .hidden 而非跳过——保证隐藏 app 的窗口至少能显示。
+        let onscreenWindowIDs: Set<CGWindowID> = {
+            guard let array = CGWindowListCopyWindowInfo(
+                [.optionAll, .excludeDesktopElements],
+                kCGNullWindowID
+            ) as? [[String: Any]] else { return [] }
+            var set = Set<CGWindowID>()
+            for info in array {
+                guard let number = info[kCGWindowNumber as String] as? Int,
+                      (info[kCGWindowIsOnscreen as String] as? Bool) == true else { continue }
+                set.insert(CGWindowID(number))
+            }
+            return set
+        }()
+
         // 对账清理 MRU 中"窗口已关闭但 app 未退出"的 stale 条目，
         // 避免活窗口排序被不再存在的 windowID 顶后。
         AppUsageTracker.shared.pruneStaleWindows()
@@ -253,6 +272,16 @@ final class WindowEnumerator {
                     windowState = .minimized
                 } else if axHidden {
                     windowState = .hidden
+                } else if filter.showHidden,
+                          let wid = info.windowID,
+                          !addedWindowIDs.contains(wid),
+                          !onscreenWindowIDs.contains(wid) {
+                    // C2 兜底：isAppHidden 误判（kAXHiddenAttribute 失败）时，
+                    // 窗口既非 minimized 也非 hidden。若该窗口有真实 windowID、
+                    // SC 未返回（不在 addedWindowIDs）且不在屏幕上
+                    // （CGWindowList 无此 ID 或 onscreen == false）→ 确为离屏窗口，
+                    // 归为 .hidden 而非直接跳过，保证隐藏 app 的窗口仍可显示。
+                    windowState = .hidden
                 } else {
                     // AX 返回的窗口既不是 minimized 也不是 hidden——可能是 visible
                     // 但 SCShareableContent 没返回（罕见）。跳过避免重复。
@@ -307,6 +336,33 @@ final class WindowEnumerator {
                 if let wid = info.windowID {
                     addedWindowIDs.insert(wid)
                 }
+                hasVisibleItem = true
+            }
+
+            // C1: 隐藏 app 但 AX 枚举不到任何窗口（kAXWindowsAttribute 失败/空，
+            // 部分 app 隐藏时从 AX 树移除窗口）时，生成 app 级占位条目（显示
+            // 应用图标），保证用户仍能看到该 app 并切换过去（unhide + activate）。
+            // 仅当 showHidden 开启、app 确为 hidden、且该 app 无任何条目时兜底，
+            // 避免与正常条目重复。
+            if filter.showHidden, axHidden, !hasVisibleItem {
+                var hasher = Hasher()
+                hasher.combine(pid)
+                let placeholderID = 0xF0000000
+                    | (CGWindowID(truncatingIfNeeded: hasher.finalize()) & 0x0FFFFFFF)
+                Self.logger.debug("  app-level placeholder for hidden app \(appName, privacy: .public) (no AX windows)")
+                items.append(WindowItem(
+                    id: placeholderID,
+                    pid: pid,
+                    appName: appName,
+                    appIcon: runningApp.icon,
+                    title: appName,
+                    frame: .zero,
+                    scWindow: nil,
+                    windowState: .hidden,
+                    isActiveWindow: false,
+                    initialImage: nil,
+                    hasRealWindowID: false
+                ))
             }
         }
 
@@ -365,17 +421,19 @@ final class WindowEnumerator {
 
     /// 通过 AX 判断 app 是否被隐藏（Cmd+H）。
     /// kAXHiddenAttribute 是 application element 的属性，返回 Bool。
+    /// AX 查询失败时回退到 NSRunningApplication.isHidden（系统级 API，
+    /// 直接反映 Cmd+H 状态，不依赖 AX），避免误判导致隐藏窗口不可见。
     nonisolated private static func isAppHidden(_ pid: pid_t) -> Bool {
         let axApp = AXUIElementCreateApplication(pid)
         var hiddenRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(axApp,
                                                     kAXHiddenAttribute as CFString,
                                                     &hiddenRef)
-        guard result == .success else {
-            Self.logger.debug("isAppHidden: kAXHiddenAttribute query failed for pid=\(pid), error=\(result.rawValue)")
-            return false
+        guard result == .success, let hiddenRef else {
+            Self.logger.debug("isAppHidden: kAXHiddenAttribute query failed for pid=\(pid), error=\(result.rawValue), fallback to NSRunningApplication")
+            return NSRunningApplication(processIdentifier: pid)?.isHidden ?? false
         }
-        return (hiddenRef as? NSNumber)?.boolValue == true
+        return (hiddenRef as? NSNumber)?.boolValue ?? false
     }
 
     /// 通过 AX 获取 app 的所有窗口及其 minimized 状态。

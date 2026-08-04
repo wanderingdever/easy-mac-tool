@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Window-switcher settings: a global multi-screen target picker at the top,
@@ -301,6 +302,10 @@ private struct ShortcutToolbarButton: View {
 struct ShortcutDetailView: View {
     @EnvironmentObject private var settings: AppSettings
     @Binding var shortcut: ShortcutConfig
+    // 辅助功能权限状态：2s 定时刷新。显示最小化/隐藏窗口依赖 AX 枚举，
+    // 未授权时两个开关无效却无任何反馈，需显式提示用户。
+    @State private var axGranted = AccessibilityChecker.isTrusted
+    private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {
@@ -350,6 +355,13 @@ struct ShortcutDetailView: View {
                     divider
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
                         .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示应用图标）")
+                    if !axGranted {
+                        Label("显示最小化/隐藏窗口需要『辅助功能』权限，当前未授予，开关暂不生效。",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .padding(.top, 2)
+                    }
                     Text("最小化和隐藏的窗口无法实时捕获预览，将显示应用图标和窗口标题")
                         .font(.system(size: DesignTokens.SettingsTypography.caption))
                         .foregroundStyle(DesignTokens.Colors.mutedForeground)
@@ -365,6 +377,9 @@ struct ShortcutDetailView: View {
                 }
             }
             .padding(4)
+        }
+        .onReceive(permissionTimer) { _ in
+            axGranted = AccessibilityChecker.isTrusted
         }
     }
 
