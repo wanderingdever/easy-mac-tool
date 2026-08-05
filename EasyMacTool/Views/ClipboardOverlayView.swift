@@ -65,14 +65,22 @@ struct ClipboardOverlayView: View {
     private var previewIsOpen: Bool { previewItem != nil }
 
     var body: some View {
-        ZStack {
+        // filtered 在本帧只计算一次，作为参数下传给 searchBar / cardStrip。
+        // 之前 filtered 是计算属性，body 中 searchBar(count)、cardStrip
+        // (isEmpty + ForEach)各独立访问，每次 body 重绘过滤闭包跑 3 遍。
+        // 鼠标滚动时 hoverID 变化触发 body 重绘，导致每帧 3 倍过滤成本
+        // （含 footerText 对大文本的 trimming/split）。改局部 let 下传后
+        // 降至 1 倍。handleSpaceKey/handleArrow/handleEnter/clampSelection
+        // 是事件处理方法，不在滚动热路径上，仍直接访问 filtered 计算属性。
+        let filteredItems = filtered
+        return ZStack {
             VStack(spacing: 0) {
-                searchBar
+                searchBar(filtered: filteredItems)
                 Divider()
                 // Spacer 把卡片条压到底部：面板在预览模式被拉高时，卡片仍贴底，
                 // 预览放大卡片可向上溢出到 Spacer 留出的空白区。
                 Spacer(minLength: 0)
-                cardStrip
+                cardStrip(filtered: filteredItems)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
@@ -217,14 +225,14 @@ struct ClipboardOverlayView: View {
     // 中 TextField 在有内容时会突破外层 frame，导致头部高度变化。现在所有
     // 元素直接受同一个固定 frame 约束，彻底避免高度跳动。
 
-    private var searchBar: some View {
+    private func searchBar(filtered: [ClipboardItem]) -> some View {
         HStack(spacing: 12) {
             // 1. 统计数量（左）：剪切板图标 + 计数（设计稿规范）。
             HStack(spacing: 6) {
                 Image(systemName: "clipboard")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                Text("\(filtered.count)/\(manager.items.count)")
+                Text("\(filtered.count)")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -381,7 +389,7 @@ struct ClipboardOverlayView: View {
     // 只有 searchBar / Divider / cardStrip 3 个子视图，布局稳定。
 
     @ViewBuilder
-    private var cardStrip: some View {
+    private func cardStrip(filtered: [ClipboardItem]) -> some View {
         if filtered.isEmpty {
             VStack {
                 Spacer()
@@ -921,8 +929,10 @@ private struct ClipboardCard: View {
                 .strokeBorder(isHover ? Color.accentColor : .clear,
                               lineWidth: isHover ? 2 : 0)
         )
-        // 设计稿：hover 时 shadow-lg（更大阴影），默认 shadow-md
-        .shadow(color: .black.opacity(0.08), radius: isHover ? 8 : 4, y: isHover ? 4 : 2)
+        // 性能：非 hover 卡片不渲染阴影（radius 0 不触发离屏模糊）。
+        // 滚动时仅可见的 5-10 张卡片中，hover 态最多 1 张有阴影。
+        // 之前非 hover 卡片 radius 4，每帧 5-10 次离屏模糊，滚动掉帧。
+        .shadow(color: .black.opacity(0.08), radius: isHover ? 8 : 0, y: isHover ? 4 : 0)
         .scaleEffect(isHover ? 1.04 : 1.0)
         .opacity(isDimmed ? 0.4 : 1.0)
         .transaction { $0.animation = nil }

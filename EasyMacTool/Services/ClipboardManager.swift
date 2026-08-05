@@ -135,10 +135,9 @@ final class ClipboardManager: ObservableObject {
         // 间隔虽短但存在窗口。
         lastChangeCount = NSPasteboard.general.changeCount
         // 启动时从磁盘加载历史，恢复上次会话的剪贴板内容。
+        // 裁剪与落盘在 loadFromDisk 的异步完成块内执行（loadFromDisk 是
+        // 异步的，此处 items 仍为空，同步 trim 是 no-op）。
         loadFromDisk()
-        // loadFromDisk 后立即裁剪：磁盘上的条目可能超过当前 historyLimit
-        // （如用户在设置中降低了上限后重启），保证启动后内存与上限一致。
-        trimHistoryToLimits()
         let instance = self
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             Task { @MainActor in instance.poll() }
@@ -678,10 +677,19 @@ final class ClipboardManager: ObservableObject {
                 let pendingNew = self.items
                 let loadedIDs = Set(loaded.map { $0.id })
                 var merged = loaded
-                for item in pendingNew where !loadedIDs.contains(item.id) {
+                // pendingNew 是 poll 在 load 窗口期累积的新条目，新序在前 [C, B, A]
+                // （C 最新）。逐个 insert(at: 0) 会反转顺序，必须倒序遍历才能保持
+                // [C, B, A, ...loaded] 的新序在前语义。
+                for item in pendingNew.reversed() where !loadedIDs.contains(item.id) {
                     merged.insert(item, at: 0)
                 }
                 self.items = merged
+                // 异步加载完成后立即裁剪并落盘：磁盘上的条目可能超过当前 historyLimit
+                // （如用户在设置中降低了上限后重启），保证启动后内存与上限一致，
+                // 同时修正磁盘 metadata.json。start() 中的同步 trim 是 no-op（此时
+                // items 仍为空），真正的裁剪必须等 load 完成后在此执行。
+                self.trimHistoryToLimits()
+                self.schedulePersist()
             }
         }
     }
