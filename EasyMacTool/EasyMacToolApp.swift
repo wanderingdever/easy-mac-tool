@@ -95,6 +95,19 @@ final class AppCoordinator {
     /// 防止用户快速打开-关闭切换器时，已关闭的面板在 Task 完成后重新弹出。
     private var openTask: Task<Void, Never>?
 
+    /// 打开会话代次：每次 openSwitcher 调用 +1，closeSwitcher 显式关闭也 +1。
+    /// openTask 用「捕获的 session 是否仍等于当前 openSession」判断该次打开是否
+    /// 仍有效——替代旧的 `activeShortcut == nil` 判断。区别在于：修饰键释放
+    /// （.hold 清空 activeShortcut / .focus 触发轻点激活）不应使打开失效，
+    /// 只有显式关闭（closeSwitcher）或更新的打开请求才使旧会话失效。
+    private var openSession = 0
+
+    /// 轻点待激活标记：.focus 模式下用户释放修饰键时 openTask 仍在 snapshot 中
+    /// （面板尚未 present，selectedItem 为 nil），记录当前会话。snapshot 完成后
+    /// 若该会话仍是当前会话，立即激活下一个窗口并关闭（tap-to-switch，
+    /// 类 Windows Alt+Tab 轻点切换）。
+    private var pendingActivationSession: Int?
+
     /// 已弹出过设置页的权限集合（按 PermissionKind 精细跟踪）。
     /// 替代旧的全局 hasShownPermissionPrompt 布尔标志——全局标志在用户
     /// "部分授权"或"撤销后重新授权"场景下会阻止后续提示：
@@ -296,6 +309,10 @@ final class AppCoordinator {
     }
 
     private func openSwitcher(with shortcut: ShortcutConfig) {
+        // 新打开请求：使旧会话失效（含权限缺失提前返回的路径——旧会话的 openTask
+        // 不应在权限已失效时继续 present），并清除上一次的轻点标记。
+        openSession += 1
+        pendingActivationSession = nil
         // 权限检查：用只读的 missingPermissions（不触发 TCC 副作用）。
         // 按权限类型精细跟踪是否已提示过：
         // - 已提示过的权限项不重复弹设置页（避免 .hold 模式连按时频繁弹窗）
@@ -347,29 +364,48 @@ final class AppCoordinator {
         openTask?.cancel()
         HotkeyManager.shared.setActiveShortcut(shortcut)
         openTask = Task {
+            // 捕获当前会话：释放修饰键（.hold 清空 activeShortcut / .focus 轻点）
+            // 不再使打开失效，只有显式关闭（closeSwitcher）或更新的打开请求
+            // （openSwitcher 递增 openSession）才使本会话失效。
+            let session = openSession
             let items = await enumerator.snapshot(filter: shortcut)
-            // 检查 cancellation：若用户在 snapshot 期间已关闭切换器，
-            // activeShortcut 已被置 nil，不应继续 present。
-            if Task.isCancelled || HotkeyManager.shared.activeShortcut == nil {
+            // 检查取消/会话失效：用户在 snapshot 期间关闭了切换器或发起了新的
+            // 打开请求，不应继续 present。
+            if Task.isCancelled || openSession != session {
                 return
             }
             guard !items.isEmpty else {
                 HotkeyManager.shared.setActiveShortcut(nil)
                 return
             }
-            // present 前再做一次 cancellation 检查：snapshot await 期间用户可能
-            // 已释放 modifier 触发 closeSwitcher（activeShortcut 被置 nil）。
-            // 提前 return 避免面板闪现一帧后被 L260 的二次检查 dismiss。
-            if Task.isCancelled || HotkeyManager.shared.activeShortcut == nil {
+            // present 前再做一次检查：snapshot await 期间会话可能已失效。
+            // 提前 return 避免面板闪现一帧。
+            if Task.isCancelled || openSession != session {
                 return
             }
             panelController.present(with: items,
                                     previewSize: shortcut.previewSize,
                                     displayTarget: settings.displayTarget)
-            // 竞态防护：present 后再次检查取消，防止 present 与 startCapture
-            // 之间用户关闭切换器，导致 capture 为已关闭面板运行。
-            if Task.isCancelled || HotkeyManager.shared.activeShortcut == nil {
+            // 竞态防护：present 后再次检查，防止 present 与后续操作之间
+            // 切换器被关闭，导致 capture 为已关闭面板运行。
+            if Task.isCancelled || openSession != session {
                 panelController.dismiss()
+                return
+            }
+            // 轻点（tap-to-switch）：.focus 模式下用户释放修饰键时本会话仍处于
+            // snapshot 阶段（commitSelection 已记录 pendingActivationSession）。
+            // 面板已备好，立即激活下一个窗口并关闭——类 Windows Alt+Tab 轻点。
+            // 跳过 startCapture，避免为瞬间关闭的面板启动无谓的 SCStream。
+            if pendingActivationSession == session {
+                let targetIndex: Int
+                if shortcut.isBackward {
+                    targetIndex = items.count - 1
+                } else {
+                    targetIndex = min(1, items.count - 1)
+                }
+                let target = items[targetIndex]
+                activator.activate(target)
+                closeSwitcher()
                 return
             }
             captureManager.startCapture(for: items, previewSize: shortcut.previewSize)
@@ -394,10 +430,15 @@ final class AppCoordinator {
         if let item = panelController.selectedItem {
             activator.activate(item)
             closeSwitcher()
+        } else if openTask != nil, !panelController.isPresented {
+            // 轻点（tap-to-switch）：.focus 模式释放修饰键时 openTask 仍在异步
+            // snapshot 中（面板尚未 present，selectedItem 为 nil）。
+            // 不取消 openTask——记录待激活会话，snapshot 完成后立即激活下一个
+            // 窗口并关闭。之前直接 cancel 导致面板永不呼出（高频连按"快捷键失效"）。
+            pendingActivationSession = openSession
+            HotkeyManager.shared.setActiveShortcut(nil)
         } else {
-            // selectedItem 为 nil：openTask 还在异步 snapshot 中，切换器面板尚未 present。
-            // 用户在 snapshot 完成前释放了 modifier——取消 openTask 并清理 activeShortcut，
-            // 否则 openTask 从 await 恢复后会继续 present 导致面板闪现一帧。
+            // 防御清理：openTask 已结束或面板已存在但无选中项。
             openTask?.cancel()
             openTask = nil
             HotkeyManager.shared.setActiveShortcut(nil)
@@ -409,6 +450,11 @@ final class AppCoordinator {
         // prevent it from presenting after the user dismissed the panel.
         openTask?.cancel()
         openTask = nil
+        // 会话代次失效（双保险于 openTask.cancel）：即使 snapshot 已完成、
+        // 任务未被取消，捕获了 session 的 openTask 也会因 openSession 变化
+        // 而放弃 present。
+        openSession += 1
+        pendingActivationSession = nil
         captureManager.stopAll()
         panelController.dismiss()
         // activeShortcut 由 panelController.dismiss() → resetActiveShortcut() 清理，

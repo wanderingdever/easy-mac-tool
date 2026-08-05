@@ -233,6 +233,11 @@ final class HotkeyManager {
         // 剪贴板快捷键被永久屏蔽，用户按 Cmd+Shift+V 会打开切换器而非剪切板。
         if let cs = settings?.clipboardShortcut,
            cs.keyCode == keyCode && cs.modifiers == modifiers {
+            // autorepeat 守卫：按住剪贴板快捷键时系统会连续产生重复 keyDown。
+            // 第一次按下已触发 .clipboard，重复事件直接吞掉，避免面板反复开合。
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
             onEvent?(.clipboard)
             return nil
         }
@@ -288,6 +293,14 @@ final class HotkeyManager {
 
         // Switcher closed (or no matching nav key): check if this key combo opens it.
         if !isSwitcherOpen, let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
+            // autorepeat 守卫：按住快捷键时系统连续产生重复 keyDown（初始按下已触发
+            // .open 并启动异步 snapshot）。若不拦截，每个重复事件都会重新走 .open →
+            // openTask?.cancel() + 新 snapshot，快照被反复取消重启（SCShareableContent
+            // 与 Task.detached AX 预取不可中途取消，还会堆积后台 IPC），面板迟迟无法
+            // 出现——即"高频连按/长按快捷键无法呼出"的放大器。重复事件直接吞掉。
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
             // 权限预检：若权限缺失，不吞事件，让 Cmd+Tab 传递到系统作为兜底。
             // 否则权限被撤销时事件被吞但切换器打不开，用户感觉快捷键卡死。
             // openSwitcher 中会再次检查权限并弹设置页，这里只负责事件路由决策。
