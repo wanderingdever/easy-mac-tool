@@ -24,17 +24,16 @@ struct SwitcherOverlayView: View {
     var onActivate: (Int) -> Void
 
     // MARK: - 固定布局常量（与 positionPanel 同步）
-    /// header 高度（chip 22）+ 与网格的间距（14）。
-    static let headerBlock: CGFloat = 22 + 14
+    /// header 已移除（不再显示标题/计数胶囊），故保留 0 高度；若后续恢复
+    /// header 视图，需同步改回 chip 高度 + 间距。
+    static let headerBlock: CGFloat = 0
     /// footer 提示条高度（18）+ 与网格的间距（12）。
     static let footerBlock: CGFloat = 18 + 12
-    /// 面板最小宽度：保证 header/footer 内容不拥挤。
+    /// 面板最小宽度：保证 footer 内容不拥挤。
     static let minPanelWidth: CGFloat = 320
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-                .padding(.bottom, 14)
             FlowLayout(spacing: DesignTokens.Spacing.md) {
                 ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
                     WindowThumbnailCell(
@@ -97,29 +96,6 @@ struct SwitcherOverlayView: View {
         .animation(nil, value: controller.hoverIndex)
     }
 
-    // MARK: - Header（高度 22，与 headerBlock 同步）
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: "square.grid.2x2", size: 22)
-            Text("窗口切换")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-            Spacer(minLength: 0)
-            // 窗口计数胶囊：品牌渐变淡底 + 渐变文字。
-            Text("\(controller.items.count) 个窗口")
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(DesignTokens.Aurora.brandGradient)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    Capsule()
-                        .fill(DesignTokens.Aurora.brandGradient.opacity(0.12))
-                )
-        }
-        .frame(height: 22)
-    }
 
     // MARK: - Footer 键盘提示条（高度 18，与 footerBlock 同步）
 
