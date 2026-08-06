@@ -1,11 +1,9 @@
 import SwiftUI
 
-/// Clipboard-history settings: hotkey recorder, history limit, auto-paste
-/// toggle, and history management buttons. Mirrors the look of
-/// `WindowSwitcherSettingsView`. Layout follows `设置 · 剪切板.html`:
-/// 17pt semibold section headers with muted-foreground icons, 12pt captions
-/// 6pt below, section body margin-top 14 + gap 12, form rows with 80pt label
-/// + 14pt gap.
+/// Clipboard-history settings (Aurora v2)：分组卡片布局。
+/// 呼出快捷键 / 行为 / 历史 三个 section，每个 = 渐变图标 chip 标题 +
+/// 浮起卡片（cardSurface + 发丝描边 + 柔和阴影）。
+/// Toggle / Slider 统一品牌 tint；破坏操作保持语义红。
 struct ClipboardSettingsView: View {
     @EnvironmentObject private var settings: AppSettings
 
@@ -15,16 +13,16 @@ struct ClipboardSettingsView: View {
     @State private var showOldCleanupAlert = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
-            hotkeySection
-            Divider()
-            behaviorSection
-            Divider()
-            historySection
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
+                hotkeySection
+                behaviorSection
+                historySection
+            }
+            .padding(DesignTokens.Settings.contentPadding)
         }
-        .padding(DesignTokens.Settings.contentPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(DesignTokens.Colors.card)
+        .background(DesignTokens.Aurora.pageBackground)
         .alert("清空全部剪切板历史？", isPresented: $showClearAlert) {
             Button("取消", role: .cancel) {}
             Button("清空", role: .destructive) {
@@ -45,41 +43,36 @@ struct ClipboardSettingsView: View {
 
     // MARK: - Section helpers
 
-    /// Section header: 17pt semibold title + 18pt muted-foreground icon, gap 8.
+    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
+            AuroraIconChip(systemName: systemImage, size: 26)
             Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.sectionHeader, weight: .semibold))
-                .tracking(-0.01)
-                .foregroundStyle(DesignTokens.Colors.foreground)
+                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
+                .foregroundStyle(.primary)
         }
     }
 
-    /// Wraps section body rows with margin-top 14 + 12pt inter-row gap.
-    private func sectionBody<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Settings.sectionBodyGap) {
+    /// 卡片容器：section 内容包一层浮起卡片。
+    private func sectionCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
             content()
         }
-        .padding(.top, DesignTokens.Settings.sectionBodyTop)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .auroraSettingsCard()
     }
 
     // MARK: - Hotkey
 
     private var hotkeySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader("呼出快捷键", systemImage: "keyboard")
-            Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。")
-                .font(.system(size: DesignTokens.SettingsTypography.caption))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                .padding(.top, 6)
-            sectionBody {
+            sectionCard {
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("快捷键")
                         .font(.system(size: DesignTokens.SettingsTypography.formLabel))
-                        .foregroundStyle(DesignTokens.Colors.foreground)
+                        .foregroundStyle(.primary)
                         .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                     KeyRecorderView(
                         keyCode: $settings.clipboardShortcut.keyCode,
@@ -94,6 +87,9 @@ struct ClipboardSettingsView: View {
                     )
                     Spacer(minLength: 0)
                 }
+                Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。")
+                    .font(.system(size: DesignTokens.SettingsTypography.caption))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -101,14 +97,17 @@ struct ClipboardSettingsView: View {
     // MARK: - Behavior
 
     private var behaviorSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader("行为", systemImage: "switch.2")
-            sectionBody {
+            sectionCard {
                 toggleRow(
                     isOn: $settings.clipboardAutoPaste,
                     title: "自动粘贴",
                     desc: "选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。"
                 )
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(height: 1)
                 toggleRow(
                     isOn: Binding(
                         get: { settings.clipboardCapturingEnabled },
@@ -126,17 +125,17 @@ struct ClipboardSettingsView: View {
         }
     }
 
-    /// Toggle row matching the design: title 15pt medium + desc 12pt muted,
-    /// vertical gap 2pt, toggle anchored top-right.
+    /// Toggle row：标题 14pt medium + 描述 12pt secondary，
+    /// 品牌 tint 的 switch 锚定右上。
     private func toggleRow(isOn: Binding<Bool>, title: String, desc: String) -> some View {
         HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                    .foregroundStyle(DesignTokens.Colors.foreground)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.primary)
                 Text(desc)
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
-                    .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -144,6 +143,7 @@ struct ClipboardSettingsView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .tint(DesignTokens.Aurora.tint)
                 .padding(.top, 2)
         }
     }
@@ -151,16 +151,17 @@ struct ClipboardSettingsView: View {
     // MARK: - History
 
     private var historySection: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader("历史", systemImage: "tray")
-            sectionBody {
+            sectionCard {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: DesignTokens.Settings.formRowGap) {
                         Text("最大保留")
                             .font(.system(size: DesignTokens.SettingsTypography.formLabel))
-                            .foregroundStyle(DesignTokens.Colors.foreground)
+                            .foregroundStyle(.primary)
                             .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                         Slider(value: historyLimitBinding, in: 50...1000, step: 50)
+                            .tint(DesignTokens.Aurora.tint)
                         Text("\(settings.clipboardHistoryLimit)")
                             .font(.system(size: DesignTokens.SettingsTypography.sliderValue, design: .monospaced))
                             .frame(width: 48, alignment: .trailing)
@@ -176,7 +177,7 @@ struct ClipboardSettingsView: View {
                             .frame(width: 48, alignment: .trailing)
                     }
                     .font(.system(size: DesignTokens.SettingsTypography.sliderRange))
-                    .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                    .foregroundStyle(.secondary)
                 }
                 HStack(spacing: DesignTokens.Spacing.sm) {
                     DestructiveOutlineButton {
@@ -191,7 +192,7 @@ struct ClipboardSettingsView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.top, 4)
+                .padding(.top, 2)
             }
         }
     }
@@ -210,9 +211,8 @@ struct ClipboardSettingsView: View {
     }
 }
 
-/// 设计稿 `.btn-destructive` 样式：透明背景 + 红色描边 + 红色文字/图标，
-/// hover/按下时填充浅红 surface（`--state-error-surface` #ffecea / dark）。
-/// 对应 `settings-clipboard.html` 中的 .btn-destructive 规则。
+/// 破坏操作按钮（Aurora v2）：透明背景 + 红色发丝描边 + 红色文字/图标，
+/// hover/按下时填充浅红 surface，圆角 8 与全应用控件圆角一致。
 /// ButtonStyle 无法持有 hover 状态，用 View 包装实现 hover fill。
 private struct DestructiveOutlineButton<Label: View>: View {
     let action: () -> Void
@@ -229,20 +229,21 @@ private struct DestructiveOutlineButton<Label: View>: View {
         var isHovering: Bool
         func makeBody(configuration: Configuration) -> some View {
             configuration.label
-                .font(.system(size: 13))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(DesignTokens.Colors.error)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(configuration.isPressed || isHovering
                               ? DesignTokens.Colors.errorSurface
                               : Color.clear)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(DesignTokens.Colors.error, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(DesignTokens.Colors.error.opacity(0.6), lineWidth: 1)
                 )
+                .animation(DesignTokens.Aurora.standard, value: isHovering)
         }
     }
 }

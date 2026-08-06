@@ -1,59 +1,64 @@
 import AppKit
 import SwiftUI
 
-/// 菜单栏下拉内容：设置 + 退出两项，图标+文字+快捷键展示。
+/// 菜单栏下拉弹窗（Aurora v2 改版）。
+///
+/// 结构：品牌头部（渐变图标 + 名称 + 版本）→ 渐变发丝分隔线 → 菜单项。
+/// 菜单项统一为「渐变图标 chip + 标题 + kbd 快捷键胶囊」三段式，
+/// hover 时整行填充品牌渐变、文字与 chip 反白，与全应用 Aurora 语言一致。
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
-    @State private var hoveredItem: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            menuItem(icon: "gearshape",
-                     title: "设置…",
-                     shortcut: "⌘,",
-                     action: openSettings)
-            Divider().padding(.horizontal, 8).padding(.vertical, 4)
-            menuItem(icon: "power",
-                     title: "退出",
-                     shortcut: "⌘Q",
-                     action: { NSApp.terminate(nil) })
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            gradientDivider
+                .padding(.vertical, 6)
+            VStack(alignment: .leading, spacing: 2) {
+                MenuItemRow(icon: "gearshape",
+                            title: "设置",
+                            shortcut: "⌘ ,",
+                            action: openSettings)
+                MenuItemRow(icon: "power",
+                            title: "退出",
+                            shortcut: "⌘ Q",
+                            action: { NSApp.terminate(nil) })
+            }
         }
-        .padding(6)
-        .frame(width: 240)
+        .padding(8)
+        .frame(width: 200)
     }
 
-    /// 菜单项：图标 + 标题 + 右侧快捷键。hover 时背景变 accentColor.opacity(0.15)。
-    private func menuItem(icon: String,
-                          title: String,
-                          shortcut: String,
-                          action: @escaping () -> Void) -> some View {
-        let isHovered = hoveredItem == icon
-        return Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 13))
-                    .foregroundStyle(isHovered ? Color.accentColor : .secondary)
-                    .frame(width: 18)
-                Text(title)
-                    .font(.system(size: 13))
+    // MARK: - 品牌头部
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            AuroraIconChip(systemName: "bolt.fill", size: 18, solid: true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("EasyMacTool")
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
-                Spacer()
-                Text(shortcut)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(isHovered ? Color.accentColor.opacity(0.15) : .clear)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    /// 渐变发丝分隔线：品牌渐变白中心向两端渐隐，替代生硬的 Divider。
+    private var gradientDivider: some View {
+        DesignTokens.Aurora.brandHorizontal
+            .opacity(0.35)
+            .frame(height: 1)
+            .mask(
+                LinearGradient(
+                    colors: [.clear, .black, .black, .clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
             )
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            hoveredItem = hovering ? icon : nil
-        }
+            .padding(.horizontal, 10)
     }
 
     /// 直接调用 openWindow 打开设置窗口，不再发送 .openSettings 通知——
@@ -63,5 +68,84 @@ struct MenuBarView: View {
         DispatchQueue.main.async {
             NSApp.activate()
         }
+    }
+}
+
+/// 菜单项：图标 chip + 标题 + 右侧快捷键胶囊。
+/// hover：整行品牌渐变实底 + 白字白图标 + 品牌色微投影；
+/// 非 hover：渐变淡底 chip + 主文字 + 灰色 kbd 胶囊。
+/// 过渡动画统一 Aurora.standard，按下缩放 0.98 提供触感反馈。
+private struct MenuItemRow: View {
+    let icon: String
+    let title: String
+    let shortcut: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                // 图标 chip：hover 反白（白色 20% 底 + 白字形），
+                // 非 hover 品牌渐变淡底 + 渐变字形。
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered
+                              ? AnyShapeStyle(.white.opacity(0.22))
+                              : AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.14)))
+                    Image(systemName: icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isHovered
+                                         ? AnyShapeStyle(.white)
+                                         : AnyShapeStyle(DesignTokens.Aurora.brandGradient))
+                }
+                .frame(width: 22, height: 22)
+
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isHovered ? Color.white : Color.primary)
+
+                Spacer(minLength: 0)
+
+                // 快捷键胶囊：hover 时变为半透明白底白字。
+                Text(shortcut)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(isHovered ? Color.white.opacity(0.9) : Color.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isHovered ? Color.white.opacity(0.18) : Color.primary.opacity(0.05))
+                    )
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered
+                          ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                          : AnyShapeStyle(.clear))
+            )
+            .shadow(color: isHovered ? DesignTokens.Aurora.brandGlow : .clear,
+                    radius: 6, y: 2)
+            .scaleEffect(isPressed ? 0.98 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !isPressed {
+                        withAnimation(DesignTokens.Aurora.standard) { isPressed = true }
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(DesignTokens.Aurora.standard) { isPressed = false }
+                }
+        )
     }
 }

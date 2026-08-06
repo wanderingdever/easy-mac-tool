@@ -268,8 +268,11 @@ final class OverlayPanelController: ObservableObject {
         // 13pt .medium 系统字体的实际行高（含 ascender+descender+leading）约 17-18pt，
         // 用 18pt 留 1pt 余量，避免每个 cell 高度低估 1-2pt 累计导致面板高度不足。
         let captionHeight: CGFloat = 18
-        // SwitcherOverlayView 当前只有 FlowLayout（无 header/footer），面板高度
-        // 只需 contentHeight + padding，不再预留 headerHeight/footerHeight。
+        // Aurora v2：SwitcherOverlayView 含固定高度的 header（标题+计数）与
+        // footer（键盘提示条），面板高度必须预留这两个块——其数值与
+        // SwitcherOverlayView.headerBlock/footerBlock 静态常量保持一致。
+        let headerBlock = SwitcherOverlayView.headerBlock
+        let footerBlock = SwitcherOverlayView.footerBlock
 
         // 精确计算每个 cell 的实际尺寸（与 WindowThumbnailCell.thumbnailSize 一致）。
         let cells: [CGSize] = items.map { item in
@@ -300,20 +303,23 @@ final class OverlayPanelController: ObservableObject {
         let rowsPass1 = computeLayoutRows(cells: cells, maxWidth: maxInnerWidth, interCell: interCell)
         let contentWidth = rowsPass1.map { $0.width }.max() ?? 0
 
-        // 面板宽度：contentWidth + padding + safetyMargin（吸收亚像素差异）
+        // 面板宽度：contentWidth + padding + safetyMargin（吸收亚像素差异）。
+        // Aurora v2：header/footer 需要最小宽度才不拥挤，下限 minPanelWidth。
         let safetyMargin: CGFloat = 4
-        let width = min(contentWidth + outerPadding * 2 + panelPadding * 2 + safetyMargin, maxPanelWidth)
+        let width = min(max(contentWidth + outerPadding * 2 + panelPadding * 2 + safetyMargin,
+                            SwitcherOverlayView.minPanelWidth),
+                        maxPanelWidth)
         // FlowLayout 实际可用宽度
         let actualInnerWidth = width - outerPadding * 2 - panelPadding * 2
 
         // 第二遍：用 actualInnerWidth 重新算行（与 FlowLayout 实际渲染一致）
         let rows = computeLayoutRows(cells: cells, maxWidth: actualInnerWidth, interCell: interCell)
 
-        // 面板高度：按第二遍的行数计算
+        // 面板高度：按第二遍的行数计算，加上 header/footer 固定块。
         let contentHeight = rows.reduce(CGFloat.zero) { partial, row in
             partial + row.height + (partial > 0 ? interCell : 0)
         }
-        let heightToFit = contentHeight + outerPadding * 2 + panelPadding * 2
+        let heightToFit = contentHeight + headerBlock + footerBlock + outerPadding * 2 + panelPadding * 2
         // 硬上限：屏幕高度 95%，避免极端情况超出屏幕。
         let height = min(heightToFit, screenRect.height * 0.95)
 

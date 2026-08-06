@@ -1,43 +1,82 @@
 import SwiftUI
 
-/// 关于 view: 渐变品牌图标 + app 名称 + 版本 + 简单描述。
-/// 设计稿：96×96 蓝色渐变圆角方块内嵌白色 "E"，标题 22pt bold，
-/// 版本 12pt，描述 14pt。
+/// 关于页（Aurora v2）：品牌渐变图标 + 名称 + 版本胶囊 + 描述 +
+/// 三个功能 chip。图标使用全应用统一的 Aurora 品牌渐变，
+/// 与侧栏头部、菜单栏弹窗的品牌头部一致。
 struct AboutView: View {
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
-            // 渐变品牌图标（设计稿：linear-gradient(160deg, #2e8dff, #007aff 55%, #004fad)）
+
+            // 品牌图标：Aurora 渐变实底圆角方块 + 白色闪电字形 + 外发光。
             ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(DesignTokens.aboutIconGradient)
-                Text("E")
-                    .font(.system(size: 86, weight: .bold, design: .rounded))
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(DesignTokens.Aurora.brandGradient)
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 44, weight: .bold))
                     .foregroundStyle(.white)
             }
             .frame(width: 96, height: 96)
-            .shadow(color: Color.accentColor.opacity(0.5), radius: 12, x: 0, y: 8)
+            .shadow(color: DesignTokens.Aurora.brandGlow, radius: 18, y: 8)
             .padding(.bottom, 18)
 
             Text("EasyMacTool")
                 .font(.system(size: 22, weight: .bold))
                 .tracking(-0.01)
 
+            // 版本胶囊：品牌渐变淡底 + 渐变文字。
             Text("版本 \(appVersion)")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .padding(.top, 3)
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(DesignTokens.Aurora.brandGradient)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(DesignTokens.Aurora.brandGradient.opacity(0.12))
+                )
+                .padding(.top, 8)
 
-            Text("让您轻松使用Mac")
+            Text("让您轻松使用 Mac")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
-                .padding(.top, 16)
+                .padding(.top, 14)
+
+            // 功能 chip 行：渐变淡底 + 渐变图标 + 文字。
+            HStack(spacing: 10) {
+                featureChip(icon: "square.grid.2x2", title: "窗口切换")
+                featureChip(icon: "list.clipboard", title: "剪切板历史")
+                featureChip(icon: "keyboard", title: "全局快捷键")
+            }
+            .padding(.top, 24)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(EdgeInsets(top: 32, leading: 48, bottom: 36, trailing: 48))
-        .background(DesignTokens.Colors.card)
+        .background(DesignTokens.Aurora.pageBackground)
+    }
+
+    private func featureChip(icon: String, title: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DesignTokens.Aurora.brandGradient)
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(DesignTokens.Aurora.cardSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(DesignTokens.Aurora.cardBorder, lineWidth: 1)
+        )
+        .shadow(color: DesignTokens.Aurora.cardShadowColor, radius: 6, y: 2)
     }
 
     private var appVersion: String {

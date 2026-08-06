@@ -1,12 +1,10 @@
 import Combine
 import SwiftUI
 
-/// Window-switcher settings: a global multi-screen target picker at the top,
-/// and below it a master-detail list of configurable shortcuts. Layout
-/// follows the same design language as the clipboard/permissions pages:
-/// 17pt semibold section headers with muted-foreground icons, card background,
-/// and group-cards (secondary surface / 8pt radius / 1px border) for the
-/// shortcut detail sections.
+/// Window-switcher settings (Aurora v2)：分组卡片布局。
+/// 顶部「多屏幕」全局卡片 + 下方「快捷键」master-detail 卡片。
+/// 每个 section = 渐变图标 chip 标题 + 浮起卡片（cardSurface / 发丝描边 /
+/// 柔和阴影），与剪切板、权限页保持一致的视觉语言。
 struct WindowSwitcherSettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var selectedShortcutID: ShortcutConfig.ID?
@@ -17,12 +15,11 @@ struct WindowSwitcherSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
             displayTargetSection
-            Divider()
             shortcutSection
         }
         .padding(DesignTokens.Settings.contentPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(DesignTokens.Colors.card)
+        .background(DesignTokens.Aurora.pageBackground)
         .onAppear { selectFirstShortcutIfNeeded() }
         .onChange(of: selectedShortcutID) { _, newValue in
             if newValue == nil {
@@ -33,25 +30,22 @@ struct WindowSwitcherSettingsView: View {
 
     // MARK: - Section header
 
-    /// Section header: 17pt semibold title + 18pt muted-foreground icon, gap 8.
+    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
+            AuroraIconChip(systemName: systemImage, size: 26)
             Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.sectionHeader, weight: .semibold))
-                .tracking(-0.01)
-                .foregroundStyle(DesignTokens.Colors.foreground)
+                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
+                .foregroundStyle(.primary)
         }
     }
 
     // MARK: - Multi-screen target (global)
 
     private var displayTargetSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader("多屏幕", systemImage: "display")
-            VStack(alignment: .leading, spacing: DesignTokens.Settings.sectionBodyGap) {
+            VStack(alignment: .leading, spacing: 10) {
                 Picker("显示于", selection: $settings.displayTarget) {
                     ForEach(AppSettings.DisplayTarget.allCases) { target in
                         Text(target.displayName).tag(target)
@@ -61,20 +55,23 @@ struct WindowSwitcherSettingsView: View {
                 .frame(maxWidth: 480)
                 Text("切换窗口面板在哪个屏幕弹出。当前：\(settings.displayTarget.displayName)")
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
-                    .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.top, DesignTokens.Settings.sectionBodyTop)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .auroraSettingsCard()
         }
     }
 
     // MARK: - Shortcuts
 
     private var shortcutSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 10) {
             sectionHeader("快捷键", systemImage: "keyboard")
 
             // Custom split: left column at `splitFraction` of width, draggable
             // divider in the middle, right column fills the rest. Default 20/80.
+            // Aurora v2：整个 split 容器是一张浮起卡片。
             GeometryReader { geo in
                 let totalWidth = geo.size.width
                 let dividerWidth: CGFloat = 8
@@ -85,7 +82,7 @@ struct WindowSwitcherSettingsView: View {
                         .frame(width: leftWidth)
                     // Draggable divider
                     Rectangle()
-                        .fill(DesignTokens.Colors.border)
+                        .fill(DesignTokens.Aurora.insetSeparator)
                         .frame(width: 1)
                         .overlay(
                             Rectangle()
@@ -105,24 +102,22 @@ struct WindowSwitcherSettingsView: View {
                     shortcutDetail
                         .frame(maxWidth: .infinity)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Settings.splitRadius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignTokens.Settings.splitRadius, style: .continuous)
-                        .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .frame(minHeight: 280)
-            .padding(.top, DesignTokens.Settings.sectionBodyTop)
+            .auroraSettingsCard()
         }
     }
 
     /// Left column: the shortcut list on top, add/delete buttons at the bottom
-    /// (matching macOS System Settings layout). Background is secondarySurface;
-    /// the outer split container provides the border + radius.
+    /// (matching macOS System Settings layout). Aurora v2：列表区用比卡片
+    /// 略深的表面，与右侧详情形成层次。
     private var shortcutListColumn: some View {
         VStack(spacing: 0) {
             shortcutList
-            Divider()
+            Rectangle()
+                .fill(DesignTokens.Aurora.insetSeparator)
+                .frame(height: 1)
             // Toolbar with + / − buttons at the bottom, like macOS settings.
             HStack(spacing: 4) {
                 ShortcutToolbarButton(icon: "plus") {
@@ -139,7 +134,7 @@ struct WindowSwitcherSettingsView: View {
             }
             .padding(6)
         }
-        .background(DesignTokens.Colors.secondarySurface)
+        .background(Color.primary.opacity(0.025))
     }
 
     private var shortcutList: some View {
@@ -200,8 +195,9 @@ struct WindowSwitcherSettingsView: View {
     }
 }
 
-/// A single shortcut item in the left-column list. Two-line layout:
-/// name + badge on top, key combo below. Selected = primary-fill.
+/// A single shortcut item in the left-column list (Aurora v2)。
+/// 两行布局：名称 + 徽标在上，按键组合在下。
+/// 选中 = 品牌渐变实底 + 白字 + 外发光；hover = 极淡填充。
 private struct ShortcutItemView: View {
     let shortcut: ShortcutConfig
     let isSelected: Bool
@@ -211,7 +207,7 @@ private struct ShortcutItemView: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(shortcut.name)
                         .font(.system(size: 13, weight: .medium))
@@ -227,38 +223,42 @@ private struct ShortcutItemView: View {
                 }
                 Text(shortcut.displayString)
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(isSelected ? DesignTokens.Colors.primaryForeground.opacity(0.8) : DesignTokens.Colors.mutedForeground)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(backgroundColor)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(backgroundFill)
             )
+            .shadow(color: isSelected ? DesignTokens.Aurora.brandGlow : .clear,
+                    radius: 5, y: 2)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .animation(DesignTokens.Aurora.standard, value: isSelected)
+        .animation(DesignTokens.Aurora.standard, value: isHovered)
         .onHover { hovering in
             isHovered = hovering
         }
     }
 
-    private var backgroundColor: Color {
+    private var backgroundFill: AnyShapeStyle {
         if isSelected {
-            return DesignTokens.Colors.primary
+            return AnyShapeStyle(DesignTokens.Aurora.brandGradient)
         } else if isHovered {
-            return DesignTokens.Colors.border.opacity(0.4)
+            return AnyShapeStyle(Color.primary.opacity(0.05))
         } else {
-            return Color.clear
+            return AnyShapeStyle(.clear)
         }
     }
 
     private var badgeBg: Color {
-        isSelected ? DesignTokens.Colors.primaryForeground.opacity(0.22) : DesignTokens.Colors.primary.opacity(0.15)
+        isSelected ? Color.white.opacity(0.22) : DesignTokens.Aurora.tint.opacity(0.14)
     }
 
     private var badgeFg: Color {
-        isSelected ? DesignTokens.Colors.primaryForeground.opacity(0.95) : DesignTokens.Colors.primary
+        isSelected ? Color.white.opacity(0.95) : DesignTokens.Aurora.tint
     }
 }
 
@@ -276,10 +276,10 @@ private struct ShortcutToolbarButton: View {
                 .font(.system(size: 15))
                 .frame(width: 24, height: 22)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(hoverBackground)
                 )
-                .foregroundStyle(disabled ? DesignTokens.Colors.mutedForeground : DesignTokens.Colors.foreground)
+                .foregroundStyle(disabled ? Color.secondary : Color.primary)
                 .opacity(disabled ? 0.4 : 1.0)
         }
         .buttonStyle(.plain)
@@ -291,14 +291,13 @@ private struct ShortcutToolbarButton: View {
     }
 
     private var hoverBackground: Color {
-        (!disabled && isHovered) ? DesignTokens.Colors.border.opacity(0.5) : Color.clear
+        (!disabled && isHovered) ? Color.primary.opacity(0.07) : Color.clear
     }
 }
 
-/// The right-hand detail editor for a single shortcut. Uses the same
-/// group-card pattern as the permissions page (secondary surface card +
-/// 13pt semibold group header) instead of SwiftUI's `Form` so the look is
-/// consistent across all settings tabs.
+/// The right-hand detail editor for a single shortcut (Aurora v2)。
+/// 分组卡片：cardSurface 浮起卡 + 渐变 chip 组标题，
+/// Toggle 统一品牌 tint，与全设置页一致。
 struct ShortcutDetailView: View {
     @EnvironmentObject private var settings: AppSettings
     @Binding var shortcut: ShortcutConfig
@@ -309,12 +308,12 @@ struct ShortcutDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
-                groupCard("基本信息") {
+            VStack(alignment: .leading, spacing: 14) {
+                groupCard("基本信息", systemImage: "info.circle") {
                     row("名称") {
                         if shortcut.isDefault {
                             Text(shortcut.name)
-                                .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                                .foregroundStyle(.secondary)
                         } else {
                             TextField("名称", text: $shortcut.name)
                                 .textFieldStyle(.plain)
@@ -336,7 +335,7 @@ struct ShortcutDetailView: View {
                                         })
                     }
                 }
-                groupCard("预览图大小") {
+                groupCard("预览图大小", systemImage: "photo") {
                     Picker("大小", selection: $shortcut.previewSize) {
                         ForEach(AppSettings.PreviewSize.allCases) { size in
                             Text(size.displayName).tag(size)
@@ -346,14 +345,20 @@ struct ShortcutDetailView: View {
                     .labelsHidden()
                     Text("此快捷键切换窗口时的缩略图大小。当前：\(shortcut.previewSize.displayName)")
                         .font(.system(size: DesignTokens.SettingsTypography.caption))
-                        .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                        .padding(.top, 6)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
                 }
-                groupCard("显示窗口") {
+                groupCard("显示窗口", systemImage: "macwindow") {
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .tint(DesignTokens.Aurora.tint)
                         .help("在切换器中显示最小化到 Dock 的窗口（显示应用图标）")
                     divider
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .tint(DesignTokens.Aurora.tint)
                         .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示应用图标）")
                     if !axGranted {
                         Label("显示最小化/隐藏窗口需要『辅助功能』权限，当前未授予，开关暂不生效。",
@@ -364,32 +369,34 @@ struct ShortcutDetailView: View {
                     }
                     Text("最小化和隐藏的窗口无法实时捕获预览，将显示应用图标和窗口标题")
                         .font(.system(size: DesignTokens.SettingsTypography.caption))
-                        .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                        .padding(.top, 6)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
                 }
-                groupCard("释放行为") {
+                groupCard("释放行为", systemImage: "hand.raised") {
                     Picker("快捷键释放后", selection: $shortcut.releaseBehavior) {
                         ForEach(ShortcutConfig.ReleaseBehavior.allCases) { behavior in
                             Text(behavior.displayName).tag(behavior)
                         }
                     }
                     .pickerStyle(.radioGroup)
+                    .tint(DesignTokens.Aurora.tint)
                 }
             }
-            .padding(4)
+            .padding(10)
         }
         .onReceive(permissionTimer) { _ in
             axGranted = AccessibilityChecker.isTrusted
         }
     }
 
-    /// Group card: secondary surface, 8pt radius, 1px border, 14pt padding.
-    private func groupCard<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+    /// Group card（Aurora v2）：渐变 chip 标题 + 浮起卡片。
+    private func groupCard(_ title: String, systemImage: String, @ViewBuilder _ content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
+                AuroraIconChip(systemName: systemImage, size: 20)
                 Text(title)
                     .font(.system(size: DesignTokens.SettingsTypography.groupHeader, weight: .semibold))
-                    .foregroundStyle(DesignTokens.Colors.foreground)
+                    .foregroundStyle(.primary)
             }
             .padding(.horizontal, 4)
             VStack(alignment: .leading, spacing: 10) {
@@ -398,27 +405,21 @@ struct ShortcutDetailView: View {
             .padding(.vertical, DesignTokens.Settings.groupRowVPadding)
             .padding(.horizontal, DesignTokens.Settings.groupRowHPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                    .fill(DesignTokens.Colors.secondarySurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                    .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-            )
+            .auroraSettingsCard()
         }
     }
 
     private var divider: some View {
-        Divider()
-            .opacity(0.6)
+        Rectangle()
+            .fill(DesignTokens.Aurora.insetSeparator)
+            .frame(height: 1)
     }
 
     private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: DesignTokens.Settings.formRowGap) {
             Text(label)
                 .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
-                .foregroundStyle(DesignTokens.Colors.foreground)
+                .foregroundStyle(.primary)
                 .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
             content()
             Spacer(minLength: 0)

@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// 菜单栏图标：纯净的圆润大写"E"字母，无背景。符合 macOS 设计语言
-/// （SF Pro Rounded + template 单色适配明暗模式）。
+/// 菜单栏图标（Aurora v2）：新 Logo 剪影——圆角方块 + 闪电镂空。
+/// isTemplate=true 让菜单栏自动用单色渲染（深色模式白、浅色模式黑），
+/// 镂空闪电透过 alpha 通道呈现，与应用内 Aurora 品牌图标形态一致。
 struct BlackEMenuBarIcon: View {
     @Environment(\.openWindow) private var openWindow
     private static let iconImage: NSImage = BlackEIconRenderer.render()
@@ -17,40 +18,42 @@ struct BlackEMenuBarIcon: View {
     }
 }
 
-/// 用 NSImage 绘制"E"字母：SF Pro Rounded 字体（系统圆体），饱满居中，
-/// isTemplate=true 让菜单栏自动用单色渲染（深色模式白、浅色模式黑）。
-///
-/// 画布 22pt、字形 17pt heavy weight——让 E 字形高度约 13pt，与菜单栏
-/// 监控数值（10pt light monospaced 字形约 7pt 高）形成清晰的视觉权重：
-/// E 图标更显著，但仍能与右侧数值垂直对齐。
+/// 用 NSImage 绘制新 Logo 剪影：实心圆角方块中镂空一道闪电。
+/// 与 Aurora 品牌图标（渐变方块 + 白色 bolt）同形态，template 模式
+/// 下单色呈现：方块部分取菜单栏前景色，闪电处透明。
 enum BlackEIconRenderer {
     static func render() -> NSImage {
-        // 画布 22pt：略大于系统 status item 默认高度（22pt），保证 E 形
-        // 在菜单栏中视觉饱满。
+        // 画布 22pt，与系统 status item 默认高度一致。
         let size = NSSize(width: 22, height: 22)
         let image = NSImage(size: size)
         image.lockFocus()
 
-        // 圆体设计字体（SF Pro Rounded），契合 macOS 视觉语言。
-        // weight=.heavy 让 E 形在小尺寸下笔画饱满；size=18 让字形几乎填满
-        // 画布高度（实际字形高度约 13pt，留上下边距以视觉居中）。
-        let baseFont = NSFont.systemFont(ofSize: 18, weight: .heavy)
-        let descriptor = baseFont.fontDescriptor.withDesign(.rounded) ?? baseFont.fontDescriptor
-        let font = NSFont(descriptor: descriptor, size: 18) ?? baseFont
+        // 圆角方块：18×18 居中，圆角 4.5（与品牌图标 0.25 比例一致）。
+        let rectSide: CGFloat = 18
+        let rect = NSRect(x: (size.width - rectSide) / 2,
+                          y: (size.height - rectSide) / 2,
+                          width: rectSide,
+                          height: rectSide)
+        NSColor.black.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 4.5, yRadius: 4.5).fill()
 
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            // template 模式下颜色被忽略，由菜单栏决定单色。
-            .foregroundColor: NSColor.black
-        ]
-        let str = NSAttributedString(string: "E", attributes: attrs)
-        let textSize = str.size()
-        // 水平居中；垂直微调 -0.5pt 校正基线，让 E 视觉居中。
-        let textOrigin = NSPoint(
-            x: (size.width - textSize.width) / 2,
-            y: (size.height - textSize.height) / 2 - 0.5
-        )
-        str.draw(at: textOrigin)
+        // 闪电镂空：用 destinationOut 混合模式把 bolt.fill 从方块中擦除，
+        // 形成透明闪电（template 渲染时呈现为菜单栏背景色）。
+        if let bolt = NSImage(systemSymbolName: "bolt.fill",
+                              accessibilityDescription: nil) {
+            let boltSide: CGFloat = 10.5
+            let config = NSImage.SymbolConfiguration(pointSize: boltSide, weight: .bold)
+            let configured = bolt.withSymbolConfiguration(config) ?? bolt
+            let boltSize = configured.size
+            let boltRect = NSRect(x: (size.width - boltSize.width) / 2,
+                                  y: (size.height - boltSize.height) / 2,
+                                  width: boltSize.width,
+                                  height: boltSize.height)
+            configured.draw(in: boltRect,
+                            from: .zero,
+                            operation: .destinationOut,
+                            fraction: 1.0)
+        }
 
         image.unlockFocus()
         // isTemplate=true：菜单栏自动用单色渲染，深色模式白色、浅色模式黑色。

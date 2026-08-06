@@ -59,8 +59,13 @@ struct WindowThumbnailCell: View {
                 .frame(width: thumbnailSize.width, height: thumbnailSize.height)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
+                    // 当前活跃窗口标记：品牌渐变描边（Aurora v2），
+                    // 与选中态的单色层级区分。
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(item.isActiveWindow ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 2)
+                        .strokeBorder(item.isActiveWindow
+                                      ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.65))
+                                      : AnyShapeStyle(.clear),
+                                      lineWidth: 2)
                 )
         }
         // Padding compensation: selected state uses 2pt border vs default 1pt,
@@ -68,22 +73,30 @@ struct WindowThumbnailCell: View {
         // (design spec: .is-selected padding 10→9). This prevents layout shift.
         .padding(isSelected ? 9 : 10)
         .background(
-            // 选中态（键盘 Tab）：accentColor 填充（macOS 原生高亮风格）。
-            // 悬停态（鼠标预瞄）：极淡填充，比选中态浅很多，仅作视觉标记。
+            // Aurora v2：选中态（键盘 Tab）= 品牌渐变淡填充；
+            // 悬停态（鼠标预瞄）= 更浅的渐变填充，仅作视觉标记。
             RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.25)
-                      : (isHover ? Color.accentColor.opacity(0.08) : .clear))
+                .fill(isSelected
+                      ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.18))
+                      : (isHover
+                         ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.07))
+                         : AnyShapeStyle(.clear)))
         )
         .overlay(
-            // 边框优先级：选中（强）> 悬停（浅）> 无。
-            // 设计稿：selected = 2px solid primary（不透明），hover = 1.5px primary 55%。
+            // 边框优先级：选中（品牌渐变 2pt，强）> 悬停（渐变 55% 1.5pt，浅）> 无。
             RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)
                 .strokeBorder(
-                    isSelected ? Color.accentColor
-                    : (isHover ? Color.accentColor.opacity(0.55) : .clear),
+                    isSelected
+                    ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                    : (isHover
+                       ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.55))
+                       : AnyShapeStyle(.clear)),
                     lineWidth: isSelected ? 2 : 1.5
                 )
         )
+        // 选中态品牌色外发光，让释放快捷键将激活的目标一目了然。
+        .shadow(color: isSelected ? DesignTokens.Aurora.brandGlow : .clear,
+                radius: isSelected ? 10 : 0, y: isSelected ? 2 : 0)
         .overlay(
             // Default (non-selected, non-hover) subtle border: foreground 7%.
             RoundedRectangle(cornerRadius: DesignTokens.Radius.cell, style: .continuous)

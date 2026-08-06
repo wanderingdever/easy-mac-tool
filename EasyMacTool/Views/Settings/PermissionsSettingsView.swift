@@ -4,10 +4,9 @@ import ScreenCaptureKit
 import ServiceManagement
 import SwiftUI
 
-/// 权限设置 view: 通用 group-card + 权限卡片列表。对应「权限设置」Tab。
-/// 布局遵循 `设置 · 权限.html`：20pt 页面标题，group-card（secondary bg /
-/// 8pt radius / 1px border）承载开关行，权限卡片用 secondary bg + 12pt
-/// padding + 20pt 状态图标。
+/// 权限设置（Aurora v2）：通用卡片 + 权限卡片列表。
+/// 权限卡片带状态胶囊（已授权 = 绿渐变 / 未授权 = 红），
+/// 「请求权限」为品牌渐变主按钮，与全应用 Aurora 语言一致。
 struct PermissionsSettingsView: View {
     @State private var launchAtLogin = false
     // 权限状态本地缓存：每 2 秒定时刷新，让用户授权后回到设置窗口能看到
@@ -21,15 +20,15 @@ struct PermissionsSettingsView: View {
     private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
-            generalSection
-            Divider()
-            permissionsSection
-            Spacer(minLength: 0)
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
+                generalSection
+                permissionsSection
+            }
+            .padding(DesignTokens.Settings.contentPadding)
         }
-        .padding(DesignTokens.Settings.contentPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(DesignTokens.Colors.card)
+        .background(DesignTokens.Aurora.pageBackground)
         .onAppear { loadLaunchAtLoginStatus() }
         .onReceive(permissionTimer) { _ in
             // 定时刷新权限状态，让用户授权后回到设置窗口看到变绿。
@@ -41,75 +40,54 @@ struct PermissionsSettingsView: View {
     // MARK: - General group-card
 
     private var generalSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            groupHeader("通用", systemImage: "gear")
-            // group-card: secondary bg, 8pt radius, 1px border, overflow hidden.
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("通用", systemImage: "gear")
             VStack(spacing: 0) {
                 HStack {
                     Text("开机时自动启动")
                         .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
-                        .foregroundStyle(DesignTokens.Colors.foreground)
+                        .foregroundStyle(.primary)
                     Spacer(minLength: 0)
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
+                        .tint(DesignTokens.Aurora.tint)
                         .onChange(of: launchAtLogin) { _, newValue in
                             toggleLaunchAtLogin(enabled: newValue)
                         }
                 }
-                .padding(.vertical, DesignTokens.Settings.groupRowVPadding)
-                .padding(.horizontal, DesignTokens.Settings.groupRowHPadding)
-                .frame(minHeight: DesignTokens.Settings.formRowMinHeight)
             }
-            .background(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                    .fill(DesignTokens.Colors.secondarySurface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                    .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-            )
-            Text("登录时自动启动")
-                .font(.system(size: DesignTokens.SettingsTypography.caption))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                .padding(.horizontal, 4)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .auroraSettingsCard()
         }
     }
 
-    /// Group header: 13pt semibold + 14pt muted-foreground icon, gap 6.
-    private func groupHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
+    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
+    private func sectionHeader(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 8) {
+            AuroraIconChip(systemName: systemImage, size: 26)
             Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.groupHeader, weight: .semibold))
-                .foregroundStyle(DesignTokens.Colors.foreground)
+                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
+                .foregroundStyle(.primary)
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 8)
     }
 
     // MARK: - Permissions cards
 
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.shield")
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                Text("权限")
-                    .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                    .foregroundStyle(DesignTokens.Colors.foreground)
-            }
+            sectionHeader("权限", systemImage: "checkmark.shield")
             Text("EasyMacTool 需要以下权限才能正常运行。点击「请求权限」后会同时调用系统 API 并打开系统设置，让应用出现在列表中，再开启开关。授权后约 2 秒状态自动刷新。")
                 .font(.system(size: DesignTokens.SettingsTypography.caption))
-                .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 560, alignment: .leading)
+                .padding(.horizontal, 4)
 
             permissionRow(
+                icon: "hand.point.up.left",
                 title: "辅助功能",
                 description: "拦截 ⌘⇥ 并切换窗口。",
                 granted: accessibilityGranted,
@@ -117,6 +95,7 @@ struct PermissionsSettingsView: View {
                 settingsURL: "x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_Accessibility"
             )
             permissionRow(
+                icon: "rectangle.dashed.badge.record",
                 title: "屏幕录制",
                 description: "显示窗口实时预览。",
                 granted: screenRecordingGranted,
@@ -130,23 +109,27 @@ struct PermissionsSettingsView: View {
         }
     }
 
-    private func permissionRow(title: String, description: String, granted: Bool?, onRequest: @escaping () -> Void, settingsURL: String) -> some View {
+    private func permissionRow(icon: String, title: String, description: String, granted: Bool?, onRequest: @escaping () -> Void, settingsURL: String) -> some View {
         HStack(alignment: .top, spacing: DesignTokens.Settings.permCardGap) {
-            statusIcon(granted)
-                .frame(width: DesignTokens.Settings.permStatusSize, height: DesignTokens.Settings.permStatusSize)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: DesignTokens.SettingsTypography.permTitle, weight: .semibold))
-                    .foregroundStyle(DesignTokens.Colors.foreground)
+            // 权限图标：渐变淡底 chip，统一品牌语言。
+            AuroraIconChip(systemName: icon, size: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: DesignTokens.SettingsTypography.permTitle, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    statusPill(granted)
+                }
                 Text(description)
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
-                    .foregroundStyle(DesignTokens.Colors.mutedForeground)
-                HStack(spacing: DesignTokens.Settings.permActionsGap) {
-                    // 「请求权限」按钮：同时调请求 API + 跳转系统设置。
-                    borderedButton("请求权限") {
+                    .foregroundStyle(.secondary)
+                HStack(spacing: DesignTokens.Settings.permActionsGap + 2) {
+                    // 「请求权限」：品牌渐变主按钮，同时调请求 API + 跳转系统设置。
+                    Button("请求权限") {
                         onRequest()
                         openSystemSettings(settingsURL)
                     }
+                    .buttonStyle(AuroraPrimaryButtonStyle())
                     borderlessLinkButton("打开系统设置") {
                         openSystemSettings(settingsURL)
                     }
@@ -155,38 +138,38 @@ struct PermissionsSettingsView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(DesignTokens.Settings.permCardPadding)
-        .background(
-            RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                .fill(DesignTokens.Colors.secondarySurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: DesignTokens.Settings.groupCardRadius, style: .continuous)
-                .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-        )
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .auroraSettingsCard()
     }
 
-    /// Bordered button: 12pt, 4×10 padding, 6pt radius, 1px border, card bg.
-    private func borderedButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.buttonSmall))
-                .foregroundStyle(DesignTokens.Colors.foreground)
-                .padding(.vertical, 4)
-                .padding(.horizontal, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
-                        .fill(DesignTokens.Colors.card)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
-                        .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-                )
+    /// 状态胶囊：已授权 = 绿底白字 check；未授权 = 红底白字叹号；
+    /// 未知 = 灰底问号。替代原来孤立的 20pt 状态图标，语义更明确。
+    private func statusPill(_ granted: Bool?) -> some View {
+        let text: String
+        let icon: String
+        let bg: Color
+        switch granted {
+        case .some(true):
+            text = "已授权"; icon = "checkmark"; bg = DesignTokens.Colors.success
+        case .some(false):
+            text = "未授权"; icon = "exclamationmark"; bg = DesignTokens.Colors.error
+        case .none:
+            text = "未知"; icon = "questionmark"; bg = Color(nsColor: .secondaryLabelColor)
         }
-        .buttonStyle(.plain)
+        return HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8, weight: .bold))
+            Text(text)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(bg))
     }
 
-    /// Borderless link button: 12pt primary color with external-link icon.
+    /// Borderless link button: 12pt 品牌 tint 色 + external-link icon。
     private func borderlessLinkButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
@@ -194,9 +177,9 @@ struct PermissionsSettingsView: View {
                 Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 12, weight: .regular))
             }
-            .font(.system(size: DesignTokens.SettingsTypography.buttonSmall))
-            .foregroundStyle(DesignTokens.Colors.primary)
-            .padding(.vertical, 4)
+            .font(.system(size: DesignTokens.SettingsTypography.buttonSmall, weight: .medium))
+            .foregroundStyle(DesignTokens.Aurora.tint)
+            .padding(.vertical, 6)
             .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
@@ -256,18 +239,5 @@ struct PermissionsSettingsView: View {
                 NSWorkspace.shared.open(url)
             }
         }
-    }
-
-    private func statusIcon(_ granted: Bool?) -> some View {
-        let name: String
-        let color: Color
-        switch granted {
-        case .some(true):  name = "checkmark.circle.fill"; color = DesignTokens.Colors.success
-        case .some(false): name = "exclamationmark.circle.fill"; color = DesignTokens.Colors.error
-        case .none:        name = "questionmark.circle.fill"; color = Color(nsColor: .secondaryLabelColor)
-        }
-        return Image(systemName: name)
-            .foregroundStyle(color)
-            .font(.system(size: DesignTokens.Settings.permStatusSize, weight: .regular))
     }
 }

@@ -46,7 +46,7 @@ struct KeyRecorderView: View {
                 if isRecording {
                     Text("按下快捷键…")
                         .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
-                        .foregroundStyle(DesignTokens.Colors.mutedForeground)
+                        .foregroundStyle(DesignTokens.Aurora.tint)
                 } else {
                     // kbd: 15pt mono, 0.04em letter-spacing (~0.6 tracking).
                     Text(KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
@@ -59,26 +59,22 @@ struct KeyRecorderView: View {
             .padding(.vertical, 5)
             .padding(.horizontal, 14)
             .background(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
-                    .fill(DesignTokens.Colors.background)
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius + 2, style: .continuous)
+                    .fill(DesignTokens.Aurora.cardSurface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
-                    .strokeBorder(DesignTokens.Colors.border, lineWidth: 1)
-            )
-            // Subtle inset shadow for the recessed control look (design: inset 0 1px 2px rgba(0,0,0,0.06)).
-            .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous)
+                // Aurora v2：常态发丝描边；录制中品牌渐变描边 + 外发光。
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius + 2, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.black.opacity(0.06), Color.clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 1
+                        isRecording
+                        ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                        : AnyShapeStyle(DesignTokens.Aurora.cardBorder),
+                        lineWidth: isRecording ? 1.5 : 1
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius, style: .continuous))
             )
+            .shadow(color: isRecording ? DesignTokens.Aurora.brandGlow : .clear,
+                    radius: 5, y: 2)
+            .animation(DesignTokens.Aurora.standard, value: isRecording)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
@@ -154,6 +150,12 @@ struct KeyRecorderView: View {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
         }
+        // 配对守卫：只有本录制器确实 beginRecording 过（isRecording == true）
+        // 才调用 endRecording。否则两种场景会触发 HotkeyManager 的
+        // "beginRecording/endRecording not paired" 断言：
+        // 1. .onDisappear 在视图销毁时调用 stopRecording，但用户从未开始录制；
+        // 2. 录制中按 Esc，本地 monitor 与 .onExitCommand 各触发一次 stopRecording。
+        guard isRecording else { return }
         isRecording = false
         // Re-enable the global event tap（引用计数 -1，归零才恢复拦截）。
         HotkeyManager.shared.endRecording()

@@ -76,7 +76,15 @@ struct ClipboardOverlayView: View {
         return ZStack {
             VStack(spacing: 0) {
                 searchBar(filtered: filteredItems)
-                Divider()
+                // Aurora v2：渐变发丝分隔线替代生硬 Divider，两端渐隐。
+                DesignTokens.Aurora.brandHorizontal
+                    .opacity(0.25)
+                    .frame(height: 1)
+                    .mask(
+                        LinearGradient(colors: [.clear, .black, .black, .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                    )
+                    .padding(.horizontal, 20)
                 // Spacer 把卡片条压到底部：面板在预览模式被拉高时，卡片仍贴底，
                 // 预览放大卡片可向上溢出到 Spacer 留出的空白区。
                 Spacer(minLength: 0)
@@ -84,23 +92,35 @@ struct ClipboardOverlayView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
-                // Bottom-flush: no padding at the bottom so the panel sits directly
-                // on the screen's bottom edge. Top has a small inset for the bar.
-                // 背景更透明：ultraThinMaterial 已是最透明材质之一，叠加一层更低
-                // opacity 的白色让整体更通透。
-                UnevenRoundedRectangle(topLeadingRadius: 14, bottomLeadingRadius: 0,
-                                       bottomTrailingRadius: 0, topTrailingRadius: 14)
-                    .fill(.ultraThinMaterial.opacity(0.7))
-                    .overlay(
-                        UnevenRoundedRectangle(topLeadingRadius: 14, bottomLeadingRadius: 0,
-                                               bottomTrailingRadius: 0, topTrailingRadius: 14)
-                            .strokeBorder(.white.opacity(0.08), lineWidth: 1)
-                    )
+                // Aurora v2：全浮动玻璃卡片（四边留白、圆角 20）。
+                // 层序：ultraThinMaterial 底 → 极光微光 sheen → 白色发丝描边 →
+                // 顶部玻璃反光高光线。阴影由 NSPanel.hasShadow 依内容 alpha 渲染。
+                ZStack(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(.ultraThinMaterial.opacity(0.85))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .fill(DesignTokens.Aurora.glassSheen)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                        )
+                    // 顶部发丝高光线（玻璃上缘反光），两端渐隐。
+                    DesignTokens.Aurora.glassEdgeLight
+                        .frame(height: 1)
+                        .mask(
+                            LinearGradient(colors: [.clear, .black, .black, .clear],
+                                           startPoint: .leading, endPoint: .trailing)
+                        )
+                        .padding(.horizontal, 24)
+                        .padding(.top, 0.5)
+                }
             )
-            .padding(.horizontal, 8)
-            .padding(.top, 4)
-            // No bottom padding — the panel's content reaches the screen edge.
-            .padding(.bottom, 0)
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            // 底部同步留白：卡片完全浮起，不再贴屏幕底边。
+            .padding(.bottom, 10)
             // Click anywhere outside the filter menu / preview to dismiss it.
             .contentShape(Rectangle())
             .onTapGesture {
@@ -227,52 +247,58 @@ struct ClipboardOverlayView: View {
 
     private func searchBar(filtered: [ClipboardItem]) -> some View {
         HStack(spacing: 12) {
-            // 1. 统计数量（左）：剪切板图标 + 计数（设计稿规范）。
-            HStack(spacing: 6) {
-                Image(systemName: "clipboard")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                Text("\(filtered.count)")
-                    .font(.system(size: 13))
+            // 1. 统计数量（左）：渐变图标 chip + 计数（Aurora v2）。
+            HStack(spacing: 8) {
+                AuroraIconChip(systemName: "list.clipboard", size: 26)
+                Text("\(filtered.count) 条")
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
             Spacer(minLength: 0)
 
-            // 2. 搜索框 + 筛选按钮（中）。
-            // 设计稿：height 34, bg --apple-muted(controlBackgroundColor),
-            // 0.5px border (black 6% light / white 8% dark)。
+            // 2. 搜索框 + 筛选按钮（中）：胶囊玻璃搜索框。
+            // 聚焦时外圈品牌渐变描边（聚焦环），非聚焦发丝描边。
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(focusTarget == .search
+                                     ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                                     : AnyShapeStyle(.secondary))
                 TextField("搜索…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
-                    .frame(width: 160)
+                    .frame(width: 170)
                     .lineLimit(1)
                     // 与卡片共享 @FocusState：仅当用户主动点击此处或按 ⌘F
                     // 时才获得焦点，避免面板出现时自动抢占焦点导致 ←/→ 失效。
                     .focused($focusTarget, equals: .search)
                 filterButton
             }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
+            .padding(.horizontal, 12)
+            .frame(height: 36)
             .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(NSColor.controlBackgroundColor))
+                Capsule()
+                    .fill(.ultraThinMaterial)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.5)
+                Capsule()
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .overlay(
+                // 聚焦环：品牌渐变 1.5pt，仅搜索态可见。
+                Capsule()
+                    .strokeBorder(DesignTokens.Aurora.brandGradient,
+                                  lineWidth: focusTarget == .search ? 1.5 : 0)
+                    .opacity(focusTarget == .search ? 1 : 0)
             )
             // 筛选菜单 overlay 锚定在这个搜索框组的右上角，菜单紧贴筛选
-            // 按钮下方出现。offset(y: 40) 让菜单越过 34pt 高度 + 一点间隙。
+            // 按钮下方出现。offset(y: 42) 让菜单越过 36pt 高度 + 一点间隙。
             .overlay(alignment: .topTrailing) {
                 if showFilterMenu {
                     filterMenu
-                        .offset(y: 40)
+                        .offset(y: 42)
                         .zIndex(999)
                         .transition(.opacity)
                         .transaction { $0.animation = nil }
@@ -282,18 +308,12 @@ struct ClipboardOverlayView: View {
 
             Spacer(minLength: 0)
 
-            // 3. 删除按钮（右）—— 点击弹出确认 alert，不直接清空。
-            Button(action: { showClearAlert = true }) {
-                Image(systemName: "trash")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .help("清空历史")
+            // 3. 删除按钮（右）—— 圆形 hover 红色淡底，点击弹出确认 alert。
+            ClearHistoryButton { showClearAlert = true }
         }
         .padding(.horizontal, 16)
-        // 头部高度 56pt，所有元素垂直居中。
-        .frame(height: 56, alignment: .center)
+        // 头部高度 58pt，所有元素垂直居中。
+        .frame(height: 58, alignment: .center)
         .zIndex(1)
     }
 
@@ -302,8 +322,10 @@ struct ClipboardOverlayView: View {
             showFilterMenu.toggle()
         } label: {
             Image(systemName: activeFilter == nil ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(activeFilter == nil ? .secondary : Color.accentColor)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(activeFilter == nil
+                                 ? AnyShapeStyle(.secondary)
+                                 : AnyShapeStyle(DesignTokens.Aurora.brandGradient))
         }
         .buttonStyle(.borderless)
         .help("筛选类型")
@@ -312,22 +334,29 @@ struct ClipboardOverlayView: View {
     private var filterMenu: some View {
         VStack(alignment: .leading, spacing: 2) {
             filterRow(nil, label: "全部")
-            Divider().padding(.vertical, 2)
+            Rectangle()
+                .fill(DesignTokens.Aurora.insetSeparator)
+                .frame(height: 1)
+                .padding(.vertical, 3)
             ForEach(ClipboardItem.ContentKind.allCases) { kind in
                 filterRow(kind, label: kind.label)
             }
         }
         .padding(8)
-        .frame(width: 140)
+        .frame(width: 148)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(.ultraThickMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(DesignTokens.Aurora.glassSheen)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(.white.opacity(0.15), lineWidth: 1)
                 )
         )
-        .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+        .shadow(color: DesignTokens.Aurora.floatShadowColor, radius: 12, y: 4)
     }
 
     private func filterRow(_ kind: ClipboardItem.ContentKind?, label: String) -> some View {
@@ -339,10 +368,11 @@ struct ClipboardOverlayView: View {
             showFilterMenu = false
         } label: {
             HStack(spacing: 8) {
-                // 设计稿：纯色圆形圆点（18×18），无内部图标，用颜色区分种类
+                // 类型圆点（18×18）：颜色区分种类，选中态全亮 + 微光晕。
                 Circle()
                     .fill(dotColor.opacity(isActive ? 1.0 : 0.7))
                     .frame(width: 18, height: 18)
+                    .shadow(color: dotColor.opacity(isActive ? 0.45 : 0), radius: 3)
 
                 Text(label)
                     .font(.system(size: 13, weight: isActive ? .semibold : .regular))
@@ -353,14 +383,16 @@ struct ClipboardOverlayView: View {
                 if isActive {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(DesignTokens.Aurora.brandGradient)
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isActive ? Color.accentColor.opacity(0.1) : .clear)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isActive
+                          ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.12))
+                          : AnyShapeStyle(.clear))
             )
             .contentShape(Rectangle())
         }
@@ -393,13 +425,24 @@ struct ClipboardOverlayView: View {
         if filtered.isEmpty {
             VStack {
                 Spacer()
-                VStack(spacing: 6) {
-                    Image(systemName: "tray")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.tertiary)
+                VStack(spacing: 10) {
+                    // Aurora v2 空状态：渐变淡底圆形托底 + 渐变图标。
+                    ZStack {
+                        Circle()
+                            .fill(DesignTokens.Aurora.brandGradient.opacity(0.10))
+                        Image(systemName: query.isEmpty ? "tray" : "magnifyingglass")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundStyle(DesignTokens.Aurora.brandGradient)
+                    }
+                    .frame(width: 56, height: 56)
                     Text(query.isEmpty ? "剪切板为空" : "无匹配项")
-                        .font(.caption)
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
+                    if query.isEmpty {
+                        Text("复制的内容会自动出现在这里")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
                 Spacer()
             }
@@ -668,6 +711,33 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
     }
 }
 
+/// 清空历史按钮（Aurora v2）：圆形图标按钮，hover 时红色淡底 + 红图标，
+/// 与设置页破坏按钮的语义色一致。
+private struct ClearHistoryButton: View {
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "trash")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isHovered ? DesignTokens.Colors.error : Color.secondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(isHovered
+                              ? DesignTokens.Colors.errorSurface
+                              : Color.primary.opacity(0.05))
+                )
+        }
+        .buttonStyle(.borderless)
+        .help("清空历史")
+        .onHover { hovering in
+            withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
+        }
+    }
+}
+
 /// 焦点目标：卡片容器（默认）或搜索框。配合 @FocusState 让面板出现时
 /// firstResponder 是卡片容器，而非 TextField——这样 ←/→/Enter 直接生效，
 /// 不会被 TextField 拦截。用户点击搜索框或按 ⌘F 才切换到搜索态。
@@ -699,15 +769,17 @@ private struct ClipboardPreviewCard: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .windowBackgroundColor))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(DesignTokens.Aurora.cardSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+            // Aurora v2：品牌渐变描边替代单色 accent 描边。
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(DesignTokens.Aurora.brandGradient.opacity(0.6), lineWidth: 1.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.3), radius: 16, y: 4)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: DesignTokens.Aurora.floatShadowColor, radius: 20, y: 6)
+        .shadow(color: DesignTokens.Aurora.brandGlow.opacity(0.5), radius: 24, y: 0)
         .task {
             // 若为单图片文件，后台加载避免阻塞主线程。
             // NSImage(contentsOf:) 是同步磁盘 I/O，在 .task（@MainActor）中
@@ -770,11 +842,12 @@ private struct ClipboardPreviewCard: View {
         .padding(.vertical, 10)
         .background(
             LinearGradient(
-                colors: [Color(nsColor: item.sourceAppTint), Color(nsColor: item.sourceAppTint).opacity(0.72)],
-                startPoint: .top, endPoint: .bottom
+                colors: [Color(nsColor: item.sourceAppTint),
+                         Color(nsColor: item.sourceAppTint).opacity(0.72)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
             )
         )
-        .clipShape(TopRoundedShape(radius: 12))
+        .clipShape(TopRoundedShape(radius: 16))
     }
 
     @ViewBuilder
@@ -872,17 +945,16 @@ private struct ClipboardPreviewCard: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
+            // Aurora v2：品牌渐变主按钮，替代原生 borderedProminent。
             Button(action: onApply) {
                 Label("复制", systemImage: "doc.on.doc")
-                    .font(.system(size: 12, weight: .medium))
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .buttonStyle(AuroraPrimaryButtonStyle())
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
-        .clipShape(BottomRoundedShape(radius: 12))
+        .background(DesignTokens.Aurora.cardSurface.opacity(0.85))
+        .clipShape(BottomRoundedShape(radius: 16))
     }
 }
 
@@ -919,22 +991,38 @@ private struct ClipboardCard: View {
         }
         .frame(width: cardWidth, height: height)
         .background(
-            // 设计稿：卡片背景始终为 card 色，hover 不改变背景填充
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: .windowBackgroundColor))
+            // Aurora v2：卡片用自适应 cardSurface（light 纯白 / dark #242429），
+            // 与玻璃面板拉开层次；hover 不改变背景填充。
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(DesignTokens.Aurora.cardSurface)
         )
-        .overlay(
-            // 设计稿：默认 transparent 边框，hover 时 primary 边框 2px
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(isHover ? Color.accentColor : .clear,
-                              lineWidth: isHover ? 2 : 0)
-        )
+        .overlay {
+            // 描边二选一（条件挂载，非 opacity 切换）：
+            // 之前渐变描边对所有卡片常驻（lineWidth 0 / opacity 0 仍每帧
+            // 求值渐变着色器），快速滚动时 5-10 张可见卡片的渐变求值
+            // 是掉帧主因之一。现在非 hover 卡片只画纯色发丝描边，
+            // hover 的那一张才挂载渐变描边。
+            if isHover {
+                // 选中/hover 态：品牌渐变描边 2.5pt——键盘选中与鼠标 hover
+                // 合并为同一视觉（isHover 已合并两态），选中反馈清晰明确。
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(DesignTokens.Aurora.brandGradient, lineWidth: 2.5)
+            } else {
+                // 常驻发丝描边，让卡片在玻璃上边缘清晰。
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(DesignTokens.Aurora.cardBorder, lineWidth: 1)
+            }
+        }
         // 性能：非 hover 卡片不渲染阴影（radius 0 不触发离屏模糊）。
-        // 滚动时仅可见的 5-10 张卡片中，hover 态最多 1 张有阴影。
-        // 之前非 hover 卡片 radius 4，每帧 5-10 次离屏模糊，滚动掉帧。
-        .shadow(color: .black.opacity(0.08), radius: isHover ? 8 : 0, y: isHover ? 4 : 0)
-        .scaleEffect(isHover ? 1.04 : 1.0)
+        // hover 态用品牌色外发光 + 轻微上浮，突出当前操作目标。
+        .shadow(color: isHover ? DesignTokens.Aurora.brandGlow : .clear,
+                radius: isHover ? 10 : 0, y: isHover ? 4 : 0)
+        .scaleEffect(isHover ? 1.03 : 1.0)
+        .offset(y: isHover ? -2 : 0)
         .opacity(isDimmed ? 0.4 : 1.0)
+        // hover 视觉即时切换（不加动画）：快速滚动时鼠标掠过会连续触发
+        // hover 变化，若带动画则品牌外发光（离屏模糊）会每帧重渲染，
+        // 是滚动掉帧的来源之一。列表增删动画仍由父容器 transaction nil 抑制。
         .transaction { $0.animation = nil }
         .task {
             // 单图片文件后台加载缩略图，避免阻塞主线程。
@@ -989,12 +1077,14 @@ private struct ClipboardCard: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
+            // Aurora v2：应用色调对角渐变，比垂直渐变更有层次。
             LinearGradient(
-                colors: [Color(nsColor: item.sourceAppTint), Color(nsColor: item.sourceAppTint).opacity(0.72)],
-                startPoint: .top, endPoint: .bottom
+                colors: [Color(nsColor: item.sourceAppTint),
+                         Color(nsColor: item.sourceAppTint).opacity(0.72)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
             )
         )
-        .clipShape(TopRoundedShape(radius: 12))
+        .clipShape(TopRoundedShape(radius: 14))
     }
 
     // MARK: - Middle content
@@ -1028,6 +1118,8 @@ private struct ClipboardCard: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(8)
             }
+            // 注：曾用 .mask 做底部渐隐，但 mask 会强制每张文本卡片离屏渲染，
+            // 快速滚动时每帧多次离屏 pass 导致严重掉帧，已移除（性能优先）。
         case .url(let url, _):
             VStack(spacing: 8) {
                 Image(systemName: "link.circle")
@@ -1082,19 +1174,37 @@ private struct ClipboardCard: View {
 
     // MARK: - Bottom footer
 
+    /// 类型圆点颜色：与筛选菜单一致的 6 类固定色。
+    private var kindDotColor: Color {
+        switch item.contentKind {
+        case .text:  return DesignTokens.FilterDot.text
+        case .link:  return DesignTokens.FilterDot.link
+        case .image: return DesignTokens.FilterDot.image
+        case .file:  return DesignTokens.FilterDot.file
+        case .color: return DesignTokens.FilterDot.color
+        }
+    }
+
     private var footer: some View {
-        HStack {
-            Spacer()
+        // Aurora v2：左 = 类型圆点 + 类型名（彩色），右 = 统计信息。
+        // 替代原来的居中单行统计，信息层级更清晰。
+        HStack(spacing: 5) {
+            Circle()
+                .fill(kindDotColor)
+                .frame(width: 6, height: 6)
+            Text(item.typeLabel)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(kindDotColor)
+            Spacer(minLength: 0)
             Text(item.footerText)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer()
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
-        .clipShape(BottomRoundedShape(radius: 12))
+        .clipShape(BottomRoundedShape(radius: 14))
     }
 }
 

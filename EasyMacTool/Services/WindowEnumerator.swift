@@ -78,10 +78,10 @@ final class WindowEnumerator {
         }
         Self.logger.debug("SCShareableContent visible windows: \(content.windows.count)")
 
-        // 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层（layer != 0）。
+        // 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层与系统 UI。
         // 整个 snapshot 只调用一次 CGWindowList，所有 app 共用。
-        // layer == 0 是普通文档窗口，layer > 0 是浮动面板/菜单/下拉框等。
-        // 与 macOS 原生 Cmd+Tab / Mission Control 行为一致。
+        // 保留层级 [0, 8]（normal/floating/modalPanel——含设置类面板），
+        // 排除 ≥19 的 utility/dock/menubar/status/popup 层。
         let layerMap = windowLayerMap()
         Self.logger.debug("windowLayerMap: \(layerMap.count) entries")
 
@@ -120,7 +120,13 @@ final class WindowEnumerator {
             let pid = app.processIdentifier
             let bundleID = app.bundleIdentifier ?? ""
             if pid == ownPID { return false }
-            guard app.activationPolicy == .regular, !bundleID.isEmpty else { return false }
+            // activationPolicy：.regular（普通 app）与 .accessory（菜单栏 agent
+            // app，如各类菜单栏工具）都纳入——Mission Control 同样显示
+            // accessory app 的窗口（典型场景：菜单栏 app 的设置窗）。
+            // 只排除 .prohibited（纯后台守护进程，无 UI）。
+            // accessory app 的 status item / 下拉浮层窗口层级很高（≥24），
+            // 会在后面的 layer 过滤中被排除，不会混入列表。
+            guard app.activationPolicy != .prohibited, !bundleID.isEmpty else { return false }
             if Self.excludedBundleIDs.contains(bundleID) || bundleID == ownBundleID { return false }
             return true
         }
@@ -186,10 +192,18 @@ final class WindowEnumerator {
             // 过滤弹出层 UI（Edge 地址栏下拉、IME 候选框、菜单、tooltip 等）。
             // 多信号检测，任一命中即判为弹出层：
             //
-            // 信号 1：kCGWindowLayer != 0 → 弹出层/浮动面板/菜单。
-            //   layer == 0：普通文档窗口（主窗口、次级文档窗口、全屏游戏）。
-            //   layer  > 0：浮动层（Cmd+Tab 和 Mission Control 也不显示这些）。
-            //   这与 macOS 原生 Cmd+Tab 行为一致——不是启发式，是系统语义。
+            // 信号 1：kCGWindowLayer 超出 [0, 8] → 弹出层/系统 UI。
+            //   macOS 窗口层级语义（CGWindowLevel.h）：
+            //   layer 0  kCGNormalWindowLevel      普通文档窗口
+            //   layer 3  kCGFloatingWindowLevel    浮动面板——大量设置窗/
+            //            工具面板在这一层（NSPanel floatingPanel），
+            //            Mission Control 会显示，必须纳入。
+            //   layer 8  kCGModalPanelWindowLevel  模态面板——另一类设置窗/
+            //            对话框（如部分 app 的偏好设置），Mission Control
+            //            同样显示，必须纳入。
+            //   layer 19+ utility/dock/menubar/status/popup：Dock(20)、
+            //            菜单栏(24)、状态栏(25)、弹出菜单(101)、tooltip、
+            //            IME 候选框等——Cmd+Tab/Mission Control 均不显示，排除。
             //   SCWindow.windowID 与 kCGWindowNumber 是同一个 WindowServer ID，
             //   可直接匹配，开销极低。
             //
@@ -207,8 +221,9 @@ final class WindowEnumerator {
             }
             let validVisibleWindows = visibleWindows.filter { window in
                 guard window.frame.width >= 80 && window.frame.height >= 80 else { return false }
-                // 信号 1：layer != 0 是弹出层
-                if let layer = layerMap[window.windowID], layer != 0 {
+                // 信号 1：层级超出 [0, 8]（normal/floating/modalPanel）是弹出层
+                // 或系统 UI。layerMap 缺省（CGWindowList 未返回）时不按层级过滤。
+                if let layer = layerMap[window.windowID], layer < 0 || layer > 8 {
                     Self.logger.debug("  filtered out by layer=\(layer, privacy: .public): title=\(window.title ?? "nil", privacy: .public)")
                     return false
                 }
@@ -410,10 +425,10 @@ final class WindowEnumerator {
 
     // MARK: - CGWindowList helpers
 
-    /// 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层。
-    /// layer == 0：普通文档窗口（主窗口、次级文档窗口、全屏游戏）。
-    /// layer  > 0：浮动面板/菜单/下拉框/IME 候选框/tooltip 等。
-    /// macOS 原生 Cmd+Tab 和 Mission Control 也只显示 layer == 0 的窗口。
+    /// 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层与系统 UI。
+    /// 调用方保留 [0, 8]：0 = 普通文档窗口，3 = 浮动面板（设置/工具面板），
+    /// 8 = 模态面板（设置/对话框）——与 Mission Control 可见范围一致；
+    /// ≥19 为 utility/dock/menubar/status/popup 层，被过滤。
     private func windowLayerMap() -> [CGWindowID: Int] {
         guard let array = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],

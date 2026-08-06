@@ -9,9 +9,13 @@ import SwiftUI
 ///   hovered one.
 /// No entrance animation — loads instantly like Windows.
 ///
-/// Layout: header (indicator + title + count) → wrapping thumbnail grid →
-/// footer (keyboard hint bar). The panel grows vertically to fit all rows
-/// (see OverlayPanelController.positionPanel).
+/// Layout: header (gradient chip + title + count capsule) → wrapping
+/// thumbnail grid → footer (keyboard hint bar). The panel grows vertically
+/// to fit all rows (see OverlayPanelController.positionPanel).
+///
+/// Aurora v2：毛玻璃底 + 极光微光 + 顶部反光高线，选中态品牌渐变描边 +
+/// 外发光。header/footer 的固定高度必须与
+/// OverlayPanelController.positionPanel 的 headerBlock/footerBlock 一致。
 struct SwitcherOverlayView: View {
     @ObservedObject var controller: OverlayPanelController
     /// Called on mouse hover to set the visual aim index (lighter border).
@@ -19,8 +23,18 @@ struct SwitcherOverlayView: View {
     /// Called on click to select + activate the clicked window.
     var onActivate: (Int) -> Void
 
+    // MARK: - 固定布局常量（与 positionPanel 同步）
+    /// header 高度（chip 22）+ 与网格的间距（14）。
+    static let headerBlock: CGFloat = 22 + 14
+    /// footer 提示条高度（18）+ 与网格的间距（12）。
+    static let footerBlock: CGFloat = 18 + 12
+    /// 面板最小宽度：保证 header/footer 内容不拥挤。
+    static let minPanelWidth: CGFloat = 320
+
     var body: some View {
         VStack(spacing: 0) {
+            header
+                .padding(.bottom, 14)
             FlowLayout(spacing: DesignTokens.Spacing.md) {
                 ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
                     WindowThumbnailCell(
@@ -42,23 +56,36 @@ struct SwitcherOverlayView: View {
                     }
                 }
             }
+            footer
+                .padding(.top, 12)
         }
         .padding(DesignTokens.Spacing.lg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            // macOS 原生 HUD/Spotlight 风格毛玻璃：ultraThinMaterial 最通透，
-            // 可加一层极淡白色让整体有玻璃质感。背景撑满 hosting.view，
+            // Aurora v2 玻璃面板：ultraThinMaterial 底 + 极光微光 sheen +
+            // 白色发丝描边 + 顶部反光高线。背景撑满 hosting.view，
             // 四角圆角由 hosting.view.layer cornerRadius=24 裁剪，完全一致。
-            RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
-                        .fill(.white.opacity(0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
-                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
-                )
+            ZStack(alignment: .top) {
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                            .fill(DesignTokens.Aurora.glassSheen)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                            .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                    )
+                // 顶部发丝高光线（玻璃上缘反光），两端渐隐。
+                DesignTokens.Aurora.glassEdgeLight
+                    .frame(height: 1)
+                    .mask(
+                        LinearGradient(colors: [.clear, .black, .black, .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                    )
+                    .padding(.horizontal, 32)
+                    .padding(.top, 0.5)
+            }
         )
         // 外阴影由 NSPanel.hasShadow 提供——SwiftUI .shadow 会被
         // masksToBounds 裁掉，所以不在这里加。
@@ -70,4 +97,50 @@ struct SwitcherOverlayView: View {
         .animation(nil, value: controller.hoverIndex)
     }
 
+    // MARK: - Header（高度 22，与 headerBlock 同步）
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            AuroraIconChip(systemName: "square.grid.2x2", size: 22)
+            Text("窗口切换")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            // 窗口计数胶囊：品牌渐变淡底 + 渐变文字。
+            Text("\(controller.items.count) 个窗口")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(DesignTokens.Aurora.brandGradient)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(DesignTokens.Aurora.brandGradient.opacity(0.12))
+                )
+        }
+        .frame(height: 22)
+    }
+
+    // MARK: - Footer 键盘提示条（高度 18，与 footerBlock 同步）
+
+    private var footer: some View {
+        HStack(spacing: 14) {
+            Spacer(minLength: 0)
+            hint(keys: "⇥", action: "切换")
+            hint(keys: "⏎", action: "打开")
+            hint(keys: "⌘W", action: "关闭窗口")
+            hint(keys: "esc", action: "取消")
+            Spacer(minLength: 0)
+        }
+        .frame(height: 18)
+    }
+
+    private func hint(keys: String, action: String) -> some View {
+        HStack(spacing: 5) {
+            AuroraKbd(text: keys)
+            Text(action)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
 }
