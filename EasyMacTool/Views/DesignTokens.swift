@@ -231,6 +231,15 @@ enum DesignTokens {
             dark: Color(red: 0.486, green: 0.608, blue: 1.000)      // #7C9BFF
         )
 
+        /// 控件「开启/填充」态专用色：品牌蓝的**纯饱和**版本（即渐变蓝锚点
+        /// #007AFF / #0A84FF）。开关/滑块的开启填充必须用足够饱和的色，否则
+        /// 在浅色卡片上开启态会与关闭态的灰色几乎无法区分（用户反馈「没颜色变化」）。
+        /// 仍与品牌渐变同源（取渐变蓝端），但保证清晰可读。
+        static let controlOn = dynamicColor(
+            light: Color(red: 0.000, green: 0.478, blue: 1.000),   // #007AFF system blue
+            dark: Color(red: 0.039, green: 0.518, blue: 1.000)      // #0A84FF
+        )
+
         // MARK: 玻璃面板微光叠加
         /// 毛玻璃面板上的极光微光：顶部一抹极淡的蓝→紫渐变，向下渐隐。
         /// 让 ultraThinMaterial 不再单调，同时不干扰内容可读性。

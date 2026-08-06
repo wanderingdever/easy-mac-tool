@@ -52,7 +52,7 @@ struct PermissionsSettingsView: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
-                        .tint(DesignTokens.Aurora.tint)
+                        .tint(DesignTokens.Aurora.controlOn)
                         .onChange(of: launchAtLogin) { _, newValue in
                             toggleLaunchAtLogin(enabled: newValue)
                         }

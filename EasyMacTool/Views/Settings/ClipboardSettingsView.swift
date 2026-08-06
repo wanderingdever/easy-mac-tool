@@ -143,7 +143,7 @@ struct ClipboardSettingsView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .tint(DesignTokens.Aurora.tint)
+                .tint(DesignTokens.Aurora.controlOn)
                 .padding(.top, 2)
         }
     }
@@ -161,7 +161,7 @@ struct ClipboardSettingsView: View {
                             .foregroundStyle(.primary)
                             .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                         Slider(value: historyLimitBinding, in: 50...1000, step: 50)
-                            .tint(DesignTokens.Aurora.tint)
+                            .tint(DesignTokens.Aurora.controlOn)
                         Text("\(settings.clipboardHistoryLimit)")
                             .font(.system(size: DesignTokens.SettingsTypography.sliderValue, design: .monospaced))
                             .frame(width: 48, alignment: .trailing)
