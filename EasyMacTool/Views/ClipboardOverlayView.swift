@@ -212,6 +212,9 @@ struct ClipboardOverlayView: View {
                 previewItem = nil
                 previewVisible = false
                 showFilterMenu = false
+                // 修复：清空历史确认框若在面板关闭时仍弹出，重开后会残留。
+                // 面板重新出现时一并重置，保证确认框不跨开关残留。
+                showClearAlert = false
                 focusTarget = .cards
                 // 修复：onAppear 只在首次 present 触发（hostingController 常驻），
                 // 必须在此处重新置 true，否则 dismiss 后 panelAppeared 永远为 false，
@@ -226,6 +229,9 @@ struct ClipboardOverlayView: View {
                 // （spring 滑入）能正常播放。之前不重置导致第二次打开
                 // 面板时直接显示而无动画。
                 panelAppeared = false
+                // 面板关闭时一并关闭清空确认框：否则确认框会以独立窗口
+                // 残留悬浮在屏幕上，重开面板时又重新出现。
+                showClearAlert = false
             }
         }
     }
@@ -526,12 +532,18 @@ struct ClipboardOverlayView: View {
         // 无全屏遮罩——预览直接悬浮在卡片上方。
         // 垂直居中的放大卡片：高度自适应面板可用空间（不超过屏高 70%）。
         GeometryReader { geo in
-            let maxH = min(geo.size.height - 16, (NSScreen.main?.visibleFrame.height ?? 800) * 0.7)
+            // 预览可用高度 = 面板高度 - 上下各 8pt。面板固定为屏高 1/4 且不随
+            // 预览拉高，因此必须把预览高度夹紧到面板内，否则顶部会越界。
+            let available = geo.size.height - 16
+            let maxH = min(available, (NSScreen.main?.visibleFrame.height ?? 800) * 0.7)
+            // 期望高度 max(240, maxH)，但绝不能超过 available（短面板/低分屏
+            // 场景下强制 240 会导致预览顶部溢出面板）。
+            let height = min(max(240, maxH), available)
             ClipboardPreviewCard(item: item,
                                 isExpanded: previewVisible,
                                 onClose: { closePreview() },
                                 onApply: { reapply(item); closePreview() })
-                .frame(width: 560, height: max(240, maxH))
+                .frame(width: 560, height: height)
                 .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }
         .opacity(previewVisible ? 1 : 0)
@@ -757,6 +769,8 @@ private struct ClipboardPreviewCard: View {
 
     /// 异步加载的图片文件预览（仅 .file kind 且为图片文件时）。
     @State private var loadedFileImage: NSImage?
+    /// 链接元数据（网页标题 + 站点图标），仅 .url kind 后台预加载。
+    @State private var linkMeta: LinkMetadataCache.Metadata?
 
     // 直接复用 ClipboardItem 缓存的 headerForeground，避免每次 body 重算 luminance。
     private var headerForeground: Color { item.headerForeground }
@@ -798,6 +812,10 @@ private struct ClipboardPreviewCard: View {
             // 预览卡片同样需要触发 warmUp，否则全屏预览显示空白。
             if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
                 await item.warmUpAsync()
+            }
+            // 链接条目：后台预加载网页标题 + 站点图标（类 Paste 链接预览）。
+            if case .url(let url, _) = item.kind {
+                linkMeta = await LinkMetadataCache.shared.metadata(for: url.absoluteString)
             }
         }
     }
@@ -868,14 +886,32 @@ private struct ClipboardPreviewCard: View {
                 .padding(12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .url(let url, _):
-            // 链接预览：显示 host、path、完整 URL 与「打开」按钮。
+            // 链接预览：站点图标 + 网页标题 + host/path/完整 URL 与「打开」按钮。
+            // 图标/标题由 LinkMetadataCache 后台预加载，未加载到则回退系统图标 + host。
             VStack(spacing: 12) {
-                Image(systemName: "link.circle")
-                    .font(.system(size: 44))
-                    .foregroundStyle(Color.accentColor)
+                if let favicon = linkMeta?.favicon {
+                    Image(nsImage: favicon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    Image(systemName: "link.circle")
+                        .font(.system(size: 44))
+                        .foregroundStyle(Color.accentColor)
+                }
+                // 网页标题（预加载到则作为主标题显示）。
+                if let title = linkMeta?.title {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
+                }
                 VStack(spacing: 4) {
                     Text(url.host ?? "")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: linkMeta?.title != nil ? 12 : 15, weight: .semibold))
+                        .foregroundStyle(linkMeta?.title != nil ? .secondary : .primary)
                         .lineLimit(1)
                     if !url.path.isEmpty, url.path != "/" {
                         Text(url.path)
@@ -974,6 +1010,8 @@ private struct ClipboardCard: View {
 
     /// 异步加载的图片文件预览（仅 .file kind 且为单图片文件时）。
     @State private var loadedFileImage: NSImage?
+    /// 链接元数据（网页标题 + 站点图标），仅 .url kind 后台预加载。
+    @State private var linkMeta: LinkMetadataCache.Metadata?
 
     /// Card width stays modest so many cards fit horizontally.
     private let cardWidth: CGFloat = 230
@@ -1044,6 +1082,11 @@ private struct ClipboardCard: View {
             // 避免阻塞主线程。
             if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
                 await item.warmUpAsync()
+            }
+            // 链接条目：后台预加载网页标题 + 站点图标（类 Paste 链接预览）。
+            // LinkMetadataCache 内部去重 + 缓存，网络失败静默降级。
+            if case .url(let url, _) = item.kind {
+                linkMeta = await LinkMetadataCache.shared.metadata(for: url.absoluteString)
             }
         }
     }
@@ -1122,9 +1165,27 @@ private struct ClipboardCard: View {
             // 快速滚动时每帧多次离屏 pass 导致严重掉帧，已移除（性能优先）。
         case .url(let url, _):
             VStack(spacing: 8) {
-                Image(systemName: "link.circle")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.secondary)
+                // 预加载到的站点图标优先展示，否则回退系统链接图标。
+                if let favicon = linkMeta?.favicon {
+                    Image(nsImage: favicon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                } else {
+                    Image(systemName: "link.circle")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                }
+                // 网页标题（预加载到则显示），下方仍保留 host 便于辨认来源。
+                if let title = linkMeta?.title {
+                    Text(title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                }
                 Text(url.host ?? url.absoluteString)
                     .font(.system(size: 11))
                     .lineLimit(2)

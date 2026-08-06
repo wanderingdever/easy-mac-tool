@@ -23,7 +23,6 @@ final class WindowEnumerator {
         "com.apple.systemuiserver"
     ]
 
-    private let ownBundleID = Bundle.main.bundleIdentifier ?? ""
     /// static：AX 辅助方法改为 static 后可在 Task.detached 后台线程批量
     /// 调用，无需捕获 @MainActor 隔离的 self（Sendable 安全）。
     private static let logger = Logger(subsystem: "com.easymactool", category: "WindowEnumerator")
@@ -111,23 +110,22 @@ final class WindowEnumerator {
         // 已添加的 windowID 集合，用于 AX 补充获取时去重
         var addedWindowIDs: Set<CGWindowID> = []
         let runningApps = NSWorkspace.shared.runningApplications
-        // PID 过滤自身：bundleIdentifier 在极端情况下（未签名 / Info.plist 异常）可能为 nil，
-        // 此时 ownBundleID 为空字符串，bundleID == ownBundleID 永远 false，自身窗口会被枚举。
-        // 用 PID 双重保证自身窗口始终被排除。
-        let ownPID = ProcessInfo.processInfo.processIdentifier
         // 候选 app 过滤规则与主循环一致，供 AX 预取与主循环共用。
         func isCandidate(_ app: NSRunningApplication) -> Bool {
-            let pid = app.processIdentifier
             let bundleID = app.bundleIdentifier ?? ""
-            if pid == ownPID { return false }
+            // 不再排除本应用自身窗口：本应用的「设置」窗口是普通 level-0
+            // 窗口，用户希望能切换到它；而剪贴板/切换器/菜单栏等 OverlayPanel
+            // 的窗口层级为 .statusBar(25)，会在后面的 layer 过滤（仅保留
+            // [0,8]）中被排除，不会混入列表。
+            //
             // activationPolicy：.regular（普通 app）与 .accessory（菜单栏 agent
-            // app，如各类菜单栏工具）都纳入——Mission Control 同样显示
+            // app，如各类菜单栏工具——含本应用）都纳入，Mission Control 同样显示
             // accessory app 的窗口（典型场景：菜单栏 app 的设置窗）。
             // 只排除 .prohibited（纯后台守护进程，无 UI）。
             // accessory app 的 status item / 下拉浮层窗口层级很高（≥24），
             // 会在后面的 layer 过滤中被排除，不会混入列表。
             guard app.activationPolicy != .prohibited, !bundleID.isEmpty else { return false }
-            if Self.excludedBundleIDs.contains(bundleID) || bundleID == ownBundleID { return false }
+            if Self.excludedBundleIDs.contains(bundleID) { return false }
             return true
         }
         let candidateApps = runningApps.filter(isCandidate)

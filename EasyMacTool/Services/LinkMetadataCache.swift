@@ -1,0 +1,186 @@
+import AppKit
+import Foundation
+
+/// 链接元数据缓存：为 .url 剪贴板条目异步抓取网页标题与站点图标（类似 Paste
+/// 的链接预览）。按 URL 字符串缓存，in-flight 请求去重，避免同一 URL 重复抓取。
+///
+/// 性能 / 隐私说明：
+/// - 仅对 http/https URL 抓取；请求超时 6s；HTML 流式截断到 512KB、图标 256KB，
+///   避免超大页面/资源拖慢或占用内存。
+/// - 标题取自 <title>；图标优先 <link rel="...icon...">（apple-touch-icon 优先，
+///   多为 PNG），回退 <host>/favicon.ico。
+/// - 结果仅内存缓存（不持久化），重复条目直接命中；网络失败静默降级为系统
+///   link.circle 图标 + host 文本。
+@MainActor
+final class LinkMetadataCache {
+    static let shared = LinkMetadataCache()
+
+    struct Metadata {
+        let title: String?
+        let favicon: NSImage?
+    }
+
+    private var cache: [String: Metadata] = [:]
+    private var inFlight: [String: Task<(title: String?, faviconData: Data?), Never>] = [:]
+
+    private init() {}
+
+    /// 同步读取已缓存的元数据（命中时返回，未命中返回 nil）。
+    func cached(_ urlString: String) -> Metadata? { cache[urlString] }
+
+    /// 异步获取元数据：缓存命中直接返回；否则后台抓取。同一 URL 并发去重。
+    /// 网络抓取在 Task.detached 后台执行（返回 Sendable 的 (title, Data)），
+    /// NSImage 在主 actor 创建，避免跨 actor 传递非 Sendable 的 NSImage。
+    func metadata(for urlString: String) async -> Metadata {
+        if let cached = cache[urlString] { return cached }
+        if let task = inFlight[urlString] {
+            // 并发去重：等待首个请求完成后从缓存读取（首个请求负责写入 cache）。
+            _ = await task.value
+            return cache[urlString] ?? Metadata(title: nil, favicon: nil)
+        }
+        let task = Task.detached(priority: .utility) { await Self.fetchRaw(urlString) }
+        inFlight[urlString] = task
+        let raw = await task.value
+        let meta = Metadata(
+            title: raw.title,
+            favicon: raw.faviconData.flatMap { NSImage(data: $0) }
+        )
+        cache[urlString] = meta
+        inFlight[urlString] = nil
+        return meta
+    }
+
+    // MARK: - 抓取（后台，nonisolated）
+
+    /// 抓取 URL 的标题与 favicon 原始数据。全部为 Sendable 类型，可跨 actor。
+    nonisolated private static func fetchRaw(_ urlString: String) async -> (title: String?, faviconData: Data?) {
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return (nil, nil)
+        }
+
+        // 1. 抓取 HTML（流式截断 512KB）。
+        var title: String? = nil
+        var iconHref: String? = nil
+        if let html = await fetchHTMLString(url) {
+            title = parseTitle(html)
+            iconHref = parseIconHref(html)
+        }
+
+        // 2. 解析 favicon 绝对地址：优先 HTML 中声明的图标，回退 /favicon.ico。
+        // 跳过 data: URI（如 example.com 的占位空图标 <link rel="icon" href="data:,">），
+        // 直接回退到 /favicon.ico。
+        let faviconURL: URL? = {
+            if let href = iconHref, !href.hasPrefix("data:"),
+               let abs = absoluteURL(href, base: url) { return abs }
+            guard let host = url.host else { return nil }
+            return URL(string: "\(scheme)://\(host)/favicon.ico")
+        }()
+
+        // 3. 抓取 favicon 数据（截断 256KB）。
+        var faviconData: Data? = nil
+        if let faviconURL {
+            faviconData = await fetchData(faviconURL, limit: 256 * 1024)
+        }
+        return (title, faviconData)
+    }
+
+    /// 流式读取 URL 内容为 String（UTF-8，回退 Latin-1），截断到 512KB。
+    nonisolated private static func fetchHTMLString(_ url: URL) async -> String? {
+        guard let data = await fetchData(url, limit: 512 * 1024, htmlOnly: true) else { return nil }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    /// 通用流式下载：截断到 limit 字节。htmlOnly=true 时仅接受 text/html 响应。
+    nonisolated private static func fetchData(_ url: URL, limit: Int, htmlOnly: Bool = false) async -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            if let http = response as? HTTPURLResponse {
+                guard (200..<300).contains(http.statusCode) else { return nil }
+                if htmlOnly {
+                    let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+                    // 仅接受 HTML（防止对图片/二进制跑 title 解析）。
+                    guard contentType.contains("text/html") || contentType.contains("application/xhtml") else { return nil }
+                }
+            }
+            var data = Data()
+            data.reserveCapacity(min(limit, 64 * 1024))
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= limit { break }
+            }
+            return data.isEmpty ? nil : data
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: - HTML 解析
+
+    /// 解析 <title>。返回去除首尾空白 + 基础实体反转义后的标题。
+    nonisolated private static func parseTitle(_ html: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: "(?is)<title[^>]*>(.*?)</title>") else { return nil }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        guard let match = regex.firstMatch(in: html, range: range),
+              match.numberOfRanges > 1,
+              let r = Range(match.range(at: 1), in: html) else { return nil }
+        let raw = String(html[r])
+        let unescaped = raw
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+        let trimmed = unescaped.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// 从 <link> 标签中解析站点图标 href：apple-touch-icon 优先，其次 icon /
+    /// shortcut icon。返回 HTML 中声明的（可能相对）href。
+    nonisolated private static func parseIconHref(_ html: String) -> String? {
+        guard let tagRegex = try? NSRegularExpression(pattern: "(?i)<link\\b[^>]*>") else { return nil }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        let matches = tagRegex.matches(in: html, range: range)
+        var appleTouch: String? = nil
+        var generic: String? = nil
+        for m in matches {
+            guard let r = Range(m.range, in: html) else { continue }
+            let tag = String(html[r])
+            guard let rel = attribute("rel", in: tag)?.lowercased(),
+                  let href = attribute("href", in: tag) else { continue }
+            if rel.contains("apple-touch-icon") {
+                if appleTouch == nil { appleTouch = href }
+            } else if rel.contains("icon") {
+                if generic == nil { generic = href }
+            }
+        }
+        return appleTouch ?? generic
+    }
+
+    /// 提取标签属性值：支持 name="value" 与 name='value' 两种引号。
+    nonisolated private static func attribute(_ name: String, in tag: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: name + "\\s*=\\s*([\"'])(.*?)\\1",
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let range = NSRange(tag.startIndex..<tag.endIndex, in: tag)
+        guard let m = regex.firstMatch(in: tag, range: range),
+              m.numberOfRanges > 2,
+              let r = Range(m.range(at: 2), in: tag) else { return nil }
+        return String(tag[r])
+    }
+
+    /// 解析相对/协议相对 href 为绝对 URL。
+    nonisolated private static func absoluteURL(_ href: String, base: URL) -> URL? {
+        let trimmed = href.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("//") {
+            return URL(string: (base.scheme ?? "https") + ":" + trimmed)
+        }
+        return URL(string: trimmed, relativeTo: base)?.absoluteURL
+    }
+}
