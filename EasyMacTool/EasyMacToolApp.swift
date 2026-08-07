@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os
 import SwiftUI
 
 @main
@@ -81,6 +82,7 @@ extension Notification.Name {
 /// flows through `handle(_:)`.
 @MainActor
 final class AppCoordinator {
+    private static let logger = Logger(subsystem: "com.easymactool", category: "AppCoordinator")
     private let settings: AppSettings
     private let enumerator = WindowEnumerator()
     private let captureManager = ScreenCaptureManager()
@@ -155,9 +157,10 @@ final class AppCoordinator {
         // 2. tap 可能因系统睡眠唤醒、锁屏、长时间运行、或 simulatePaste 的合成
         //    事件经过自己的 event tap 而被临时禁用。定时器检测 isTapHealthy=false
         //    后调用 restart() 恢复。
-        // 0.5s 间隔：simulatePaste 后 tap 可能被禁用，缩短恢复窗口让用户几乎无感。
-        // （之前 2s 间隔导致粘贴后 2s 内按快捷键无响应，用户感觉"无法呼出"。）
-        hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) {
+        // 3s 兜底间隔：simulatePaste 后已有独立的 50ms 健康检查 Task 立即恢复
+        // （见 ClipboardManager.simulatePaste 末尾），常规兜底无需高频。0.5s 会
+        // 持续唤醒 CPU 影响续航；3s 足以覆盖睡眠唤醒等低频失效场景。
+        hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) {
             [weak self] _ in
                 guard self != nil else { return }
                 guard AccessibilityChecker.isTrusted else { return }
@@ -266,7 +269,7 @@ final class AppCoordinator {
             // TCC 可能尚未评估完成，继续重试。
             // 主动重新触发 TCC 注册副作用：让 TCC 把当前进程 cdhash 重新加入
             // 数据库，对 ad-hoc 签名下的 cdhash 失配有修复作用。
-            print("[TCC] permission check attempt \(self.permissionCheckAttempts)/\(Self.maxPermissionCheckAttempts) still missing: \(currentMissing.map(\.rawValue)) — retrying in \(Self.permissionRetryInterval)s")
+            Self.logger.info("permission check attempt \(self.permissionCheckAttempts)/\(Self.maxPermissionCheckAttempts) still missing: \(currentMissing.map(\.rawValue), privacy: .public) — retrying in \(Self.permissionRetryInterval)s")
             AccessibilityChecker.triggerRegistrationOnly()
             self.schedulePermissionCheck()
         }
@@ -489,7 +492,9 @@ final class AppCoordinator {
     /// by the time this runs (see ClipboardPanelController.onReapply), so the
     /// previously frontmost app regains focus before we (optionally) paste.
     private func reapplyClipboard(_ item: ClipboardItem) {
-        clipboardManager.reapply(item, autoPaste: settings.clipboardAutoPaste)
+        clipboardManager.reapply(item,
+                                  autoPaste: settings.clipboardAutoPaste,
+                                  expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
         // tap 健康检查已移到 ClipboardManager.simulatePaste() 内部：
         // 无论 warmUpAsync 耗时多久（文本立即、冷图片数秒），simulatePaste
         // 执行后都会在 50ms 后检查并恢复 tap。原 0.2s 检查在 reapplyClipboard

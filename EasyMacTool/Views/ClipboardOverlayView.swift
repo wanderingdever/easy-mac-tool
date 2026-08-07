@@ -58,7 +58,9 @@ struct ClipboardOverlayView: View {
         return manager.items.filter { item in
             if let f = activeFilter, item.contentKind != f { return false }
             guard !q.isEmpty else { return true }
-            return item.title.lowercased().contains(q) || item.footerText.lowercased().contains(q)
+            // searchableText 已预计算并缓存小写的 title + footerText，
+            // 避免每次击键对 1000 条历史重复 lowercased() + footerText 的 trimming/split。
+            return item.searchableText.contains(q)
         }
     }
 

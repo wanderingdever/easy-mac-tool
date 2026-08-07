@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CoreGraphics
 import Foundation
+import os
 
 /// Monitors the system pasteboard and maintains a clipboard history list.
 ///
@@ -12,6 +13,7 @@ import Foundation
 @MainActor
 final class ClipboardManager: ObservableObject {
     static let shared = ClipboardManager()
+    private static let logger = Logger(subsystem: "com.easymactool", category: "ClipboardManager")
 
     /// metadata.json 的 schema 版本号。结构变更时递增，并在 loadFromDisk
     /// 中提供迁移路径。v0 = 旧格式（裸 [ClipboardItem] 数组，无版本字段）；
@@ -24,6 +26,85 @@ final class ClipboardManager: ObservableObject {
     private struct ClipboardMetadata: Codable {
         let schemaVersion: Int
         let items: [ClipboardItem]
+    }
+
+    /// 磁盘快照 DTO（Sendable）：主线程从 ClipboardItem 提取，后台 JSONEncoder
+    /// 编码，避免 @MainActor 的 ClipboardItem.encode(to:) 在主线程阻塞。
+    /// CodingKeys 与 ClipboardItem 完全一致，保证磁盘格式不变（向后兼容）。
+    private struct ClipboardHistorySnapshot: Codable, Sendable {
+        let schemaVersion: Int
+        let items: [ItemSnapshot]
+    }
+    private struct ItemSnapshot: Codable, Sendable {
+        let id: UUID
+        let createdAt: Date
+        let sourceAppBundleID: String?
+        let sourceAppName: String?
+        let sourceAppTintR: Double
+        let sourceAppTintG: Double
+        let sourceAppTintB: Double
+        let sourceAppTintA: Double
+        let rtfData: Data?
+        let imageFileName: String?
+        let kindType: String
+        let textValue: String?
+        let urlValue: URL?
+        let urlTitle: String?
+        let fileURLs: [URL]?
+        let colorHex: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, createdAt, sourceAppBundleID, sourceAppName
+            case sourceAppTintR, sourceAppTintG, sourceAppTintB, sourceAppTintA
+            case rtfData, imageFileName, kindType
+            case textValue, urlValue, urlTitle, fileURLs, colorHex
+        }
+    }
+
+    /// 在主线程从 items 构建快照 DTO（纯字段拷贝，无 IO），供后台编码。
+    private func buildSnapshot() -> ClipboardHistorySnapshot {
+        let snapshots = items.map { item -> ItemSnapshot in
+            let srgb = item.sourceAppTint.usingColorSpace(.sRGB) ?? item.sourceAppTint
+            var imageFileName: String? = nil
+            var kindType: String
+            var textValue: String? = nil
+            var urlValue: URL? = nil
+            var urlTitle: String? = nil
+            var fileURLs: [URL]? = nil
+            var colorHex: String? = nil
+            switch item.kind {
+            case .text(let s):
+                kindType = "text"; textValue = s
+            case .url(let u, let t):
+                kindType = "url"; urlValue = u; urlTitle = t
+            case .image:
+                kindType = "image"
+                imageFileName = item.imageFileURL?.lastPathComponent
+                    ?? "\(item.id.uuidString).tiff"
+            case .file(let urls):
+                kindType = "file"; fileURLs = urls
+            case .color(_, let hex):
+                kindType = "color"; colorHex = hex
+            }
+            return ItemSnapshot(
+                id: item.id, createdAt: item.createdAt,
+                sourceAppBundleID: item.sourceAppBundleID,
+                sourceAppName: item.sourceAppName,
+                sourceAppTintR: Double(srgb.redComponent),
+                sourceAppTintG: Double(srgb.greenComponent),
+                sourceAppTintB: Double(srgb.blueComponent),
+                sourceAppTintA: Double(srgb.alphaComponent),
+                rtfData: item.rtfData,
+                imageFileName: imageFileName,
+                kindType: kindType,
+                textValue: textValue,
+                urlValue: urlValue,
+                urlTitle: urlTitle,
+                fileURLs: fileURLs,
+                colorHex: colorHex
+            )
+        }
+        return ClipboardHistorySnapshot(schemaVersion: Self.currentSchemaVersion, items: snapshots)
     }
 
     /// Keep clipboard history bounded even when the user raises the item count
@@ -92,6 +173,12 @@ final class ClipboardManager: ObservableObject {
 
     private var timer: Timer?
     private var lastChangeCount: Int = 0
+    /// app 活跃状态：面板打开时 true（0.5s 高频），关闭时 false（1.5s 低频）。
+    /// 菜单栏 app 大部分时间面板关闭，默认 false 让启动即进入低频轮询，
+    /// 降低常驻期间的 CPU 唤醒。由 setActivePolling() 在面板开关时切换。
+    private var isActive = false
+    private static let activePollInterval: TimeInterval = 0.5
+    private static let inactivePollInterval: TimeInterval = 1.5
     /// 精确抑制 reapply write 引起的 changeCount 变化。
     /// 记录 write 后预期的 changeCount 值，poll 时精确比较：
     /// - current == suppressUntilChangeCount：是 write 引起的，抑制
@@ -138,10 +225,7 @@ final class ClipboardManager: ObservableObject {
         // 裁剪与落盘在 loadFromDisk 的异步完成块内执行（loadFromDisk 是
         // 异步的，此处 items 仍为空，同步 trim 是 no-op）。
         loadFromDisk()
-        let instance = self
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            Task { @MainActor in instance.poll() }
-        }
+        rescheduleTimer()
         // 监听系统内存压力：收到 .warning/.critical 时对所有 item 调用
         // coolDown() 释放懒加载缓存（_cachedFullImage / _cachedAttributedString 等）。
         // 这些缓存可在下次访问时重新生成，释放它们不会丢失数据。
@@ -155,6 +239,33 @@ final class ClipboardManager: ObservableObject {
         }
         source.resume()
         memoryPressureSource = source
+    }
+
+    /// 根据 isActive 重建轮询定时器：活跃 0.5s / 非活跃 1.5s。
+    /// 菜单栏 app 大部分时间面板关闭（非活跃），拉长间隔降低 CPU 唤醒。
+    /// 由 start() 首次调用，setActivePolling() 在面板开关时调用切换频率。
+    private func rescheduleTimer() {
+        timer?.invalidate()
+        let interval = isActive ? Self.activePollInterval : Self.inactivePollInterval
+        let instance = self
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            Task { @MainActor in instance.poll() }
+        }
+    }
+
+    /// 更新轮询活跃状态并自适应调整频率。
+    /// 由 ClipboardPanelController.present/dismiss 调用：面板打开时切到
+    /// 0.5s 高频（用户正在看历史，复制后应立即出现新条目）；
+    /// 面板关闭时切到 1.5s 低频（后台捕获，延迟 1.5s 检测不影响 UX）。
+    /// 状态未变化时跳过重建，避免不必要的定时器抖动。
+    /// 仅在 start() 已执行（timer 非空）时重建定时器；start() 前调用只
+    /// 更新 isActive，start() → rescheduleTimer() 会用最新值创建定时器。
+    func setActivePolling(_ active: Bool) {
+        guard isActive != active else { return }
+        isActive = active
+        if timer != nil {
+            rescheduleTimer()
+        }
     }
 
     func stop() {
@@ -181,8 +292,7 @@ final class ClipboardManager: ObservableObject {
         let dir = Self.storageDirectory
         let imgDir = Self.imagesDirectoryURL
         let metaURL = Self.metadataURL
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        let snapshot = buildSnapshot()
         var imagesToWrite: [(URL, Data)] = []
         for item in items {
             guard case .image(let data, _) = item.kind, let data else { continue }
@@ -193,13 +303,6 @@ final class ClipboardManager: ObservableObject {
             if !FileManager.default.fileExists(atPath: url.path) {
                 imagesToWrite.append((url, data))
             }
-        }
-        guard let jsonData = try? encoder.encode(ClipboardMetadata(
-            schemaVersion: Self.currentSchemaVersion,
-            items: items
-        )) else {
-            print("[ClipboardManager] JSON encode failed (sync)")
-            return
         }
         let deletions = pendingImageDeletions
         pendingImageDeletions.removeAll()
@@ -218,8 +321,17 @@ final class ClipboardManager: ObservableObject {
                 }
             }
         }
-        // sync 派发：等待所有 pending 异步保存完成后再执行，确保最终写入的是最新数据
+        // sync 派发：等待所有 pending 异步保存完成后再执行，确保最终写入的是最新数据。
+        // encode 在 saveQueue 后台核执行，主线程仅等待，不占用主线程 CPU 编码。
+        var restoreDeletions = false
         saveQueue.sync {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let jsonData = try? encoder.encode(snapshot) else {
+                Self.logger.error("[ClipboardManager] JSON encode failed (sync)")
+                restoreDeletions = true
+                return
+            }
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 try FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
@@ -247,12 +359,15 @@ final class ClipboardManager: ObservableObject {
                     try? FileManager.default.removeItem(atPath: path)
                 }
             } catch {
-                print("[ClipboardManager] Save failed (sync): \(error)")
-                // 删除清单并回集合：本轮清理失败，待下轮保存重试，
-                // 避免 images/ 目录因清单丢失而缓慢膨胀。
-                // saveQueue.sync 在主线程上同步执行，可直接访问 @MainActor 状态。
-                pendingImageDeletions.formUnion(deletions)
+                Self.logger.error("[ClipboardManager] Save failed (sync): \(error.localizedDescription, privacy: .public)")
+                // 删除清单回集合：本轮清理失败，待下轮保存重试，
+                // 避免 images/ 目录因清单丢失而缓慢膨胀。用本地 flag，
+                // sync 闭包外（@MainActor）恢复，避免跨 actor 访问。
+                restoreDeletions = true
             }
+        }
+        if restoreDeletions {
+            pendingImageDeletions.formUnion(deletions)
         }
     }
 
@@ -288,7 +403,7 @@ final class ClipboardManager: ObservableObject {
     /// 竞态防护：用 token 标识最新 reapply。Task.cancel 只在 await 点生效，
     /// 旧 Task 过 await 后的同步 write 不可中断；旧 Task 在 write 前检查 token
     /// 是否仍是最新，否则放弃，避免 pasteboard 内容/items 顺序/persist 错乱。
-    func reapply(_ item: ClipboardItem, autoPaste: Bool) {
+    func reapply(_ item: ClipboardItem, autoPaste: Bool, expectedAppBundleID: String? = nil) {
         let token = UUID()
         reapplyToken = token
         currentReapplyTask?.cancel()
@@ -319,7 +434,7 @@ final class ClipboardManager: ObservableObject {
                 // 这样 Task.cancel 能取消未执行的 simulatePaste。
                 try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
                 guard !Task.isCancelled, token == reapplyToken else { return }
-                self.simulatePaste()
+                self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
             }
         }
     }
@@ -556,10 +671,9 @@ final class ClipboardManager: ObservableObject {
         let dir = Self.storageDirectory
         let imgDir = Self.imagesDirectoryURL
         let metaURL = Self.metadataURL
-        // 在主线程准备数据（ClipboardItem 是 @MainActor，编码必须在主线程）
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        // 为每个 image item 确保有 imageFileURL；收集需要写入的图片
+        // 主线程构建快照 DTO + 收集待写图片（@MainActor 访问 ClipboardItem）。
+        // encode 移到 saveQueue 后台执行，避免 1000 条历史的主线程编码卡顿。
+        let snapshot = buildSnapshot()
         var imagesToWrite: [(URL, Data)] = []
         for item in items {
             guard case .image(let data, _) = item.kind, let data else { continue }
@@ -572,19 +686,17 @@ final class ClipboardManager: ObservableObject {
                 imagesToWrite.append((url, data))
             }
         }
-        // 在主线程编码 JSON（@MainActor 约束）
-        guard let jsonData = try? encoder.encode(ClipboardMetadata(
-            schemaVersion: Self.currentSchemaVersion,
-            items: items
-        )) else {
-            print("[ClipboardManager] JSON encode failed")
-            return
-        }
-        // 取出待删除文件路径清单，清空集合（后台 IO 完成后这些文件即被清理）
         let deletions = pendingImageDeletions
         pendingImageDeletions.removeAll()
-        // 文件 I/O 在串行保存队列执行，避免与 saveToDiskSync 并发写 metadata.json
+        // 文件 I/O + JSON 编码在串行保存队列执行，避免与 saveToDiskSync 并发写 metadata.json
         saveQueue.async {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let jsonData = try? encoder.encode(snapshot) else {
+                Self.logger.error("[ClipboardManager] JSON encode failed")
+                Task { @MainActor in self.pendingImageDeletions.formUnion(deletions) }
+                return
+            }
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 try FileManager.default.createDirectory(at: imgDir, withIntermediateDirectories: true)
@@ -592,7 +704,6 @@ final class ClipboardManager: ObservableObject {
                 // 写入图片文件（.atomic：避免进程被杀留下半截 TIFF）
                 for (url, data) in imagesToWrite {
                     try data.write(to: url, options: .atomic)
-                    // TIFF 文件同样收紧为 0600，与 metadata.json 保持一致。
                     try? FileManager.default.setAttributes([.posixPermissions: 0o600],
                                                            ofItemAtPath: url.path)
                 }
@@ -605,7 +716,7 @@ final class ClipboardManager: ObservableObject {
                     try? FileManager.default.removeItem(atPath: path)
                 }
             } catch {
-                print("[ClipboardManager] Save failed: \(error)")
+                Self.logger.error("[ClipboardManager] Save failed: \(error.localizedDescription, privacy: .public)")
                 // 删除清单并回集合（回主线程修改 @MainActor 状态），
                 // 待下轮保存重试，避免 images/ 目录因清单丢失而膨胀。
                 Task { @MainActor in
@@ -654,20 +765,21 @@ final class ClipboardManager: ObservableObject {
                     // v0 旧格式：裸数组，无 schemaVersion 字段
                     loaded = legacy
                 } else {
-                    print("[ClipboardManager] Load failed: decode error")
+                    Self.logger.error("Load failed: decode error")
                     self.items = []
                     return
                 }
                 let hotCutoff = Date().addingTimeInterval(-Self.hotDataCutoff)
+                var hotImageItems: [ClipboardItem] = []
                 for item in loaded {
                     guard case .image = item.kind else { continue }
                     // 解码时 imageFileURL 存的是文件名（相对路径），解析为绝对路径
                     let fileName = item.imageFileURL?.lastPathComponent ?? "\(item.id.uuidString).tiff"
                     item.imageFileURL = imgDir.appendingPathComponent(fileName)
-                    // 热数据：异步 warmUp，避免阻塞主线程。
+                    // 热数据：稍后限并发 warmUp，避免阻塞主线程。
                     // items 先设置（UI 显示占位），图片数据后台加载后自动填入。
                     if item.createdAt > hotCutoff {
-                        Task { await item.warmUpAsync() }
+                        hotImageItems.append(item)
                     }
                 }
                 // 合并 poll 期间新增的条目到 loaded 头部，然后一次性赋值。
@@ -690,6 +802,20 @@ final class ClipboardManager: ObservableObject {
                 // items 仍为空），真正的裁剪必须等 load 完成后在此执行。
                 self.trimHistoryToLimits()
                 self.schedulePersist()
+                // 限并发 warmUp 热数据图片（4 路并发），避免大量图同时读盘导致磁盘 thrashing。
+                // warmUpAsync 内部用 Task.detached 后台读盘 + 回主线程更新 kind，
+                // 4 路并发平衡加载速度与磁盘压力。items 已设置，warmUp 完成后 UI 自动刷新。
+                await withTaskGroup(of: Void.self) { group in
+                    var iterator = hotImageItems.makeIterator()
+                    for _ in 0..<min(4, hotImageItems.count) {
+                        guard let item = iterator.next() else { break }
+                        group.addTask { @MainActor in await item.warmUpAsync() }
+                    }
+                    while await group.next() != nil {
+                        guard let item = iterator.next() else { continue }
+                        group.addTask { @MainActor in await item.warmUpAsync() }
+                    }
+                }
             }
         }
     }
@@ -729,7 +855,19 @@ final class ClipboardManager: ObservableObject {
 
     /// Simulates Cmd+V into the previously frontmost app. The clipboard panel
     /// must be dismissed BEFORE calling this so the target app receives focus.
-    fileprivate func simulatePaste() {
+    ///
+    /// 目标 app 校验：orderOut 后原 app 恢复焦点是异步的，50ms sleep 不保证
+    /// 目标 app 已成为 key window。若当前前台与呼出面板前记录的 expectedAppBundleID
+    /// 不一致（用户快速切窗、或焦点恢复慢），放弃模拟粘贴——pasteboard 已写入，
+    /// 用户可手动 Cmd+V。避免粘贴到错误窗口泄露剪贴板内容。
+    fileprivate func simulatePaste(expectedAppBundleID: String?) {
+        if let expected = expectedAppBundleID {
+            let current = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            if current != expected {
+                Self.logger.info("[Clipboard] simulatePaste aborted: frontmost app mismatch (expected=\(expected, privacy: .public), current=\(current ?? "nil", privacy: .public)) — pasteboard still written, user can Cmd+V manually")
+                return
+            }
+        }
         let src = CGEventSource(stateID: .combinedSessionState)
         // CGEvent(keyboardEventSource:) 在极端内存不足时可能返回 nil，
         // guard 防护避免隐式解包崩溃。

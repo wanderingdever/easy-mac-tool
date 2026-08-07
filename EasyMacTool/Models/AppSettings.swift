@@ -1,12 +1,14 @@
 import Combine
 import CoreGraphics
 import Foundation
+import os
 
 /// App-wide settings, persisted to `UserDefaults` as JSON. Shared with both the
 /// SwiftUI settings window (via `@EnvironmentObject`) and the runtime services
 /// (`HotkeyManager`, `WindowEnumerator`, `ScreenCaptureManager`).
 @MainActor
 final class AppSettings: ObservableObject {
+    private static let logger = Logger(subsystem: "com.easymactool", category: "AppSettings")
     /// Which screen the switcher panel appears on (global — applies to all
     /// shortcuts). Per-shortcut preview size lives on `ShortcutConfig`.
     @Published var displayTarget: DisplayTarget = .active { didSet { debouncePersist() } }
@@ -20,6 +22,10 @@ final class AppSettings: ObservableObject {
     @Published var clipboardAutoPaste: Bool = true { didSet { debouncePersist() } }
     /// Lets users suspend clipboard observation without quitting the app.
     @Published var clipboardCapturingEnabled: Bool = true { didSet { debouncePersist() } }
+    /// 链接预览：开启后对复制的 http/https URL 后台抓取网页标题与站点图标
+    /// （类 Paste 链接卡片）。默认关闭——复制私有/带 token 的链接时 app 主动
+    /// 访问可能触发服务端副作用或泄露信息，需用户明确知情开启。
+    @Published var clipboardLinkPreviewEnabled: Bool = false { didSet { debouncePersist() } }
 
     private let defaults = UserDefaults.standard
     private let storageKey = "appSettings.v1"
@@ -156,6 +162,7 @@ final class AppSettings: ObservableObject {
         var clipboardHistoryLimit: Int?
         var clipboardAutoPaste: Bool?
         var clipboardCapturingEnabled: Bool?
+        var clipboardLinkPreviewEnabled: Bool?
     }
 
     private func persist() {
@@ -165,7 +172,8 @@ final class AppSettings: ObservableObject {
             clipboardShortcut: clipboardShortcut,
             clipboardHistoryLimit: clipboardHistoryLimit,
             clipboardAutoPaste: clipboardAutoPaste,
-            clipboardCapturingEnabled: clipboardCapturingEnabled
+            clipboardCapturingEnabled: clipboardCapturingEnabled,
+            clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults.set(data, forKey: storageKey)
@@ -184,8 +192,11 @@ final class AppSettings: ObservableObject {
             if let capturingEnabled = snapshot.clipboardCapturingEnabled {
                 clipboardCapturingEnabled = capturingEnabled
             }
+            if let linkPreview = snapshot.clipboardLinkPreviewEnabled {
+                clipboardLinkPreviewEnabled = linkPreview
+            }
         } catch {
-            print("[AppSettings] Failed to decode persisted settings: \(error). Using defaults.")
+            Self.logger.error("Failed to decode persisted settings: \(error.localizedDescription, privacy: .public). Using defaults.")
         }
     }
 }

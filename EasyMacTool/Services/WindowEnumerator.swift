@@ -17,11 +17,28 @@ import ScreenCaptureKit
 @MainActor
 final class WindowEnumerator {
     private static let excludedBundleIDs: Set<String> = [
+        // 系统 UI 守护进程
         "com.apple.dock",
         "com.apple.WindowServer",
         "com.apple.controlcenter",
-        "com.apple.systemuiserver"
+        "com.apple.systemuiserver",
+        // 系统服务 agent(.accessory,路径在 /System/ 下)。路径过滤(isCandidate
+        // 中的 /System/ + .accessory 判定)已覆盖,此处显式列出作为双重保险
+        // + 文档化,避免路径判断因边缘情况失效时漏网。
+        // 这些 agent 在 showHidden=true 时会通过 AX 枚举出隐藏窗口,污染切换器列表。
+        "com.apple.UserNotificationCenter",
+        "com.apple.Spotlight",
+        "com.apple.universalaccess",
+        "com.apple.loginwindow",
     ]
+
+    /// AX 预取的最大 app 数量（按 MRU 排序取前 N）。
+    /// 运行 80+ app 时对全部候选发起 isAppHidden + axWindowStates 是数百次跨进程
+    /// IPC，是 Cmd+Tab 呼出延迟的主要来源。MRU 排名靠后的 app（>30）用户极少
+    /// 通过切换器切到，其离屏窗口（minimized/hidden）不预取——用户开启
+    /// showMin/showHid 是为看到最近用过的 app 的离屏窗口，而非全部历史 app。
+    /// 这些 app 的 visible 窗口仍由 SCShareableContent 正常枚举，仅离屏窗口缺失。
+    private static let maxAXPrefetchCount = 30
 
     /// static：AX 辅助方法改为 static 后可在 Task.detached 后台线程批量
     /// 调用，无需捕获 @MainActor 隔离的 self（Sendable 安全）。
@@ -77,31 +94,13 @@ final class WindowEnumerator {
         }
         Self.logger.debug("SCShareableContent visible windows: \(content.windows.count)")
 
-        // 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层与系统 UI。
-        // 整个 snapshot 只调用一次 CGWindowList，所有 app 共用。
+        // 一次 CGWindowList 查询同时构建 layerMap（windowID→层级，过滤弹出层与
+        // 系统 UI）与 onscreenWindowIDs（C2 分类兜底用）。合并原来两次
+        // .optionOnScreenOnly + .optionAll 调用，减少跨进程 IPC。
         // 保留层级 [0, 8]（normal/floating/modalPanel——含设置类面板），
         // 排除 ≥19 的 utility/dock/menubar/status/popup 层。
-        let layerMap = windowLayerMap()
-        Self.logger.debug("windowLayerMap: \(layerMap.count) entries")
-
-        // 屏幕上的真实窗口 ID 集合（C2 分类兜底用）：
-        // isAppHidden 可能误判（kAXHiddenAttribute 查询失败返回 false），
-        // 此时 AX 返回的窗口既非 minimized 也非 hidden 会被直接 continue 跳过。
-        // 若窗口确实不在屏幕上（CGWindowList 无此 ID 或 onscreen == false），
-        // 归为 .hidden 而非跳过——保证隐藏 app 的窗口至少能显示。
-        let onscreenWindowIDs: Set<CGWindowID> = {
-            guard let array = CGWindowListCopyWindowInfo(
-                [.optionAll, .excludeDesktopElements],
-                kCGNullWindowID
-            ) as? [[String: Any]] else { return [] }
-            var set = Set<CGWindowID>()
-            for info in array {
-                guard let number = info[kCGWindowNumber as String] as? Int,
-                      (info[kCGWindowIsOnscreen as String] as? Bool) == true else { continue }
-                set.insert(CGWindowID(number))
-            }
-            return set
-        }()
+        let (layerMap, onscreenWindowIDs) = windowLayerAndOnscreenMaps()
+        Self.logger.debug("windowLayerMap: \(layerMap.count) entries, onscreen: \(onscreenWindowIDs.count)")
 
         // 当前焦点 windowID（window 级）：用于精确标记 active 窗口。
         let focusedWindowID = AppUsageTracker.shared.focusedWindowID
@@ -126,24 +125,52 @@ final class WindowEnumerator {
             // 会在后面的 layer 过滤中被排除，不会混入列表。
             guard app.activationPolicy != .prohibited, !bundleID.isEmpty else { return false }
             if Self.excludedBundleIDs.contains(bundleID) { return false }
+            // 系统服务进程过滤:位于 /System/ 路径下且 activationPolicy == .accessory
+            // 的进程是系统 agent(UserNotificationCenter/Spotlight/universalAccessAuthW 等)。
+            // 它们的窗口是系统 UI,不应出现在切换器中——showHidden=true 时尤其会通过
+            // AX 枚举出隐藏窗口污染列表。
+            // .regular 的系统 app(Finder/System Settings/Activity Monitor)保留——
+            // 它们是用户可交互的 GUI app。第三方菜单栏 app(.accessory 但不在 /System/ 下,
+            // 含本应用)也保留。
+            if app.activationPolicy == .accessory,
+               let url = app.bundleURL ?? app.executableURL,
+               url.path.hasPrefix("/System/") {
+                return false
+            }
             return true
         }
         let candidateApps = runningApps.filter(isCandidate)
 
-        // 预取所有候选 app 的 AX 数据（后台线程）。
+        // 预取候选 app 的 AX 数据（后台线程）。
         // AXUIElementCopyAttributeValue 是同步跨进程 IPC，每个 app 需数次调用。
         // 之前在主线程循环内逐 app 调用，运行 app 较多（或某 app AX 响应慢）
         // 时阻塞主线程，Cmd+Tab 呼出可感知卡顿。现在用 Task.detached 一次性
         // 批量获取（AX API 允许非主线程调用），主线程只做 WindowItem 构建。
+        let showMin = filter.showMinimized
+        let showHid = filter.showHidden
+        // AX 预取仅在需要离屏窗口时执行：默认 showMin=false && showHid=false 时
+        // 完全跳过，避免对全部候选 app 发起 isAppHidden/axWindowStates 的跨进程
+        // IPC（80+ app 时数百次调用，是 Cmd+Tab 呼出延迟的主要来源）。
+        // 开关开启时仅预取 MRU 前 N 个 app（见 maxAXPrefetchCount）——
+        // 用户极少通过切换器切到 30 名开外的 app，其离屏窗口不预取可显著
+        // 减少跨进程 IPC（80+ app 时从数百次降至 ~60 次）。这些 app 的
+        // visible 窗口仍由 SCShareableContent 正常枚举，仅离屏窗口缺失。
         let axSnapshots: [pid_t: AXAppSnapshot]
-        if axTrusted {
-            let candidatePids = candidateApps.map(\.processIdentifier)
-            let showMin = filter.showMinimized
-            let showHid = filter.showHidden
+        if axTrusted && (showMin || showHid) {
+            // 用 AppUsageTracker 的 app 级 rank 排序候选 pid，取前 maxAXPrefetchCount。
+            // rank(of:) 返回 Int.max 表示无 MRU 记录（从未激活过的 app），排在末尾。
+            let tracker = AppUsageTracker.shared
+            let sortedPids = candidateApps
+                .map(\.processIdentifier)
+                .sorted { tracker.rank(of: $0) < tracker.rank(of: $1) }
+            let prefetchPids = Array(sortedPids.prefix(Self.maxAXPrefetchCount))
             axSnapshots = await Task.detached(priority: .userInitiated) {
                 var map: [pid_t: AXAppSnapshot] = [:]
-                for pid in candidatePids {
-                    let hidden = Self.isAppHidden(pid)
+                for pid in prefetchPids {
+                    // showHid=false 时无需 isAppHidden：主循环中 hidden 相关分支
+                    //（C2 兜底、C1 占位、.hidden 状态）均被 filter.showHidden 守卫，
+                    // axHidden=false 不影响结果。
+                    let hidden = showHid ? Self.isAppHidden(pid) : false
                     var states: [AXWindowState] = []
                     // 与原主循环的 needAX 判断一致：显示最小化 或（显示隐藏且 app 已隐藏）
                     if showMin || (showHid && hidden) {
@@ -423,24 +450,32 @@ final class WindowEnumerator {
 
     // MARK: - CGWindowList helpers
 
-    /// 构建 windowID → kCGWindowLayer 映射，用于过滤弹出层与系统 UI。
-    /// 调用方保留 [0, 8]：0 = 普通文档窗口，3 = 浮动面板（设置/工具面板），
+    /// 一次 CGWindowList 查询同时构建 layerMap（windowID→层级）与 onscreenIDs
+    /// （屏幕上可见的 windowID 集合）。合并原来两次 .optionOnScreenOnly +
+    /// .optionAll 调用，减少跨进程 IPC。
+    /// 调用方保留 layer [0, 8]：0 = 普通文档窗口，3 = 浮动面板（设置/工具面板），
     /// 8 = 模态面板（设置/对话框）——与 Mission Control 可见范围一致；
     /// ≥19 为 utility/dock/menubar/status/popup 层，被过滤。
-    private func windowLayerMap() -> [CGWindowID: Int] {
+    private func windowLayerAndOnscreenMaps() -> (layerMap: [CGWindowID: Int], onscreenIDs: Set<CGWindowID>) {
         guard let array = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
+            [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return [:]
+            return ([:], [])
         }
-        var map: [CGWindowID: Int] = [:]
+        var layerMap: [CGWindowID: Int] = [:]
+        var onscreenIDs: Set<CGWindowID> = []
         for info in array {
-            guard let windowNumber = info[kCGWindowNumber as String] as? Int,
-                  let layer = info[kCGWindowLayer as String] as? Int else { continue }
-            map[CGWindowID(windowNumber)] = layer
+            guard let windowNumber = info[kCGWindowNumber as String] as? Int else { continue }
+            let id = CGWindowID(windowNumber)
+            if let layer = info[kCGWindowLayer as String] as? Int {
+                layerMap[id] = layer
+            }
+            if (info[kCGWindowIsOnscreen as String] as? Bool) == true {
+                onscreenIDs.insert(id)
+            }
         }
-        return map
+        return (layerMap, onscreenIDs)
     }
 
     // MARK: - AX helpers

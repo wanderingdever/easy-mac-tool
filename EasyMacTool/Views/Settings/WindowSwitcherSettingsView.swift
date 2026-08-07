@@ -350,15 +350,13 @@ struct ShortcutDetailView: View {
                 }
                 groupCard("显示窗口", systemImage: "macwindow") {
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
-                        .toggleStyle(.switch)
+                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
                         .controlSize(.small)
-                        .tint(DesignTokens.Aurora.controlOn)
                         .help("在切换器中显示最小化到 Dock 的窗口（显示应用图标）")
                     divider
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
-                        .toggleStyle(.switch)
+                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
                         .controlSize(.small)
-                        .tint(DesignTokens.Aurora.controlOn)
                         .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示应用图标）")
                     if !axGranted {
                         Label("显示最小化/隐藏窗口需要『辅助功能』权限，当前未授予，开关暂不生效。",

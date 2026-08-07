@@ -273,6 +273,8 @@ final class ClipboardItem: Identifiable, Codable {
         guard let fileData = try? Data(contentsOf: url) else { return }
         let thumb = thumbnail ?? Self.makeThumbnail(from: fileData, max: 256)
         kind = .image(fileData, thumbnail: thumb)
+        // kind 变化后 footerText 改变，失效搜索缓存
+        _cachedSearchableText = nil
         // 同步填充像素尺寸缓存，footerText 不再重复解析 TIFF 元数据
         if imagePixelSize == nil {
             imagePixelSize = Self.readPixelSize(from: fileData)
@@ -296,6 +298,8 @@ final class ClipboardItem: Identifiable, Codable {
                   curData == nil || curThumb == nil else { return }
             let thumb = curThumb ?? Self.makeThumbnail(from: fileData, max: 256)
             self.kind = .image(fileData, thumbnail: thumb)
+            // kind 变化后 footerText 改变，失效搜索缓存
+            self._cachedSearchableText = nil
             // 同步填充像素尺寸缓存，footerText 不再重复解析 TIFF 元数据
             if self.imagePixelSize == nil {
                 self.imagePixelSize = Self.readPixelSize(from: fileData)
@@ -337,12 +341,18 @@ final class ClipboardItem: Identifiable, Codable {
     /// 用 NSCache 而非实例变量：ClipboardItem 是常驻对象，滚动出去后视图销毁了，
     /// 实例变量 _cachedFullImage 仍持有 NSImage（每张 4-8MB），100 张图滚一遍
     /// 可累积 400-800MB。NSCache 在系统内存压力时自动淘汰，无需依赖 coolDown()。
-    private static let fullImageCache = NSCache<NSUUID, NSImage>()
+    /// totalCostLimit = 100MB，按 TIFF data 字节数计入成本，超出自动 LRU 淘汰。
+    private static let fullImageCache: NSCache<NSUUID, NSImage> = {
+        let c = NSCache<NSUUID, NSImage>()
+        c.totalCostLimit = 100 * 1024 * 1024
+        return c
+    }()
     var fullImage: NSImage? {
         if let cached = Self.fullImageCache.object(forKey: id as NSUUID) { return cached }
         guard case .image(let data, _) = kind, let data else { return nil }
         guard let img = NSImage(data: data) else { return nil }
-        Self.fullImageCache.setObject(img, forKey: id as NSUUID)
+        // cost = TIFF data 字节数，让 NSCache 按总成本淘汰大图。
+        Self.fullImageCache.setObject(img, forKey: id as NSUUID, cost: data.count)
         return img
     }
 
@@ -377,6 +387,18 @@ final class ClipboardItem: Identifiable, Codable {
         return color
     }
 
+    /// 搜索用的小写文本（title + footerText 拼接），懒加载缓存。
+    /// filtered 在搜索框每次击键时全量遍历，预计算避免重复 lowercased() +
+    /// footerText 的 trimming/split（1000 条 × 每次击键的主要开销）。
+    /// kind 变化（warmUp）后需失效——warmUp/warmUpAsync/coolDown 中清空。
+    private var _cachedSearchableText: String?
+    var searchableText: String {
+        if let cached = _cachedSearchableText { return cached }
+        let text = (title + "\n" + footerText).lowercased()
+        _cachedSearchableText = text
+        return text
+    }
+
     /// 释放懒加载缓存（fullImage / _cachedAttributedString / _cachedHeaderForeground）。
     /// 由 ClipboardManager 在系统内存压力时对所有 item 调用，避免 1000 张图的
     /// fullImage 永久持有导致内存爆炸。释放后下次访问会重新生成。
@@ -385,6 +407,7 @@ final class ClipboardItem: Identifiable, Codable {
         Self.fullImageCache.removeObject(forKey: id as NSUUID)
         _cachedAttributedString = nil
         _cachedHeaderForeground = nil
+        _cachedSearchableText = nil
     }
 
     /// Short title shown above the preview card.

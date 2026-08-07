@@ -16,6 +16,10 @@ struct WindowThumbnailCell: View {
     let isHover: Bool
     let size: AppSettings.PreviewSize
 
+    // tooltip 状态:仅当标题截断且鼠标悬停 400ms 后显示完整标题。
+    @State private var isTooltipVisible = false
+    @State private var tooltipTask: Task<Void, Never>?
+
     /// Compute the actual thumbnail dimensions from the window's aspect ratio,
     /// constrained by the configured preview size. For off-screen/placeholder
     /// apps (no usable frame), fall back to the full preview box so the icon
@@ -36,6 +40,20 @@ struct WindowThumbnailCell: View {
         }
     }
 
+    /// 标题是否会被截断:用 NSString.size 测量标题自然渲染宽度,与可用宽度比较。
+    /// 仅在截断时才显示 tooltip,避免短标题也弹 tooltip 的噪音。
+    /// 可用宽度 = thumbnailSize.width - icon 占用(18pt) - HStack spacing(8pt);
+    /// 无 icon 时不需要扣除。加 1pt 容差避免边界抖动(亚像素差异)。
+    private var isTitleTruncated: Bool {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium)
+        ]
+        let naturalWidth = (item.title as NSString).size(withAttributes: attributes).width
+        let iconSpace: CGFloat = item.appIcon != nil ? 18 + DesignTokens.Spacing.sm : 0
+        let availableWidth = thumbnailSize.width - iconSpace
+        return naturalWidth > availableWidth + 1
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             // Title on top: all titles align at the top edge regardless of
@@ -54,6 +72,22 @@ struct WindowThumbnailCell: View {
                     .foregroundStyle(.primary)
             }
             .frame(width: thumbnailSize.width, alignment: .leading)
+            // tooltip:仅在标题被截断时,鼠标悬停 400ms 后显示完整标题。
+            // 用自定义 popover 而非 .help()——后者在 nonactivatingPanel 中不生效。
+            // 与 cell 级 .onHover(SwitcherOverlayView)分属不同视图层级,共存不冲突。
+            .onHover { hovering in
+                guard isTitleTruncated else { return }
+                if hovering {
+                    tooltipTask?.cancel()
+                    tooltipTask = Task {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        if !Task.isCancelled { isTooltipVisible = true }
+                    }
+                } else {
+                    tooltipTask?.cancel()
+                    isTooltipVisible = false
+                }
+            }
 
             thumbnail
                 .frame(width: thumbnailSize.width, height: thumbnailSize.height)
@@ -107,6 +141,34 @@ struct WindowThumbnailCell: View {
         )
         // Disable animation so selection changes feel instant.
         .transaction { $0.animation = nil }
+        // tooltip:显示在 cell **上方**,避免被缩略图遮住。挂在 cell 最外层
+        // 确保层级最高(标题 HStack 的 overlay 会被后续兄弟视图 thumbnail 覆盖);
+        // alignmentGuide(.top) = d[.bottom] + 4 让气泡底部浮在 cell 顶部上方 4pt;
+        // zIndex 让有 tooltip 的 cell 浮在相邻 cell 之上(FlowLayout 中后渲染的
+        // cell 会覆盖前者)。
+        .overlay(alignment: .top) {
+            if isTooltipVisible {
+                Text(item.title)
+                    .font(.system(size: 12))
+                    .lineLimit(2)
+                    .frame(maxWidth: 280)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: DesignTokens.Radius.small, style: .continuous)
+                            .fill(.regularMaterial)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DesignTokens.Radius.small, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+                    .fixedSize()
+                    .alignmentGuide(.top) { d in d[.bottom] + 4 }
+                    .transition(.opacity)
+            }
+        }
+        .zIndex(isTooltipVisible ? 1 : 0)
     }
 
     /// The thumbnail content, sized exactly to the window's aspect ratio.

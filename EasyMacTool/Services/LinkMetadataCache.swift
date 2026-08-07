@@ -20,32 +20,70 @@ final class LinkMetadataCache {
         let favicon: NSImage?
     }
 
-    private var cache: [String: Metadata] = [:]
+    /// NSCache 包装类：Metadata 是 struct，NSCache 要求 value 为 class。
+    final class MetadataBox: NSObject {
+        let metadata: Metadata
+        init(_ metadata: Metadata) { self.metadata = metadata }
+    }
+
+    /// 用 NSCache 替代裸字典：countLimit + totalCostLimit 双重限制，favicon
+    /// 数据按字节计入成本，防止长期运行 + 大量复制 URL 后缓存无限增长。
+    private let cache: NSCache<NSString, MetadataBox> = {
+        let c = NSCache<NSString, MetadataBox>()
+        c.countLimit = 200
+        c.totalCostLimit = 16 * 1024 * 1024
+        return c
+    }()
     private var inFlight: [String: Task<(title: String?, faviconData: Data?), Never>] = [:]
 
     private init() {}
 
     /// 同步读取已缓存的元数据（命中时返回，未命中返回 nil）。
-    func cached(_ urlString: String) -> Metadata? { cache[urlString] }
+    func cached(_ urlString: String) -> Metadata? {
+        cache.object(forKey: urlString as NSString)?.metadata
+    }
 
     /// 异步获取元数据：缓存命中直接返回；否则后台抓取。同一 URL 并发去重。
     /// 网络抓取在 Task.detached 后台执行（返回 Sendable 的 (title, Data)），
     /// NSImage 在主 actor 创建，避免跨 actor 传递非 Sendable 的 NSImage。
+    ///
+    /// 隐私保护：默认不抓取。用户在设置中开启「链接预览」后才会对 http/https
+    /// URL 发起网络请求，避免复制私有/带 token 的链接时 app 主动访问造成服务端
+    /// 副作用或信息泄露。关闭时返回空 Metadata，视图回退到系统图标 + host 文本。
     func metadata(for urlString: String) async -> Metadata {
-        if let cached = cache[urlString] { return cached }
+        guard AppSettings.shared.clipboardLinkPreviewEnabled else {
+            return Metadata(title: nil, favicon: nil)
+        }
+        if let cached = cache.object(forKey: urlString as NSString)?.metadata { return cached }
         if let task = inFlight[urlString] {
             // 并发去重：等待首个请求完成后从缓存读取（首个请求负责写入 cache）。
             _ = await task.value
-            return cache[urlString] ?? Metadata(title: nil, favicon: nil)
+            return cache.object(forKey: urlString as NSString)?.metadata
+                ?? Metadata(title: nil, favicon: nil)
         }
-        let task = Task.detached(priority: .utility) { await Self.fetchRaw(urlString) }
+        // fetchRaw 加 8s 超时竞速：URLSession 自身有 6s timeout，但极端情况
+        // （DNS 慢、连接挂起）下兜底，保证 inFlight 不会因 Task 永不完成而残留。
+        let task = Task.detached(priority: .utility) { () -> (title: String?, faviconData: Data?) in
+            await withTaskGroup(of: (title: String?, faviconData: Data?).self) { group in
+                group.addTask { await Self.fetchRaw(urlString) }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                    return (nil, nil)
+                }
+                let result = await group.next() ?? (title: nil, faviconData: nil)
+                group.cancelAll()
+                return result
+            }
+        }
         inFlight[urlString] = task
         let raw = await task.value
         let meta = Metadata(
             title: raw.title,
             favicon: raw.faviconData.flatMap { NSImage(data: $0) }
         )
-        cache[urlString] = meta
+        // cost = favicon 字节数，让 NSCache 按成本淘汰（大图标优先被回收）。
+        let cost = raw.faviconData?.count ?? 0
+        cache.setObject(MetadataBox(meta), forKey: urlString as NSString, cost: cost)
         inFlight[urlString] = nil
         return meta
     }

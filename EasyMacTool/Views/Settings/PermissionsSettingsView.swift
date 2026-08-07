@@ -3,11 +3,13 @@ import Combine
 import ScreenCaptureKit
 import ServiceManagement
 import SwiftUI
+import os
 
 /// 权限设置（Aurora v2）：通用卡片 + 权限卡片列表。
 /// 权限卡片带状态胶囊（已授权 = 绿渐变 / 未授权 = 红），
 /// 「请求权限」为品牌渐变主按钮，与全应用 Aurora 语言一致。
 struct PermissionsSettingsView: View {
+    private static let logger = Logger(subsystem: "com.easymactool", category: "PermissionsSettings")
     @State private var launchAtLogin = false
     // 权限状态本地缓存：每 2 秒定时刷新，让用户授权后回到设置窗口能看到
     // 状态图标变绿。直接读 AccessibilityChecker 的静态计算属性不会触发
@@ -50,9 +52,8 @@ struct PermissionsSettingsView: View {
                     Spacer(minLength: 0)
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
                         .controlSize(.small)
-                        .tint(DesignTokens.Aurora.controlOn)
                         .onChange(of: launchAtLogin) { _, newValue in
                             toggleLaunchAtLogin(enabled: newValue)
                         }
@@ -222,9 +223,9 @@ struct PermissionsSettingsView: View {
         Task.detached {
             do {
                 _ = try await SCShareableContent.current
-                print("[TCC] SCShareableContent.current succeeded — app registered for Screen Recording")
+                Self.logger.info("SCShareableContent.current succeeded — app registered for Screen Recording")
             } catch {
-                print("[TCC] SCShareableContent.current threw (expected if not authorized): \(error)")
+                Self.logger.info("SCShareableContent.current threw (expected if not authorized): \(error.localizedDescription, privacy: .public)")
             }
         }
     }

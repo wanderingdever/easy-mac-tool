@@ -85,7 +85,7 @@ struct SwitcherOverlayView: View {
                     .padding(.horizontal, 32)
                     .padding(.top, 0.5)
             }
-        )
+        )	
         // 外阴影由 NSPanel.hasShadow 提供——SwiftUI .shadow 会被
         // masksToBounds 裁掉，所以不在这里加。
         // Disable ALL animations — switcher appears instantly and selection

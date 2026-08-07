@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import os
 
 /// High-level hotkey events the rest of the app reacts to.
 enum HotkeyEvent {
@@ -32,6 +33,7 @@ private enum VK {
 @MainActor
 final class HotkeyManager {
     static let shared = HotkeyManager()
+    private static let logger = Logger(subsystem: "com.easymactool", category: "HotkeyManager")
 
     /// Set by `AppCoordinator`. Invoked synchronously from the event tap (main thread).
     var onEvent: (@MainActor (HotkeyEvent) -> Void)?
@@ -116,7 +118,7 @@ final class HotkeyManager {
         ) else {
             // Missing Accessibility permission or sandbox is still on.
             // 静默返回会让快捷键失效且无任何反馈，难以排查。
-            print("[HotkeyManager] CGEvent.tapCreate failed — needs Accessibility permission")
+            Self.logger.error("CGEvent.tapCreate failed — needs Accessibility permission")
             return
         }
         machPort = port

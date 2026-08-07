@@ -121,6 +121,14 @@ struct ClipboardSettingsView: View {
                     title: "记录剪切板历史",
                     desc: "关闭后不会读取新的剪切板内容；密码管理器会始终自动排除。"
                 )
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(height: 1)
+                toggleRow(
+                    isOn: $settings.clipboardLinkPreviewEnabled,
+                    title: "链接预览",
+                    desc: "开启后对复制的网页链接后台获取标题与站点图标。默认关闭：复制私有或带访问令牌的链接时，应用会主动访问该地址，可能触发服务端副作用。"
+                )
             }
         }
     }
@@ -141,9 +149,8 @@ struct ClipboardSettingsView: View {
             Spacer(minLength: 0)
             Toggle("", isOn: isOn)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
                 .controlSize(.small)
-                .tint(DesignTokens.Aurora.controlOn)
                 .padding(.top, 2)
         }
     }

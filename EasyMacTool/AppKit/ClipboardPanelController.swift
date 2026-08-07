@@ -22,6 +22,16 @@ final class ClipboardPanelController: ObservableObject {
     /// 导致 toggleClipboard 方向错误。
     @Published private(set) var isPresented = false
 
+    /// 呼出面板前记录的前台 app bundleID。simulatePaste 时校验 frontmostApp
+    /// 仍是它，防止面板关闭后焦点未恢复（或用户快速切窗）时把内容粘贴到
+    /// 错误窗口泄露剪贴板内容。dismiss 时清空。
+    private(set) var pasteTargetBundleID: String?
+
+    /// 当前关联的 ClipboardManager 弱引用。present 时保存，dismiss 时用来
+    /// 切换轮询频率：面板打开 → 0.5s 高频（用户正看历史，复制后立即出现）；
+    /// 面板关闭 → 1.5s 低频（后台捕获，降低 CPU 唤醒）。
+    private weak var clipboardManager: ClipboardManager?
+
     deinit {
         if let global = globalMonitor { NSEvent.removeMonitor(global) }
     }
@@ -34,6 +44,15 @@ final class ClipboardPanelController: ObservableObject {
         // autoPaste 由 AppCoordinator 在 onReapply 回调中读取 settings.clipboardAutoPaste
         // 决定是否模拟粘贴，本身不影响视图渲染——视图只需 manager 与 controller 引用。
         // 因此 present 不再接收 autoPaste 参数（之前是 dead parameter 被显式丢弃）。
+
+        // 记录呼出面板前的前台 app：nonactivatingPanel 不改变 frontmostApp，
+        // 此刻读取的就是 paste 的目标 app。dismiss 后 simulatePaste 用它校验。
+        pasteTargetBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        // 保存 manager 引用供 dismiss 时切换轮询频率。面板打开切高频轮询：
+        // 用户正在查看历史，此时从其他 app 复制内容应立即出现在卡片中。
+        clipboardManager = manager
+        manager.setActivePolling(true)
 
         if let hosting = hostingController {
             // 复用已有 hosting controller：更新 rootView 确保依赖一致，
@@ -85,6 +104,10 @@ final class ClipboardPanelController: ObservableObject {
         // 便于下次 present 时快速复用，避免重建掉帧。
         panel.orderOut(nil)
         isPresented = false
+        pasteTargetBundleID = nil
+        // 面板关闭切回低频轮询：后台捕获延迟 1.5s 检测不影响 UX，
+        // 降低菜单栏 app 常驻期间的 CPU 唤醒（笔记本续航场景）。
+        clipboardManager?.setActivePolling(false)
     }
 
     // MARK: - Private
