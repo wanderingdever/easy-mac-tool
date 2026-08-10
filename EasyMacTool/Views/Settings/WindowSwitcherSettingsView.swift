@@ -61,7 +61,8 @@ struct WindowSwitcherSettingsView: View {
                     Spacer(minLength: 0)
                     Toggle("", isOn: $settings.windowSwitcherEnabled)
                         .labelsHidden()
-                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
                         .padding(.top, 2)
                 }
@@ -382,12 +383,14 @@ struct ShortcutDetailView: View {
                 }
                 groupCard("显示窗口", systemImage: "macwindow") {
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
-                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
                         .help("在切换器中显示最小化到 Dock 的窗口（显示应用图标）")
                     divider
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
-                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
                         .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示应用图标）")
                     if !axGranted {

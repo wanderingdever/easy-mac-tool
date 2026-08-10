@@ -149,7 +149,8 @@ struct ClipboardSettingsView: View {
             Spacer(minLength: 0)
             Toggle("", isOn: isOn)
                 .labelsHidden()
-                .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                .toggleStyle(.switch)
+                .tint(DesignTokens.Aurora.controlOn)
                 .controlSize(.small)
                 .padding(.top, 2)
         }

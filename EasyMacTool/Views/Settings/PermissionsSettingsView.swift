@@ -52,7 +52,8 @@ struct PermissionsSettingsView: View {
                     Spacer(minLength: 0)
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
-                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
                         .onChange(of: launchAtLogin) { _, newValue in
                             toggleLaunchAtLogin(enabled: newValue)
