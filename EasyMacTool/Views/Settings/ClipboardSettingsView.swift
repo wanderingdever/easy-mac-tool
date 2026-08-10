@@ -67,7 +67,7 @@ struct ClipboardSettingsView: View {
 
     private var hotkeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("呼出快捷键", systemImage: "keyboard")
+            sectionHeader("快捷键", systemImage: "keyboard")
             sectionCard {
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("快捷键")
@@ -100,15 +100,7 @@ struct ClipboardSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("行为", systemImage: "switch.2")
             sectionCard {
-                toggleRow(
-                    isOn: $settings.clipboardAutoPaste,
-                    title: "自动粘贴",
-                    desc: "选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。"
-                )
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
+              toggleRow(
                     isOn: Binding(
                         get: { settings.clipboardCapturingEnabled },
                         set: { newValue in
@@ -118,9 +110,17 @@ struct ClipboardSettingsView: View {
                             }
                         }
                     ),
-                    title: "启用剪切板历史",
+                    title: "启用剪切板",
                     desc: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。"
                 )
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(height: 1)
+                toggleRow(
+                    isOn: $settings.clipboardAutoPaste,
+                    title: "自动粘贴",
+                    desc: "选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。"
+                ) 
                 Rectangle()
                     .fill(DesignTokens.Aurora.insetSeparator)
                     .frame(height: 1)
