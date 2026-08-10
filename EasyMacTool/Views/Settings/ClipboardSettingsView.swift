@@ -118,8 +118,8 @@ struct ClipboardSettingsView: View {
                             }
                         }
                     ),
-                    title: "记录剪切板历史",
-                    desc: "关闭后不会读取新的剪切板内容；密码管理器会始终自动排除。"
+                    title: "启用剪切板历史",
+                    desc: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。"
                 )
                 Rectangle()
                     .fill(DesignTokens.Aurora.insetSeparator)

@@ -26,6 +26,9 @@ final class AppSettings: ObservableObject {
     /// （类 Paste 链接卡片）。默认关闭——复制私有/带 token 的链接时 app 主动
     /// 访问可能触发服务端副作用或泄露信息，需用户明确知情开启。
     @Published var clipboardLinkPreviewEnabled: Bool = false { didSet { debouncePersist() } }
+    /// 窗口切换功能全局开关。关闭后所有窗口切换快捷键透传至系统，
+    /// 恢复 macOS 原生 Cmd+Tab 行为。
+    @Published var windowSwitcherEnabled: Bool = true { didSet { debouncePersist() } }
 
     private let defaults = UserDefaults.standard
     private let storageKey = "appSettings.v1"
@@ -163,6 +166,7 @@ final class AppSettings: ObservableObject {
         var clipboardAutoPaste: Bool?
         var clipboardCapturingEnabled: Bool?
         var clipboardLinkPreviewEnabled: Bool?
+        var windowSwitcherEnabled: Bool?
     }
 
     private func persist() {
@@ -173,7 +177,8 @@ final class AppSettings: ObservableObject {
             clipboardHistoryLimit: clipboardHistoryLimit,
             clipboardAutoPaste: clipboardAutoPaste,
             clipboardCapturingEnabled: clipboardCapturingEnabled,
-            clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled
+            clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled,
+            windowSwitcherEnabled: windowSwitcherEnabled
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults.set(data, forKey: storageKey)
@@ -194,6 +199,9 @@ final class AppSettings: ObservableObject {
             }
             if let linkPreview = snapshot.clipboardLinkPreviewEnabled {
                 clipboardLinkPreviewEnabled = linkPreview
+            }
+            if let wsEnabled = snapshot.windowSwitcherEnabled {
+                windowSwitcherEnabled = wsEnabled
             }
         } catch {
             Self.logger.error("Failed to decode persisted settings: \(error.localizedDescription, privacy: .public). Using defaults.")

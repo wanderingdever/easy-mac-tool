@@ -233,7 +233,9 @@ final class HotkeyManager {
         // 必须在 matchShortcut 之前，否则当剪贴板快捷键与某个 window switcher
         // 快捷键的 keyCode+modifiers 完全相同时，matchShortcut 会先匹配触发 .open，
         // 剪贴板快捷键被永久屏蔽，用户按 Cmd+Shift+V 会打开切换器而非剪切板。
-        if let cs = settings?.clipboardShortcut,
+        // 剪切板功能关闭时，快捷键透传至系统，不做任何处理。
+        if settings?.clipboardCapturingEnabled == true,
+           let cs = settings?.clipboardShortcut,
            cs.keyCode == keyCode && cs.modifiers == modifiers {
             // autorepeat 守卫：按住剪贴板快捷键时系统会连续产生重复 keyDown。
             // 第一次按下已触发 .clipboard，重复事件直接吞掉，避免面板反复开合。
@@ -254,6 +256,7 @@ final class HotkeyManager {
             // 逻辑：如果当前 modifiers 完整匹配某个配置的 shortcut，且
             // activeShortcut 为 nil（说明 .hold 模式已释放过），当作新的 open。
             if activeShortcut == nil,
+               settings?.windowSwitcherEnabled == true,
                let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
                 activeShortcut = shortcut
                 onEvent?(.open(shortcut))
@@ -294,7 +297,10 @@ final class HotkeyManager {
         }
 
         // Switcher closed (or no matching nav key): check if this key combo opens it.
-        if !isSwitcherOpen, let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
+        // 窗口切换功能关闭时，快捷键透传至系统（恢复原生 Cmd+Tab 行为）。
+        if !isSwitcherOpen,
+           settings?.windowSwitcherEnabled == true,
+           let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
             // autorepeat 守卫：按住快捷键时系统连续产生重复 keyDown（初始按下已触发
             // .open 并启动异步 snapshot）。若不拦截，每个重复事件都会重新走 .open →
             // openTask?.cancel() + 新 snapshot，快照被反复取消重启（SCShareableContent

@@ -14,6 +14,7 @@ struct WindowSwitcherSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
+            globalToggleSection
             displayTargetSection
             shortcutSection
         }
@@ -37,6 +38,37 @@ struct WindowSwitcherSettingsView: View {
             Text(title)
                 .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
                 .foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - Global toggle
+
+    /// 窗口切换功能全局开关：关闭后所有窗口切换快捷键恢复系统原生行为。
+    private var globalToggleSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("通用", systemImage: "power")
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("启用窗口切换")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.primary)
+                        Text("关闭后所有窗口切换快捷键将恢复系统默认行为（原生 Cmd+Tab）。")
+                            .font(.system(size: DesignTokens.SettingsTypography.caption))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    Toggle("", isOn: $settings.windowSwitcherEnabled)
+                        .labelsHidden()
+                        .toggleStyle(SwitchToggleStyle(tint: DesignTokens.Aurora.controlOn))
+                        .controlSize(.small)
+                        .padding(.top, 2)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .auroraSettingsCard()
         }
     }
 
