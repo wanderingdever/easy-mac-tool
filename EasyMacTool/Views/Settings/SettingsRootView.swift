@@ -169,36 +169,40 @@ private struct SidebarNavItem: View {
     @State private var isHovered = false
 
     var body: some View {
-        HStack(spacing: DesignTokens.Settings.navItemGap) {
-            Image(systemName: iconName)
-                .font(.system(size: DesignTokens.Settings.navItemIconSize, weight: .medium))
-                .frame(width: DesignTokens.Settings.navItemIconSize,
-                       height: DesignTokens.Settings.navItemIconSize)
-            Text(section.rawValue)
-                .font(.system(size: DesignTokens.SettingsTypography.navItem,
-                              weight: isSelected ? .semibold : .regular))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .foregroundStyle(isSelected ? Color.white : Color.primary)
-        .padding(.vertical, DesignTokens.Settings.navItemVPadding)
-        .padding(.horizontal, DesignTokens.Settings.navItemHPadding)
-        .frame(minHeight: DesignTokens.Settings.navItemHeight)
-        .background(
-            RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius + 2, style: .continuous)
-                .fill(backgroundFill)
-        )
-        .shadow(color: isSelected ? DesignTokens.Aurora.brandGlow : .clear,
-                radius: 6, y: 2)
-        .contentShape(Rectangle())
-        .animation(DesignTokens.Aurora.standard, value: isSelected)
-        .animation(DesignTokens.Aurora.standard, value: isHovered)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-        .onTapGesture {
+        Button {
             action()
+        } label: {
+            HStack(spacing: DesignTokens.Settings.navItemGap) {
+                Image(systemName: iconName)
+                    .font(.system(size: DesignTokens.Settings.navItemIconSize, weight: .medium))
+                    .frame(width: DesignTokens.Settings.navItemIconSize,
+                           height: DesignTokens.Settings.navItemIconSize)
+                Text(section.rawValue)
+                    .font(.system(size: DesignTokens.SettingsTypography.navItem,
+                                  weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .padding(.vertical, DesignTokens.Settings.navItemVPadding)
+            .padding(.horizontal, DesignTokens.Settings.navItemHPadding)
+            .frame(minHeight: DesignTokens.Settings.navItemHeight)
+            .background(
+                RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius + 2, style: .continuous)
+                    .fill(backgroundFill)
+            )
+            .shadow(color: isSelected ? DesignTokens.Aurora.brandGlow : .clear,
+                    radius: 6, y: 2)
+            .contentShape(Rectangle())
+            .animation(DesignTokens.Aurora.standard, value: isSelected)
+            .animation(DesignTokens.Aurora.standard, value: isHovered)
+            .onHover { hovering in
+                isHovered = hovering
+            }
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(section.rawValue)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var backgroundFill: AnyShapeStyle {

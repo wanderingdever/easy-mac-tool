@@ -134,11 +134,16 @@ final class OverlayPanelController: ObservableObject {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] _ in
             guard let self else { return }
-            let mouseLocation = NSEvent.mouseLocation
-            let panelFrame = self.panel.frame
-            // 检查鼠标位置是否在 panel frame 内：若在 panel 内则不 dismiss
+            // globalMonitor 回调虽在主线程触发，但闭包是 @Sendable 非隔离，
+            // 直接访问 panel.frame / NSEvent.mouseLocation / onDismiss
+            // （均 @MainActor 隔离）在 Swift 6 严格并发下编译失败。
+            // 用 Task { @MainActor } 派回主 actor。读取 mouseLocation 和
+            // panelFrame 也移入 Task 内，确保全部在主 actor 执行。
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let mouseLocation = NSEvent.mouseLocation
+                let panelFrame = self.panel.frame
+                // 检查鼠标位置是否在 panel frame 内：若在 panel 内则不 dismiss
                 if panelFrame.contains(mouseLocation) { return }
                 self.onDismiss?()
             }
@@ -148,14 +153,21 @@ final class OverlayPanelController: ObservableObject {
     /// 启动 AX 权限监控定时器：切换器打开期间若 AX 被撤销，CGEventTap 失效，
     /// 键盘事件不再到达 handleKeyDown，用户无法用 Esc 关闭切换器。此定时器
     /// 每 1s 检查 isTrusted，失效时通过 onDismiss 自动关闭切换器。
+    /// 用 Timer + RunLoop.main.add(.common) 替代 Timer.scheduledTimer：
+    /// 后者仅加入 .default 模式，NSMenu 模态会话（如右键上下文菜单）期间
+    /// 不触发，导致切换器打开期间右键菜单时 AX 撤销检测停滞，键盘锁死。
     private func startAXWatchTimer() {
         axWatchTimer?.invalidate()
-        axWatchTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if !AccessibilityChecker.isTrusted {
-                self.onDismiss?()
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !AccessibilityChecker.isTrusted {
+                    self.onDismiss?()
+                }
             }
         }
+        RunLoop.main.add(t, forMode: .common)
+        axWatchTimer = t
     }
 
     func next() {

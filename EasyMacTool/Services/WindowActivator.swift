@@ -14,7 +14,11 @@ final class WindowActivator {
     /// - .visible：直接激活
     /// - .minimized：先 AX deminimize（AXMinimized=false）
     /// - .hidden：先 app.unhide()，再检查是否需要 deminimize（边界：app hidden + 窗口 minimized）
-    func activate(_ item: WindowItem) {
+    ///
+    /// - Returns: true 表示成功激活窗口（找到 AX 窗口并设置 focus）；
+    ///   false 表示窗口未找到或激活失败，调用方可据此保留 item 或提示用户。
+    @discardableResult
+    func activate(_ item: WindowItem) -> Bool {
         let app = NSRunningApplication(processIdentifier: item.pid)
         // 缓存第一次 findAXWindow 找到的窗口引用，app.activate 后窗口列表可能变化，
         // 第二次查找可能失败。复用引用避免 deminimize 后未正确 focus。
@@ -34,6 +38,11 @@ final class WindowActivator {
         case .hidden:
             // 先 unhide app（Cmd+H 隐藏的 app 需要 unhide 才能显示窗口）
             app?.unhide()
+            // unhide 是异步的：app.unhide() 返回后 AX 窗口树可能尚未更新，
+            // 立即查询 findAXWindow 可能返回 nil。短暂等待（100ms）让
+            // WindowServer 完成 unhide 的窗口映射，再查询 AX。
+            // 100ms 是经验值：unhide 通常 <50ms，100ms 提供足够余量且用户无感。
+            Thread.sleep(forTimeInterval: 0.1)
             // 边界情况：app hidden + 窗口 minimized
             // unhide 后该窗口可能仍然是 minimized 的，需要同时 deminimize
             let axApp = AXUIElementCreateApplication(item.pid)
@@ -52,27 +61,34 @@ final class WindowActivator {
         app?.activate(options: [.activateAllWindows])
 
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = resolvedWindow ?? findAXWindow(axApp, matching: item) else { return }
+        guard let window = resolvedWindow ?? findAXWindow(axApp, matching: item) else { return false }
         AXUIElementSetAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, window)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        return true
     }
 
     /// Closes the window by pressing its AX close button.
     /// 禁用 frame 兜底匹配：close 涉及数据丢失风险（未保存文档被关），
     /// 仅允许真实 windowID 精确匹配。无 AXWindowID 的窗口放弃关闭——
     /// 安全的 no-op 优于误关近似窗口。
-    func close(_ item: WindowItem) {
+    /// - Returns: true 表示成功找到窗口并按下了 close 按钮；
+    ///   false 表示未找到窗口或按钮未暴露。调用方应仅在 true 时从列表移除 item，
+    ///   false 时保留 item 并可选提示用户（避免"列表消失但窗口仍开"的困惑）。
+    @discardableResult
+    func close(_ item: WindowItem) -> Bool {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return }
-        pressButton(window, attribute: kAXCloseButtonAttribute as CFString)
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return false }
+        return pressButton(window, attribute: kAXCloseButtonAttribute as CFString)
     }
 
     /// Minimizes the window by pressing its AX minimize button.
     /// 同 close：禁用 frame 兜底，避免误最小化近似窗口。
-    func minimize(_ item: WindowItem) {
+    /// - Returns: true 表示成功按下 minimize 按钮；false 表示未找到窗口或按钮未暴露。
+    @discardableResult
+    func minimize(_ item: WindowItem) -> Bool {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return }
-        pressButton(window, attribute: kAXMinimizeButtonAttribute as CFString)
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return false }
+        return pressButton(window, attribute: kAXMinimizeButtonAttribute as CFString)
     }
 
     // MARK: - Private
@@ -141,16 +157,23 @@ final class WindowActivator {
         return CGWindowID(number.uint32Value)
     }
 
-    private func pressButton(_ window: AXUIElement, attribute: CFString) {
+    /// 按下窗口的指定 AX 按钮（close / minimize）。
+    /// - Returns: true 表示成功找到按钮并执行了 press；false 表示按钮未暴露
+    ///   或属性查询失败。调用方据此决定是否从切换器列表移除 item：
+    ///   若返回 false，窗口实际仍开着/未最小化，移除 item 会让用户困惑
+    ///   （"列表消失了但窗口还在"）。
+    @discardableResult
+    private func pressButton(_ window: AXUIElement, attribute: CFString) -> Bool {
         var ref: CFTypeRef?
         // 用 CFGetTypeID 运行时类型检查 + as!：as? 对 CF 类型会被编译器拒绝，
         // 纯 as! 不做运行时类型验证，个别 app 返回非 AXUIElement 类型会崩溃。
         // CFGetTypeID 预检查后 as! 安全（类型已验证）。
         guard AXUIElementCopyAttributeValue(window, attribute, &ref) == .success,
               let value = ref,
-              CFGetTypeID(value) == AXUIElementGetTypeID() else { return }
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
         let button = value as! AXUIElement
         AXUIElementPerformAction(button, kAXPressAction as CFString)
+        return true
     }
 
     private func cgPoint(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {

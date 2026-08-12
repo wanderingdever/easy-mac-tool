@@ -29,6 +29,14 @@ final class AppUsageTracker {
     private var observers: [pid_t: AXObserver] = [:]
     /// Run loop sources for AX observers (must retain to keep observer alive).
     private var runLoopSources: [pid_t: CFRunLoopSource] = [:]
+    /// PID → bundleID 映射，用于检测 PID 复用：force-kill 后 macOS 可能将
+    /// 该 PID 分配给新 app，此时旧 observer 仍在字典中会阻止新 app 安装。
+    /// 比较 bundleID 可识别 PID 复用并清理旧 observer。
+    private var observerBundleIDs: [pid_t: String] = [:]
+    /// 定期清理定时器：force-kill / 崩溃的 app 不触发 didTerminateNotification，
+    /// 导致 observer + runLoopSource 永久泄漏。每 30s 扫描 runningApplications
+    /// 清理已不存在的 PID。
+    private var reaperTimer: Timer?
 
     private init() {
         // Seed with the current frontmost app + its focused window.
@@ -60,6 +68,39 @@ final class AppUsageTracker {
         for app in NSWorkspace.shared.runningApplications {
             installAXObserver(for: app)
         }
+        // 定期清理 force-kill 残留：30s 间隔足够及时清理且 CPU 开销极小
+        // （仅一次 NSWorkspace.runningApplications IPC + 字典 diff）。
+        // 用 .common 模式避免 NSMenu 模态期间停滞。
+        let t = Timer(timeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reapStaleObservers()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        reaperTimer = t
+    }
+
+    deinit {
+        reaperTimer?.invalidate()
+    }
+
+    /// 清理已退出但 observer 仍残留的 PID。force-kill (SIGKILL)、
+    /// Activity Monitor 强制退出、内核 EXC_BAD_ACCESS 崩溃等场景
+    /// 不触发 NSWorkspace.didTerminateApplicationNotification，
+    /// 导致 observer + runLoopSource 永久泄漏。更严重的是 macOS 会
+    /// 复用 PID：新 app 安装时 guard observers[pid] == nil 跳过，
+    /// 新 app 永远无 MRU 跟踪。此方法扫描 runningApplications
+    /// 清理字典中已不存在的 PID，让下次 installAXObserver 能成功安装。
+    private func reapStaleObservers() {
+        let alivePIDs = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+        let stalePIDs = observers.keys.filter { !alivePIDs.contains($0) }
+        guard !stalePIDs.isEmpty else { return }
+        for pid in stalePIDs {
+            removeAXObserver(for: pid)
+        }
+        // 同步清理 order 数组中的 stale PID（AppUsageTracker.removeAXObserver
+        // 只清 windowOrder，不清 order）。
+        order.removeAll { !alivePIDs.contains($0) }
     }
 
     // MARK: - Window-level MRU
@@ -122,7 +163,16 @@ final class AppUsageTracker {
         let pid = app.processIdentifier
         guard app.activationPolicy == .regular else { return }
         if app.bundleIdentifier == ownBundleID { return }
-        guard observers[pid] == nil else { return }  // already installed
+
+        // PID 复用检测：force-kill 后 macOS 可能将该 PID 分配给新 app。
+        // 若 observers[pid] 已存在但 bundleID 不同，说明是旧 app 残留，
+        // 必须先 removeAXObserver 清理旧 observer 才能安装新的。
+        // 否则 guard observers[pid] == nil 跳过安装，新 app 永远无 MRU 跟踪。
+        if let existingBundleID = observerBundleIDs[pid],
+           existingBundleID != app.bundleIdentifier {
+            removeAXObserver(for: pid)
+        }
+        guard observers[pid] == nil else { return }  // already installed for this app
 
         var observer: AXObserver?
         let result = AXObserverCreate(pid, { _, element, notif, refcon in
@@ -167,6 +217,7 @@ final class AppUsageTracker {
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         observers[pid] = obs
         runLoopSources[pid] = src
+        observerBundleIDs[pid] = app.bundleIdentifier
     }
 
     private func removeAXObserver(for pid: pid_t) {
@@ -175,6 +226,7 @@ final class AppUsageTracker {
             runLoopSources.removeValue(forKey: pid)
         }
         observers.removeValue(forKey: pid)
+        observerBundleIDs.removeValue(forKey: pid)
         // 通过 windowOwners 反查表批量清理该 PID 的所有 windowID。
         // 之前不清理导致 stale 条目累积至上限 128，污染 MRU 排序。
         let staleWindowIDs = windowOwners.filter { $0.value == pid }.keys

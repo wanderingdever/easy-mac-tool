@@ -125,10 +125,38 @@ final class ClipboardManager: ObservableObject {
     /// 密码管理器等写入剪贴板时附带的"不应被记录"约定标记（1Password 等
     /// 均遵守）。比 bundleID 黑名单更可靠：浏览器自动填充复制的密码来源
     /// 是浏览器本身，黑名单无法覆盖，但约定标记会随内容一起写入。
+    /// - `org.nspasteboard.ConcealedType`：社区标准"隐藏内容"标记，1Password/
+    ///   Bitwarden 等写入密码时设置，Safari 从密码输入框复制时也会设置。
+    /// - `org.nspasteboard.TransientType`：临时内容（如 KeePassXC 的"清除后 N 秒"）。
+    /// - `com.agilebits.onepassword`：1Password 旧版专属标记。
+    /// - `com.apple.security.passwords`：Apple 密码管理器 / Safari 密码字段复制
+    ///   时设置的标记（macOS 14+）。覆盖 Safari 自动填充密码复制的场景。
     private static let sensitivePasteboardMarkers: [NSPasteboard.PasteboardType] = [
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
-        NSPasteboard.PasteboardType("com.agilebits.onepassword")
+        NSPasteboard.PasteboardType("com.agilebits.onepassword"),
+        NSPasteboard.PasteboardType("com.apple.security.passwords")
+    ]
+    /// 已知浏览器 bundleID，用于启发式密码检测：浏览器自动填充的密码
+    /// 复制时通常不设置 ConcealedType（仅 Safari 在 macOS 14+ 设置
+    /// com.apple.security.passwords）。Chrome/Firefox/Edge 等浏览器从
+    /// 自动填充字段复制密码时无任何标记，需启发式检测。
+    /// 检测条件（全部满足才跳过）：
+    /// 1. 来源 app 是已知浏览器
+    /// 2. 剪贴板仅含 string 类型（无 URL/file/image，排除正常文本复制）
+    /// 3. 字符串无空格（密码通常无空格，正常句子含空格）
+    /// 4. 长度 6-64（密码长度范围）
+    /// 5. 含字母且含数字/符号（排除纯数字/纯字母的普通词）
+    /// 此启发式有误报可能（跳过符合条件的正常文本复制），但安全优先——
+    /// 误报代价是用户需重新复制，漏报代价是密码被明文持久化到磁盘。
+    private static let browserBundleIDs: Set<String> = [
+        "com.apple.safari",         // Safari
+        "com.google.chrome",        // Chrome
+        "org.mozilla.firefox",      // Firefox
+        "com.microsoft.edgemac",    // Edge
+        "company.thebrowser.brave", // Brave
+        "com.brave.Browser",       // Brave (旧 ID)
+        "com.operasoftware.Opera"   // Opera
     ]
 
     // MARK: - Persistence URLs
@@ -247,10 +275,17 @@ final class ClipboardManager: ObservableObject {
     private func rescheduleTimer() {
         timer?.invalidate()
         let interval = isActive ? Self.activePollInterval : Self.inactivePollInterval
-        let instance = self
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
-            Task { @MainActor in instance.poll() }
+        // 用 Timer(timeInterval:repeats:block:) + RunLoop.main.add(.common) 替代
+        // Timer.scheduledTimer：后者仅加入 .default 模式，NSMenu 模态会话期间
+        // 不触发，导致右键菜单打开时剪贴板变更不被捕获。.common 模式确保所有
+        // run loop 状态下都正常触发。同时用 [weak self] 替代 let instance = self，
+        // 避免强引用循环（虽然单例下无害，但符合规范便于未来测试）。
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.poll() }
         }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     /// 更新轮询活跃状态并自适应调整频率。
@@ -506,6 +541,18 @@ final class ClipboardManager: ObservableObject {
         let hasFileURL = types.contains(.fileURL)
         guard hasURL || hasString || hasTIFF || hasFileURL else { return }
 
+        // 浏览器密码启发式检测：Chrome/Firefox/Edge 等浏览器从自动填充
+        // 密码字段复制时不设置 ConcealedType（仅 Safari macOS 14+ 设置
+        // com.apple.security.passwords，已在上面的 markers 检查中捕获）。
+        // 对仅含 string 类型 + 来源是浏览器的复制，用启发式判断是否像密码。
+        // 误报代价（跳过正常文本复制）低于漏报代价（密码被明文持久化到磁盘）。
+        if hasString && !hasURL && !hasTIFF && !hasFileURL,
+           let sourceBundleID = currentSourceBundleID,
+           Self.browserBundleIDs.contains(sourceBundleID) {
+            let candidate = pb.string(forType: .string) ?? ""
+            if looksLikePassword(candidate) { return }
+        }
+
         guard let item = snapshot() else { return }
         // 去重：遍历全部历史，若已有相同 payload 的条目，把旧条目移到第一位，
         // 不创建新副本。这比"只检查第一项 + 丢弃"更合理：
@@ -655,10 +702,13 @@ final class ClipboardManager: ObservableObject {
     /// app 退出时由 stop() → saveToDiskSync() 强制同步 flush。
     private func schedulePersist() {
         saveTimer?.invalidate()
-        saveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+        // 同 rescheduleTimer：用 .common 模式避免 NSMenu 模态期间保存停滞。
+        let t = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.saveToDisk() }
         }
+        RunLoop.main.add(t, forMode: .common)
+        saveTimer = t
     }
 
     /// 将剪贴板历史持久化到磁盘。
@@ -818,6 +868,55 @@ final class ClipboardManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 当前前台 app 的 bundleID，用于浏览器密码启发式检测。
+    /// 与 captureSourceApp() 取相同来源（NSWorkspace.frontmostApplication），
+    /// 但只返回 bundleID，避免在仅需 bundleID 的场景下构造完整元组。
+    private var currentSourceBundleID: String? {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+
+    /// 浏览器密码启发式检测：判断字符串是否像密码。
+    /// 仅在来源是已知浏览器 + 剪贴板仅含 string 类型时调用。
+    /// 规则（全部满足才判定为密码）：
+    /// 1. 长度 6-64（密码长度范围，过短/过长排除）
+    /// 2. 无空格（密码通常无空格，正常句子含空格）
+    /// 3. 含字母（排除纯数字 PIN，但纯数字 PIN 通常会被 ConcealedType 标记）
+    /// 4. 含数字或符号（排除纯字母的普通词）
+    /// 5. 不是常见非密码文本（如 URL、邮箱、IP）
+    /// 误报代价（跳过正常文本复制）低于漏报代价（密码被明文持久化）。
+    private func looksLikePassword(_ candidate: String) -> Bool {
+        let len = candidate.count
+        // 长度范围：6-64（密码通常在此范围，过短/过长都不像）
+        guard len >= 6, len <= 64 else { return false }
+        // 无空格：密码通常无空格，含空格的多为正常句子
+        if candidate.contains(" ") || candidate.contains("\t") || candidate.contains("\n") {
+            return false
+        }
+        // 排除明显非密码的常见文本类型（避免误报）
+        // 邮箱：含 @ 且 @ 后含 .
+        if candidate.contains("@"), let at = candidate.firstIndex(of: "@"),
+           candidate[at...].contains(".") {
+            return false
+        }
+        // URL：以 http:// 或 https:// 开头
+        if candidate.lowercased().hasPrefix("http://") || candidate.lowercased().hasPrefix("https://") {
+            return false
+        }
+        // IP 地址：x.x.x.x 模式
+        let dotCount = candidate.filter { $0 == "." }.count
+        if dotCount == 3,
+           candidate.split(separator: ".").allSatisfy({ Int($0) != nil }) {
+            return false
+        }
+        // 字符分类
+        let hasLetter = candidate.contains { $0.isLetter }
+        let hasDigit = candidate.contains { $0.isNumber }
+        let hasSymbol = candidate.contains { !$0.isLetter && !$0.isNumber && !$0.isWhitespace }
+        // 密码特征：含字母 且 （含数字 或 含符号）
+        // 排除纯字母的普通词、纯数字的 PIN（PIN 通常有 ConcealedType 标记）
+        return hasLetter && (hasDigit || hasSymbol)
     }
 
     private func isSensitiveSource(bundleID: String?) -> Bool {

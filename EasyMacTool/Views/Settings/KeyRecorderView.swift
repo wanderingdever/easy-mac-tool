@@ -138,9 +138,14 @@ struct KeyRecorderView: View {
         }
         // 10 秒超时自动取消录制。防止设置窗口在录制期间被 Cmd+W 关闭、
         // .onDisappear 未触发导致 isRecording 永久为 true、所有快捷键失效。
-        recordingTimeout = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in
+        // 用 Timer + RunLoop.main.add(.common) 替代 Timer.scheduledTimer：
+        // 后者仅加入 .default 模式，若录制期间有 NSMenu 模态会话（如右键菜单），
+        // 定时器不触发会导致 isRecording 永久卡住。
+        let t = Timer(timeInterval: 10, repeats: false) { _ in
             stopRecording()
         }
+        RunLoop.main.add(t, forMode: .common)
+        recordingTimeout = t
     }
 
     private func stopRecording() {

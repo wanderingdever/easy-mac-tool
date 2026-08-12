@@ -276,7 +276,12 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             streams[item.id] = stream
             itemForStream[ObjectIdentifier(stream)] = item
         } catch {
-            // Skip individual windows we can't capture.
+            // startCapture/addStreamOutput 失败时必须显式 stopCapture：
+            // stream 是局部变量出作用域后被释放，但 SCStream 内部可能已分配
+            // 桌面捕获资源。itemForStream 未设置（上面那行未执行），
+            // stream(_:didStopWithError:) delegate 的 guard itemForStream.removeValue
+            // 会返回 nil，无法清理 streams 字典 → 资源泄漏。这里同步清理。
+            stream.stopCapture { _ in }
         }
     }
 

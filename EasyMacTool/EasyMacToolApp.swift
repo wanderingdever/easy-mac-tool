@@ -166,8 +166,13 @@ final class AppCoordinator {
         // 3s 兜底间隔：simulatePaste 后已有独立的 50ms 健康检查 Task 立即恢复
         // （见 ClipboardManager.simulatePaste 末尾），常规兜底无需高频。0.5s 会
         // 持续唤醒 CPU 影响续航；3s 足以覆盖睡眠唤醒等低频失效场景。
-        hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) {
-            [weak self] _ in
+        // 用 Timer + RunLoop.main.add(.common) 替代 Timer.scheduledTimer：
+        // 后者仅加入 .default 模式，NSMenu 模态会话期间不触发，导致切换器
+        // 打开期间右键菜单时 tap 健康检查停滞。闭包内用 Task { @MainActor }
+        // 包裹以满足 Swift 严格并发（Timer block 是 @Sendable 非隔离，
+        // 直接访问 @MainActor 属性编译会失败）。
+        let t = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 // 辅助功能权限被撤销：CGEventTap 会被系统禁用，快捷键全部失效。
                 // 累计计数，超阈值后重新提示一次，避免静默失效且无反馈。
@@ -186,7 +191,10 @@ final class AppCoordinator {
                     Self.logger.warning("[AppCoordinator] event tap unhealthy — restarting")
                     HotkeyManager.shared.restart()
                 }
+            }
         }
+        RunLoop.main.add(t, forMode: .common)
+        hotkeyRetryTimer = t
         panelController.onActivateItem = { [weak self] item in
             self?.activateItem(item)
         }
@@ -263,7 +271,12 @@ final class AppCoordinator {
         let delay = permissionCheckAttempts == 0
             ? Self.initialPermissionCheckDelay
             : Self.permissionRetryInterval
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        // 用 Task { @MainActor in try? await Task.sleep } 替代
+        // DispatchQueue.main.asyncAfter：后者闭包是 @Sendable 非隔离，
+        // 直接访问 @MainActor 属性（promptedPermissions 等）在 Swift 6
+        // 严格并发模式下编译失败。Task { @MainActor } 天然在主 actor 执行。
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self else { return }
             // 若 openSwitcher 已先触发过请求，跳过避免重复。
             // 用 promptedPermissions 判断：若当前所有 missing 项都已提示过，跳过。
@@ -314,16 +327,19 @@ final class AppCoordinator {
             }
         case .close:
             if let item = panelController.selectedItem {
-                activator.close(item)
-                // 从 items 列表移除已关闭的窗口，避免用户继续 Tab 切到
-                // 已关闭窗口（激活失败）。Windows Alt+Tab 也是立即移除。
-                panelController.removeItem(item)
+                // 仅在 close 成功时移除 item：若按钮未暴露（某些 app 不实现
+                // AXCloseButton），窗口实际仍开着，移除 item 会让用户困惑
+                // （"列表消失了但窗口还在"）。失败时保留 item，用户可手动关闭。
+                if activator.close(item) {
+                    panelController.removeItem(item)
+                }
             }
         case .minimize:
             if let item = panelController.selectedItem {
-                activator.minimize(item)
-                // 最小化的窗口从列表移除：用户不应再切换到已最小化的窗口。
-                panelController.removeItem(item)
+                // 同 close：仅在 minimize 成功时移除 item。
+                if activator.minimize(item) {
+                    panelController.removeItem(item)
+                }
             }
         case .clipboard:
             toggleClipboard()

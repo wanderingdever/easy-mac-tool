@@ -180,8 +180,16 @@ final class AppSettings: ObservableObject {
             clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled,
             windowSwitcherEnabled: windowSwitcherEnabled
         )
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        defaults.set(data, forKey: storageKey)
+        do {
+            let data = try JSONEncoder().encode(snapshot)
+            defaults.set(data, forKey: storageKey)
+        } catch {
+            // 编码失败此前静默 return，用户调整设置后重启即丢失，且无任何日志
+            // 可诊断。记录错误日志便于排查（如 ShortcutConfig 字段类型变更
+            // 未提供迁移路径导致编码器抛错）。设置本身仍保留在内存中，
+            // 当前会话工作正常，仅持久化失败。
+            Self.logger.error("Failed to encode settings for persistence: \(error.localizedDescription, privacy: .public). Settings remain in memory but won't survive restart.")
+        }
     }
 
     private func load() {
