@@ -49,7 +49,7 @@ struct SettingsRootView: View {
                 AuroraIconChip(systemName: "bolt.fill", size: 28, solid: true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("EasyMacTool")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: DesignTokens.SettingsTypography.sidebarTitle, weight: .semibold))
                         .foregroundStyle(.primary)
                 }
                 Spacer(minLength: 0)
@@ -92,12 +92,12 @@ struct SettingsRootView: View {
             // Detail toolbar：44pt 高，17pt semibold 页面标题 + 底部渐变发丝线。
             HStack(spacing: 8) {
                 Text(selection.rawValue)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: DesignTokens.SettingsTypography.pageTitle, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer()
             }
             .padding(.horizontal, 24)
-            .frame(height: 48)
+            .frame(height: DesignTokens.Settings.toolbarHeight)
             .overlay(alignment: .bottom) {
                 DesignTokens.Aurora.brandHorizontal
                     .opacity(0.25)
@@ -135,12 +135,6 @@ struct SettingsRootView: View {
         case .permissions: return "shield"
         case .about: return "info"
         }
-    }
-
-    private var appVersion: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "\(version).\(build)"
     }
 
     /// Activates the app and brings the settings window to the front.

@@ -29,6 +29,18 @@ final class ClipboardPanelController: ObservableObject {
     /// 供 toggleClipboard 决定重新打开而非误判为已打开而关闭。
     var isEffectivelyVisible: Bool { isPresented && panel.isVisible }
 
+    /// 当前 panel 的 firstResponder 是否是 NSTextView。
+    /// 用于预览态 RTFTextView 聚焦时，让方向键传递给文本视图（移动选择光标）
+    /// 而非触发卡片导航。用 panel.firstResponder 而非 NSApp.keyWindow?.firstResponder——
+    /// 后者在 nonactivatingPanel 场景下可能取错 key window。
+    var firstResponderIsTextView: Bool {
+        panel.firstResponder is NSTextView
+    }
+
+    /// 面板所在屏幕。多屏场景下供 ClipboardOverlayView 计算预览高度等使用，
+    /// 替代 NSScreen.main（返回菜单栏所在主屏，可能非面板所在屏）。
+    var screen: NSScreen? { panel.screen }
+
     /// 呼出面板前记录的前台 app bundleID。simulatePaste 时校验 frontmostApp
     /// 仍是它，防止面板关闭后焦点未恢复（或用户快速切窗）时把内容粘贴到
     /// 错误窗口泄露剪贴板内容。dismiss 时清空。
@@ -82,7 +94,10 @@ final class ClipboardPanelController: ObservableObject {
             let hosting = NSHostingController(rootView: view)
             hosting.view.wantsLayer = true
             hosting.view.layer?.cornerRadius = 18
-            hosting.view.layer?.masksToBounds = true
+            // masksToBounds=false：让过滤菜单（.offset(y: 42)）可以溢出面板边界
+            // 显示完整内容。SwiftUI 根视图自身的 RoundedRectangle(cornerRadius: 20)
+            // 已提供圆角视觉裁剪，无需 layer 级裁剪。阴影也可自然溢出。
+            hosting.view.layer?.masksToBounds = false
             self.hostingController = hosting
             panel.contentViewController = hosting
         }
@@ -142,10 +157,11 @@ final class ClipboardPanelController: ObservableObject {
         return true
     }
 
-    /// 三级屏幕定位：前台 app 主窗口所在屏 → 鼠标所在屏 → 主屏/首屏。
+    /// 三级屏幕定位：前台 app 主窗口所在屏 → 鼠标所在屏 → 最近屏 → 主屏/首屏。
     /// nonactivatingPanel 场景下 NSScreen.main 可能取到其他 app 的 key window
     /// 所在屏，导致面板出现在错误屏幕；因此优先用前台 app 主窗口所在屏定位
-    /// （用户当前正在工作的屏最可靠），鼠标所在屏作次选，主屏兜底。
+    /// （用户当前正在工作的屏最可靠），鼠标所在屏作次选。鼠标在屏幕缝隙
+    /// （dead zone）时按距离选最近的屏，最后才退到主屏兜底。
     private func targetScreen() -> NSScreen? {
         // 1. 前台 app 主窗口所在屏（用户当前正在工作的屏，最可靠）
         if let bounds = frontmostMainWindowBounds() {
@@ -159,8 +175,29 @@ final class ClipboardPanelController: ObservableObject {
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
             return screen
         }
-        // 3. 兜底：主屏或首屏
+        // 3. 鼠标在屏幕缝隙时，按距离选最近的屏（避免跳到错误主屏）
+        if let screen = nearestScreen(to: mouseLocation) {
+            return screen
+        }
+        // 4. 兜底：主屏或首屏
         return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// 鼠标在屏幕缝隙（dead zone）时，按距离选最近的屏。
+    /// 计算鼠标点到每个屏 frame 最近边的距离，取最小值。
+    private func nearestScreen(to point: CGPoint) -> NSScreen? {
+        guard !NSScreen.screens.isEmpty else { return nil }
+        var best: (screen: NSScreen, distance: CGFloat)?
+        for screen in NSScreen.screens {
+            let rect = screen.frame
+            let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+            let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+            let distance = sqrt(dx * dx + dy * dy)
+            if best == nil || distance < best!.distance {
+                best = (screen, distance)
+            }
+        }
+        return best?.screen
     }
 
     /// 用 CGWindowList 找到前台 app 的普通主窗口（kCGWindowLayer == 0）bounds。

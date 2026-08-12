@@ -170,7 +170,8 @@ struct ClipboardOverlayView: View {
                     controller.dismiss()
                 }
             },
-            isEditingText: { focusTarget == .search }
+            isEditingText: { focusTarget == .search },
+            isPreviewingTextView: { previewIsOpen && controller.firstResponderIsTextView }
         ).frame(width: 0, height: 0))
         // 搜索/筛选变化导致列表缩短时，把 selectedIndex 拉回有效范围。
         // filtered 是计算属性，manager.items 变化时自动重算，无需手动刷新。
@@ -238,15 +239,6 @@ struct ClipboardOverlayView: View {
         }
     }
 
-    /// 卡片高度：以屏幕 1/4 高度推算，并卡死在 [120, 220] 区间。
-    /// 卡死上限避免面板在预览模式被拉高时卡片跟着变大，保证卡片始终
-    /// 贴底、预览可向上溢出。
-    private var cardHeight: CGFloat {
-        let screenH = NSScreen.main?.visibleFrame.height ?? 800
-        // 78pt ≈ searchBar(56) + Divider(1) + vertical padding(20) + 余量(1)
-        return min(220, max(120, screenH / 4 - 78))
-    }
-
     // MARK: - Search bar (compact, centered)
     // 头部完全平铺：统计 | 搜索框+筛选 | 删除，三个功能区直接平级在同一个
     // HStack 里，给整个 HStack 固定高度。之前的嵌套 searchFieldGroup 结构
@@ -290,16 +282,15 @@ struct ClipboardOverlayView: View {
                 Capsule()
                     .fill(.ultraThinMaterial)
             )
+            // 单 overlay 描边：聚焦时用品牌渐变 1.5pt，非聚焦时用极淡 primary 0.08。
+            // 之前两个堆叠 overlay 在聚焦时同时渲染（primary 底 + 渐变聚焦环），
+            // 形成双描边视觉污染。合并为条件内容后只渲染一层。
             .overlay(
                 Capsule()
-                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .overlay(
-                // 聚焦环：品牌渐变 1.5pt，仅搜索态可见。
-                Capsule()
-                    .strokeBorder(DesignTokens.Aurora.brandGradient,
-                                  lineWidth: focusTarget == .search ? 1.5 : 0)
-                    .opacity(focusTarget == .search ? 1 : 0)
+                    .strokeBorder(focusTarget == .search
+                                   ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                                   : AnyShapeStyle(Color.primary.opacity(0.08)),
+                                  lineWidth: focusTarget == .search ? 1.5 : 1)
             )
             // 筛选菜单 overlay 锚定在这个搜索框组的右上角，菜单紧贴筛选
             // 按钮下方出现。offset(y: 42) 让菜单越过 36pt 高度 + 一点间隙。
@@ -537,7 +528,8 @@ struct ClipboardOverlayView: View {
             // 预览可用高度 = 面板高度 - 上下各 8pt。面板固定为屏高 1/4 且不随
             // 预览拉高，因此必须把预览高度夹紧到面板内，否则顶部会越界。
             let available = geo.size.height - 16
-            let maxH = min(available, (NSScreen.main?.visibleFrame.height ?? 800) * 0.7)
+            let screenH = controller.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
+            let maxH = min(available, screenH * 0.7)
             // 期望高度 max(240, maxH)，但绝不能超过 available（短面板/低分屏
             // 场景下强制 240 会导致预览顶部溢出面板）。
             let height = min(max(240, maxH), available)
@@ -643,6 +635,10 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         /// NSApp.keyWindow?.firstResponder is NSTextView——后者在 nonactivatingPanel
         /// 场景下可能取错 key window 导致误判，且会被预览态的 selectable NSTextView 干扰。
         var isEditingText: () -> Bool = { false }
+        /// 预览态 RTFTextView 聚焦判断：仅对方向键生效，让用户在 selectable
+        /// NSTextView 中移动选择光标。Enter/空格不受影响（RTFTextView 不可编辑，
+        /// Enter 应触发粘贴，空格应关闭预览）。
+        var isPreviewingTextView: () -> Bool = { false }
         var monitor: Any?
 
         func updateMonitoring(isActive: Bool) {
@@ -668,18 +664,24 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
             }
             switch event.keyCode {
             case 123:
-                if isEditingText() { return event }
+                // 方向键额外检查预览态 RTFTextView 聚焦：用户点击预览文本后，
+                // 方向键应在 selectable NSTextView 中移动选择光标而非触发卡片导航。
+                if isEditingText() || isPreviewingTextView() { return event }
                 onArrowLeft()
                 return nil
             case 124:
-                if isEditingText() { return event }
+                if isEditingText() || isPreviewingTextView() { return event }
                 onArrowRight()
                 return nil
             case 36:
+                // Enter 不检查 isPreviewingTextView：RTFTextView 不可编辑，
+                // Enter 应触发粘贴（handleEnter 中会先 closePreview 再 reapply）。
                 if isEditingText() { return event }
                 onEnter()
                 return nil
             case 49:
+                // 空格不检查 isPreviewingTextView：RTFTextView 不可编辑，
+                // 空格应触发 handleSpaceKey（预览态关闭预览）。
                 if isEditingText() { return event }
                 onSpace()
                 return nil
@@ -701,6 +703,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
     var onCmdF: () -> Void
     var onEsc: () -> Void
     var isEditingText: () -> Bool
+    var isPreviewingTextView: () -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -717,6 +720,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         coordinator.onCmdF = onCmdF
         coordinator.onEsc = onEsc
         coordinator.isEditingText = isEditingText
+        coordinator.isPreviewingTextView = isPreviewingTextView
         coordinator.updateMonitoring(isActive: isActive)
     }
 

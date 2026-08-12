@@ -274,7 +274,9 @@ final class HotkeyManager {
                 // 此时 Tab 仍应作为导航键，避免用户感觉切换器卡死。
                 // 注意：上面 activeShortcut==nil && matchShortcut 分支已拦截"完整快捷键重按"
                 // 的情况，走到这里的 nil 一定是 .hold 释放后的纯 Tab 键。
-                onEvent?(currentFlags.contains(.maskShift) ? .prev : .next)
+                // 用 event.flags 而非 currentFlags：flagsChanged 事件在 tap 重启周期中
+                // 被丢弃时 currentFlags 会过期，而 event.flags 是当前事件的最新状态。
+                onEvent?(event.flags.contains(.maskShift) ? .prev : .next)
                 return nil
             case VK.return:
                 onEvent?(.activate); return nil

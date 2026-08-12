@@ -13,6 +13,13 @@ enum AccessibilityChecker {
     /// and for cross-process AXUIElement use).
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
+    /// 当前 in-flight 的 SCShareableContent.current 注册任务。
+    /// schedulePermissionCheck 启动时调用 ~3 次 + requestAllMissingPermissions
+    /// 也可能调用，导致最多 3-4 个并发 IPC 调用堆叠。新调用时 cancel 旧任务，
+    /// 避免并发 IPC 浪费（SCShareableContent.current 是昂贵的 XPC 调用）。
+    /// @MainActor 保证 cancel/reassign 的线程安全。
+    private static var inFlightRegistrationTask: Task<Void, Never>?
+
     /// Preflight (no prompt) for Screen Recording permission.
     static var isScreenRecordingTrusted: Bool { CGPreflightScreenCaptureAccess() }
 
@@ -111,7 +118,11 @@ enum AccessibilityChecker {
     /// 同步等待。之前的 semaphore.wait(3s) 在主线程会冻结 UI 最长 3 秒
     /// （用户按 Cmd+Tab 缺权限时尤其严重）。
     private static func triggerScreenCaptureRegistration() {
-        Task.detached {
+        // cancel 旧任务避免并发 IPC 堆叠：SCShareableContent.current 是
+        // 昂贵的 XPC 调用，3-4 个并发调用无意义（TCC 注册只需一次成功）。
+        // Task.cancel 在 await 点生效，已完成的旧任务 cancel 是 no-op。
+        inFlightRegistrationTask?.cancel()
+        let task = Task.detached {
             do {
                 // 首次调用会触发系统注册 app 到 TCC 屏幕录制列表。
                 _ = try await SCShareableContent.current
@@ -121,6 +132,7 @@ enum AccessibilityChecker {
                 logger.info("[TCC] SCShareableContent.current threw (expected if not authorized): \(error.localizedDescription)")
             }
         }
+        inFlightRegistrationTask = task
     }
 
     enum PermissionKind: String {

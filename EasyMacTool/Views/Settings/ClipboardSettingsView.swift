@@ -133,13 +133,13 @@ struct ClipboardSettingsView: View {
         }
     }
 
-    /// Toggle row：标题 14pt medium + 描述 12pt secondary，
+    /// Toggle row：标题 toggleTitle(15pt) medium + 描述 caption(12pt) secondary，
     /// 品牌 tint 的 switch 锚定右上。
     private func toggleRow(isOn: Binding<Bool>, title: String, desc: String) -> some View {
         HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
                     .foregroundStyle(.primary)
                 Text(desc)
                     .font(.system(size: DesignTokens.SettingsTypography.caption))

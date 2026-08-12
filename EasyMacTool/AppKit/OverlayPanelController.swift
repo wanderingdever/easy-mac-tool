@@ -241,29 +241,51 @@ final class OverlayPanelController: ObservableObject {
     /// Selects the screen the switcher panel appears on, based on the
     /// configured `displayTarget`:
     /// - `.active`:  键盘焦点所在屏（nonactivatingPanel 场景 keyWindow 常为 nil，
-    ///                fallback 到鼠标所在屏，再退到 NSScreen.main）
+    ///                fallback 到鼠标所在屏，再退到最近屏）
     /// - `.mouse`:   the screen under the current mouse cursor
     /// - `.menuBar`: the screen that contains the menu bar (primary display)
     private func selectScreen() -> NSScreen? {
         switch displayTarget {
         case .active:
             // nonactivatingPanel 场景下 NSApp.keyWindow 常为 nil，
-            // fallback 到鼠标所在屏（比 NSScreen.main 更接近"活跃屏"），
-            // 再退到 NSScreen.main。之前直接用 NSScreen.main 会取到含菜单栏
-            // 的主屏，多屏副屏工作时面板出现在错误屏幕。
+            // fallback 到鼠标所在屏（比 NSScreen.main 更接近"活跃屏"）。
+            // 鼠标在屏幕缝隙（dead zone）时，用距离最近的屏而非默认主屏——
+            // 多屏副屏工作时鼠标可能在两屏交界处，默认主屏会让面板跳到错误屏。
             if let screen = NSApp.keyWindow?.screen { return screen }
             let mouseLocation = NSEvent.mouseLocation
             if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
                 return screen
             }
-            return NSScreen.main
+            return nearestScreen(to: mouseLocation) ?? NSScreen.main
         case .mouse:
             let mouseLocation = NSEvent.mouseLocation
-            return NSScreen.screens.first { $0.frame.contains(mouseLocation) } ?? NSScreen.main
+            if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
+                return screen
+            }
+            return nearestScreen(to: mouseLocation) ?? NSScreen.main
         case .menuBar:
             // 主屏幕（含菜单栏）：Apple 文档保证 NSScreen.screens[0] 是主屏。
             return NSScreen.screens.first ?? NSScreen.main
         }
+    }
+
+    /// 鼠标在屏幕缝隙（dead zone）时，按距离选最近的屏。
+    /// 计算鼠标点到每个屏 frame 最近边的距离，取最小值。
+    /// 若所有屏距离相同（极罕见），返回首个。
+    private func nearestScreen(to point: CGPoint) -> NSScreen? {
+        guard !NSScreen.screens.isEmpty else { return nil }
+        var best: (screen: NSScreen, distance: CGFloat)?
+        for screen in NSScreen.screens {
+            let rect = screen.frame
+            // 鼠点到 rect 最近点的距离（在 rect 内则距离为 0）
+            let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+            let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+            let distance = sqrt(dx * dx + dy * dy)
+            if best == nil || distance < best!.distance {
+                best = (screen, distance)
+            }
+        }
+        return best?.screen
     }
 
     private func positionPanel() {

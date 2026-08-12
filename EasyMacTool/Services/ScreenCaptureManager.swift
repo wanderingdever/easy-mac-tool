@@ -28,6 +28,21 @@ final class WindowPreviewCache {
     private var cache: [Key: Entry] = [:]
     private var totalCost = 0
     private var accessCounter: UInt64 = 0
+    /// 系统内存压力源：收到 .warning/.critical 时清空缓存，
+    /// 释放最多 96MB 的窗口预览图内存。之前 clear() 从未被调用，
+    /// 仅依赖系统回收 VM 释放，内存压力时无法及时降压。
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+
+    private init() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                self?.clear()
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
 
     func image(for windowID: CGWindowID, pid: pid_t) -> CGImage? {
         let key = Key(pid: pid, windowID: windowID)

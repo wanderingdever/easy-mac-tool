@@ -13,9 +13,7 @@ enum DesignTokens {
         static let cell: CGFloat = 14
         static let control: CGFloat = 8
         static let small: CGFloat = 6
-        static let pill: CGFloat = 999
         static let panel: CGFloat = 24
-        static let dropdown: CGFloat = 8
     }
 
     // MARK: - Spacing
@@ -26,14 +24,6 @@ enum DesignTokens {
         static let lg: CGFloat = 20
         static let xl: CGFloat = 24
     }
-
-    // MARK: - Shadows
-    /// Card-level shadow (raised slightly off the surface).
-    static let cardShadow = (radius: CGFloat(4), y: CGFloat(2), opacity: Double(0.06))
-    /// Hover/floating shadow.
-    static let floatShadow = (radius: CGFloat(8), y: CGFloat(4), opacity: Double(0.08))
-    /// Modal/overlay shadow.
-    static let modalShadow = (radius: CGFloat(16), y: CGFloat(8), opacity: Double(0.12))
 
     // MARK: - Semantic colors
     /// Maps the design CSS semantic tokens to adaptive macOS colors.
@@ -77,10 +67,10 @@ enum DesignTokens {
     enum SettingsTypography {
         /// Sidebar nav item — 13pt.
         static let navItem: CGFloat = 13
-        /// Sidebar title (EasyMacTool) — 12pt semibold.
-        static let sidebarTitle: CGFloat = 12
-        /// Page title (权限设置) — 20pt semibold, -0.01em tracking.
-        static let pageTitle: CGFloat = 20
+        /// Sidebar title (EasyMacTool) — 13pt semibold.
+        static let sidebarTitle: CGFloat = 13
+        /// Page title (权限设置) — 16pt semibold.
+        static let pageTitle: CGFloat = 16
         /// Section header (呼出快捷键 / 行为 / 历史) — 17pt semibold.
         static let sectionHeader: CGFloat = 17
         /// Group header (通用) — 13pt semibold.
@@ -110,7 +100,7 @@ enum DesignTokens {
     // MARK: - Settings layout constants
     enum Settings {
         static let sidebarWidth: CGFloat = 180
-        static let toolbarHeight: CGFloat = 40
+        static let toolbarHeight: CGFloat = 48
         static let navItemHeight: CGFloat = 36
         static let navItemRadius: CGFloat = 6
         static let navItemHPadding: CGFloat = 10

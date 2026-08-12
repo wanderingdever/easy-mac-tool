@@ -48,9 +48,11 @@ struct KeyRecorderView: View {
                         .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
                         .foregroundStyle(DesignTokens.Aurora.tint)
                 } else {
-                    // kbd: 15pt mono, 0.04em letter-spacing (~0.6 tracking).
+                    // kbd: 14pt mono, 0.04em letter-spacing (~0.6 tracking).
+                    // 与录制态同字号（DesignTokens.SettingsTypography.kbd），
+                    // 避免录制/非录制切换时字号跳变。
                     Text(KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
-                        .font(.system(size: 15, design: .monospaced))
+                        .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
                         .tracking(0.6)
                         .foregroundStyle(DesignTokens.Colors.foreground)
                 }

@@ -51,7 +51,7 @@ struct WindowSwitcherSettingsView: View {
                 HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("启用窗口切换")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
                             .foregroundStyle(.primary)
                         Text("关闭后所有窗口切换快捷键将恢复系统默认行为（原生 Cmd+Tab）。")
                             .font(.system(size: DesignTokens.SettingsTypography.caption))

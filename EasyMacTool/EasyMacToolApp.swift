@@ -64,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 确保防抖窗口内（0.3s）的变更和未完成的 IO 在进程终止前落盘。
         // 之前 AppCoordinator 从不调用 stop()，退出时最近 1 秒的复制会丢失。
         coordinator?.flushClipboardForTermination()
+        // 退出时强制 flush AppSettings：debouncePersist 有 0.5s 防抖窗口，
+        // 若用户在退出前 0.5s 内改设置，WorkItem 未执行就被终止，设置丢失。
+        // persist() 是同步写入 UserDefaults，确保设置在进程终止前落盘。
+        AppSettings.shared.flushForTermination()
     }
 
     /// macOS 13+ 推荐 NSApplicationDelegate 实现此方法并返回 true，
@@ -136,10 +140,15 @@ final class AppCoordinator {
     private var hotkeyRetryTimer: Timer?
 
     /// 辅助功能权限被撤销时的连续未授权 tick 计数（hotkeyRetryTimer 每 3s 一次）。
-    /// 累计超过阈值（约 60s）后调用 requestAllMissingPermissions 重新提示一次，
+    /// 累计超过当前阈值后调用 requestAllMissingPermissions 重新提示一次，
     /// 避免权限被撤销后工具静默失效且无任何用户反馈。
+    ///
+    /// 指数退避：每次提示后阈值翻倍（60s → 120s → 240s → 480s → 900s 封顶），
+    /// 避免用户故意撤销权限后每 60s 被无限重弹设置页。用户授权后阈值重置。
     private var untrustedTickCount = 0
-    private static let untrustedRepromptThreshold = 20
+    private var untrustedRepromptThreshold = 20
+    private static let untrustedRepromptThresholdInitial = 20  // ~60s（20 × 3s）
+    private static let untrustedRepromptThresholdMax = 300      // ~900s（15min × 3s/tick）
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -179,14 +188,25 @@ final class AppCoordinator {
                 // 未授权时不做 stop/start 抖动（tap 本就建不起来或已失效）。
                 guard AccessibilityChecker.isTrusted else {
                     self.untrustedTickCount += 1
-                    if self.untrustedTickCount >= Self.untrustedRepromptThreshold {
+                    if self.untrustedTickCount >= self.untrustedRepromptThreshold {
                         self.untrustedTickCount = 0
-                        Self.logger.warning("[AppCoordinator] Accessibility permission revoked for ~\(Self.untrustedRepromptThreshold) ticks — re-prompting")
+                        // 指数退避：每次提示后阈值翻倍，封顶 15min，
+                        // 避免用户故意撤销权限后每 60s 被无限重弹设置页。
+                        self.untrustedRepromptThreshold = min(
+                            self.untrustedRepromptThreshold * 2,
+                            Self.untrustedRepromptThresholdMax
+                        )
+                        Self.logger.warning("[AppCoordinator] Accessibility permission revoked for ~\(self.untrustedRepromptThreshold) ticks — re-prompting (next in \(min(self.untrustedRepromptThreshold * 2, Self.untrustedRepromptThresholdMax)) ticks)")
                         AccessibilityChecker.requestAllMissingPermissions()
                     }
                     return
                 }
+                // 权限恢复：重置计数与阈值，下次撤销时从 60s 开始重新退避。
+                if self.untrustedRepromptThreshold != Self.untrustedRepromptThresholdInitial {
+                    Self.logger.info("[AppCoordinator] Accessibility permission restored — reset reprompt threshold")
+                }
                 self.untrustedTickCount = 0
+                self.untrustedRepromptThreshold = Self.untrustedRepromptThresholdInitial
                 if !HotkeyManager.shared.isTapHealthy {
                     Self.logger.warning("[AppCoordinator] event tap unhealthy — restarting")
                     HotkeyManager.shared.restart()

@@ -357,14 +357,17 @@ final class WindowEnumerator {
                 if let wid = info.windowID {
                     itemID = wid
                 } else {
-                    // 用 pid + title + frame.origin 生成降级 ID，降低冲突概率：
+                    // 用 pid + title + frame.origin + 序号 生成降级 ID，降低冲突概率：
                     // 仅用 pid + title 时，同 app 多个无 title/同名窗口会生成相同 ID，
                     // 被 addedWindowIDs 去重逻辑误判为已添加而漏显示。
+                    // 加入 items.count 序号：两个同 app、同标题、同 origin 的窗口
+                    //（如两个 Finder 信息窗口开在同位置）会得到不同 ID，避免碰撞。
                     var hasher = Hasher()
                     hasher.combine(pid)
                     hasher.combine(title)
                     hasher.combine(info.frame.origin.x)
                     hasher.combine(info.frame.origin.y)
+                    hasher.combine(items.count)  // 序号确保唯一性
                     // 高位标记 0xF0000000：避开系统分配的真实 windowID 区段。
                     // 否则降级 ID 理论上可能与其他窗口的真实 ID 碰撞，导致
                     // WindowActivator 按 AXWindowID 精确匹配到错误窗口

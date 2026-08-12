@@ -73,7 +73,7 @@ struct SwitcherOverlayView: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
-                            .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                            .strokeBorder(DesignTokens.Aurora.cardBorder, lineWidth: 1)
                     )
                 // 顶部发丝高光线（玻璃上缘反光），两端渐隐。
                 DesignTokens.Aurora.glassEdgeLight

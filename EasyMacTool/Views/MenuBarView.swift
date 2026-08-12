@@ -75,6 +75,10 @@ struct MenuBarView: View {
 /// hover：整行品牌渐变实底 + 白字白图标 + 品牌色微投影；
 /// 非 hover：渐变淡底 chip + 主文字 + 灰色 kbd 胶囊。
 /// 过渡动画统一 Aurora.standard，按下缩放 0.98 提供触感反馈。
+/// 用自定义 ButtonStyle 暴露 isPressed 状态——之前用 DragGesture(minimumDistance: 0)
+/// 模拟按压检测，但 DragGesture.onEnded 对静止 tap 可能不触发，导致 scaleEffect
+/// 罕见生效。ButtonStyle.configuration.isPressed 由 SwiftUI 按钮事件原生驱动，
+/// 可靠性更高。
 private struct MenuItemRow: View {
     let icon: String
     let title: String
@@ -82,7 +86,6 @@ private struct MenuItemRow: View {
     let action: () -> Void
 
     @State private var isHovered = false
-    @State private var isPressed = false
 
     var body: some View {
         Button(action: action) {
@@ -130,22 +133,21 @@ private struct MenuItemRow: View {
             )
             .shadow(color: isHovered ? DesignTokens.Aurora.brandGlow : .clear,
                     radius: 6, y: 2)
-            .scaleEffect(isPressed ? 0.98 : 1.0)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(MenuItemRowButtonStyle())
         .onHover { hovering in
             withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    if !isPressed {
-                        withAnimation(DesignTokens.Aurora.standard) { isPressed = true }
-                    }
-                }
-                .onEnded { _ in
-                    withAnimation(DesignTokens.Aurora.standard) { isPressed = false }
-                }
-        )
+    }
+}
+
+/// MenuItemRow 专用 ButtonStyle：按下时缩放 0.98 提供触感反馈。
+/// 替代之前的 DragGesture(minimumDistance: 0) 模拟按压检测——onEnded 对静止
+/// tap 可能不触发。configuration.isPressed 由 SwiftUI 按钮事件原生驱动。
+private struct MenuItemRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .animation(DesignTokens.Aurora.standard, value: configuration.isPressed)
     }
 }

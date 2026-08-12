@@ -158,6 +158,15 @@ final class AppSettings: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
 
+    /// 退出时强制同步 flush：取消防抖 WorkItem，立即同步写入 UserDefaults。
+    /// 由 AppDelegate.applicationWillTerminate 调用，确保 0.5s 防抖窗口内的
+    /// 变更在进程终止前落盘。
+    func flushForTermination() {
+        persistWorkItem?.cancel()
+        persistWorkItem = nil
+        persist()
+    }
+
     private struct Persisted: Codable {
         var displayTarget: DisplayTarget?
         var shortcuts: [ShortcutConfig]

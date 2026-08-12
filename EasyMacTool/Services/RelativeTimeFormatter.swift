@@ -57,7 +57,13 @@ enum RelativeTimeFormatter {
 /// cache and return instantly, avoiding main-thread stalls.
 enum AppTintExtractor {
     /// Thread-safe cache: bundleIdentifier → tint color.
-    private static let cache = NSCache<NSString, NSColor>()
+    /// 设置 countLimit=200 限制缓存上限，避免菜单栏 app 长期运行累积所有
+    /// 启动过的 app 色调导致内存无限增长。NSCache 在内存压力时也会自动淘汰。
+    private static let cache: NSCache<NSString, NSColor> = {
+        let c = NSCache<NSString, NSColor>()
+        c.countLimit = 200
+        return c
+    }()
 
     /// Returns the cached tint for the given bundle ID, or extracts it
     /// synchronously if not cached. The extraction is fast (~1ms) but
@@ -262,7 +268,13 @@ enum ColorStringParser {
 /// (acceptable since most apps are cached after first hit).
 @MainActor
 enum AppIconCache {
-    private static let cache = NSCache<NSString, NSImage>()
+    private static let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        // 200 个 app 图标 × ~128×128×4 = ~12MB 上限，避免长期运行内存无限增长。
+        // NSCache 在内存压力时也会自动淘汰。
+        c.countLimit = 200
+        return c
+    }()
 
     /// Returns the cached icon for the given bundle ID, or looks it up from
     /// NSWorkspace and caches it. Returns nil for unknown / not-running apps.

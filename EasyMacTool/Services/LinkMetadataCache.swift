@@ -130,12 +130,15 @@ final class LinkMetadataCache {
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
     }
 
-    /// 通用流式下载：截断到 limit 字节。htmlOnly=true 时仅接受 text/html 响应。
+    /// 通用下载：截断到 limit 字节。htmlOnly=true 时仅接受 text/html 响应。
+    /// 用 URLSession.data(for:) 一次性获取后截断，替代 bytes 逐字节异步迭代。
+    /// 之前的 `for try await byte in bytes` 逐字节迭代：512KB HTML = 524,288 次
+    /// 异步挂起，每次挂起 ~微秒，总 CPU 开销 ~0.5s/请求。Apple 文档明确警告此模式。
     nonisolated private static func fetchData(_ url: URL, limit: Int, htmlOnly: Bool = false) async -> Data? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 6
         do {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse {
                 guard (200..<300).contains(http.statusCode) else { return nil }
                 if htmlOnly {
@@ -144,11 +147,9 @@ final class LinkMetadataCache {
                     guard contentType.contains("text/html") || contentType.contains("application/xhtml") else { return nil }
                 }
             }
-            var data = Data()
-            data.reserveCapacity(min(limit, 64 * 1024))
-            for try await byte in bytes {
-                data.append(byte)
-                if data.count >= limit { break }
+            // 截断到 limit 字节（title 通常在前 64KB，不需完整下载）
+            if data.count > limit {
+                return data.prefix(limit)
             }
             return data.isEmpty ? nil : data
         } catch {

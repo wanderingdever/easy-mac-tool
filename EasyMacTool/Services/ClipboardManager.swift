@@ -736,6 +736,11 @@ final class ClipboardManager: ObservableObject {
                 imagesToWrite.append((url, data))
             }
         }
+        // 收集当前所有 image 条目的磁盘路径，用于后台孤儿 TIFF 扫描。
+        // 之前仅 saveToDiskSync（退出时）扫描孤儿，saveToDisk（正常运行时）不扫描。
+        // app 崩溃或被 force-quit 时 pendingImageDeletions（内存）丢失，
+        // 孤儿文件残留到下次退出才清理。现在每次 saveToDisk 都扫描，及时清理。
+        let allItemPaths = Set(items.compactMap { $0.imageFileURL?.path })
         let deletions = pendingImageDeletions
         pendingImageDeletions.removeAll()
         // 文件 I/O + JSON 编码在串行保存队列执行，避免与 saveToDiskSync 并发写 metadata.json
@@ -764,6 +769,18 @@ final class ClipboardManager: ObservableObject {
                 // 清理已删除条目对应的磁盘图片文件
                 for path in deletions {
                     try? FileManager.default.removeItem(atPath: path)
+                }
+                // 扫描 images/ 目录，清理不在 metadata.json 中的孤儿 TIFF 文件。
+                // 覆盖 app 崩溃 / force-quit 导致 pendingImageDeletions 丢失的场景。
+                if FileManager.default.fileExists(atPath: imgDir.path),
+                   let enumerator = FileManager.default.enumerator(atPath: imgDir.path) {
+                    for case let fileName as String in enumerator {
+                        guard fileName.hasSuffix(".tiff") else { continue }
+                        let fullPath = imgDir.appendingPathComponent(fileName).path
+                        if !allItemPaths.contains(fullPath) {
+                            try? FileManager.default.removeItem(atPath: fullPath)
+                        }
+                    }
                 }
             } catch {
                 Self.logger.error("[ClipboardManager] Save failed: \(error.localizedDescription, privacy: .public)")
@@ -937,12 +954,15 @@ final class ClipboardManager: ObservableObject {
             guard let x, let y else { return false }
             // count 不同直接 false，避免大图（20MB）逐字节 memcmp
             guard x.count == y.count else { return false }
-            // 快速通道：首尾各 4KB 采样不等直接 false。连续复制同一张
-            // 20MB 大图时全量 == 比较需上百毫秒（主线程），采样先排除
+            // 快速通道：首尾 + 中间各 16KB 采样不等直接 false。连续复制同一张
+            // 20MB 大图时全量 == 比较需上百毫秒（主线程），三段采样先排除
             // 绝大多数"不同图同大小"的情况，相等再走全量比较。
-            let sampleSize = min(4096, x.count)
+            // 中间采样覆盖首尾相同但中间不同的边缘情况（如拼接图差异在中段）。
+            let sampleSize = min(16 * 1024, x.count)
             if x.prefix(sampleSize) != y.prefix(sampleSize) { return false }
             if x.suffix(sampleSize) != y.suffix(sampleSize) { return false }
+            let midStart = (x.count - sampleSize) / 2
+            if x[midStart..<(midStart + sampleSize)] != y[midStart..<(midStart + sampleSize)] { return false }
             return x == y
         case (.file(let x), .file(let y)):
             return x == y
