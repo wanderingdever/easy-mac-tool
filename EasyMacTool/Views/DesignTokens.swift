@@ -29,29 +29,13 @@ enum DesignTokens {
     /// Maps the design CSS semantic tokens to adaptive macOS colors.
     /// Light values follow the design (`colors_and_type.css`); dark values
     /// use the design's `.dark` overrides so both modes match the spec.
+    ///
+    /// 说明：页面/卡片/侧栏等表面色已统一到 `Aurora.*` 体系（pageBackground /
+    /// cardSurface / sidebarBackground / cardBorder），此处仅保留 Aurora 未覆盖
+    /// 的状态色（error / success）与基础前景色（foreground）。
     enum Colors {
-        /// `--apple-background` #ffffff / #000000 — page-level background.
-        static let background = Color(nsColor: .textBackgroundColor)
-        /// `--apple-card` #ffffff / #1c1c1e — card surface (same as background in light).
-        static let card = Color(nsColor: .textBackgroundColor)
-        /// `--apple-secondary` / `--apple-muted` / `--apple-sidebar` #f2f2f7 / #1c1c1e
-        /// — grouped cards, sidebar, secondary surfaces.
-        static let secondarySurface = dynamicColor(
-            light: Color(red: 0.949, green: 0.949, blue: 0.969),    // #f2f2f7
-            dark: Color(red: 0.110, green: 0.110, blue: 0.118)        // #1c1c1e
-        )
-        /// `--apple-sidebar` — sidebar background (same as secondarySurface).
-        static let sidebar = secondarySurface
-        /// `--apple-border` #e5e5ea / #3a3a3c — hairline borders & dividers.
-        static let border = Color(nsColor: .separatorColor)
         /// `--apple-foreground` #1d1d1f / #f5f5f7 — primary text.
         static let foreground = Color.primary
-        /// `--apple-muted-foreground` #8e8e93 — secondary descriptive text.
-        static let mutedForeground = Color.secondary
-        /// `--apple-primary` #007aff / #2e8dff — brand blue (selected nav, slider fill).
-        static let primary = Color.accentColor
-        /// `--apple-primary-foreground` #ffffff — text on primary fills.
-        static let primaryForeground = Color.white
         /// `--state-success` #34c759 — granted status / toggle-on.
         static let success = Color.green
         /// `--state-error` #ff3b30 — denied status / destructive.
@@ -251,25 +235,29 @@ enum DesignTokens {
         )
 
         // MARK: 分组设置页表面（明暗自适应）
-        /// 设置页背景（grouped）：light 冷调浅灰 #f4f5f9 / dark #17171b
+        /// 设置页背景（grouped）：对齐设计 CSS --background
+        /// light #ffffff / dark #000000
         static let pageBackground = dynamicColor(
-            light: Color(red: 0.957, green: 0.961, blue: 0.976),
-            dark: Color(red: 0.090, green: 0.090, blue: 0.106)
+            light: Color(red: 1.000, green: 1.000, blue: 1.000),
+            dark: Color(red: 0.000, green: 0.000, blue: 0.000)
         )
-        /// 设置卡片表面：light 纯白 / dark #242429
+        /// 设置卡片表面：对齐设计 CSS --card
+        /// light #ffffff / dark #1c1c1e
         static let cardSurface = dynamicColor(
             light: Color(red: 1.000, green: 1.000, blue: 1.000),
-            dark: Color(red: 0.141, green: 0.141, blue: 0.161)
+            dark: Color(red: 0.110, green: 0.110, blue: 0.118)
         )
-        /// 卡片发丝描边：light 黑 5% / dark 白 9%
+        /// 卡片发丝描边：对齐设计 CSS --border
+        /// light #e5e5ea / dark #3a3a3c
         static let cardBorder = dynamicColor(
-            light: Color.black.opacity(0.05),
-            dark: Color.white.opacity(0.09)
+            light: Color(red: 0.898, green: 0.898, blue: 0.918),
+            dark: Color(red: 0.227, green: 0.227, blue: 0.235)
         )
-        /// 侧栏背景：与页面背景同族，略深一档形成层次。
+        /// 侧栏背景：对齐设计 CSS --sidebar
+        /// light #f2f2f7 / dark #1c1c1e
         static let sidebarBackground = dynamicColor(
-            light: Color(red: 0.929, green: 0.933, blue: 0.953),
-            dark: Color(red: 0.118, green: 0.118, blue: 0.137)
+            light: Color(red: 0.949, green: 0.949, blue: 0.969),
+            dark: Color(red: 0.110, green: 0.110, blue: 0.118)
         )
         /// 行内分隔线（卡片内部，非满宽）。
         static let insetSeparator = dynamicColor(
