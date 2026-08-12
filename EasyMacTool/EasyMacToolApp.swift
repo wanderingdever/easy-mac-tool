@@ -135,6 +135,12 @@ final class AppCoordinator {
     /// 创建失败。定时重试使用户在系统设置中完成授权后无需重启应用。
     private var hotkeyRetryTimer: Timer?
 
+    /// 辅助功能权限被撤销时的连续未授权 tick 计数（hotkeyRetryTimer 每 3s 一次）。
+    /// 累计超过阈值（约 60s）后调用 requestAllMissingPermissions 重新提示一次，
+    /// 避免权限被撤销后工具静默失效且无任何用户反馈。
+    private var untrustedTickCount = 0
+    private static let untrustedRepromptThreshold = 20
+
     init(settings: AppSettings) {
         self.settings = settings
         // 启动后渐进式权限检查（替代旧的 0.5s 单次检查）。
@@ -162,9 +168,22 @@ final class AppCoordinator {
         // 持续唤醒 CPU 影响续航；3s 足以覆盖睡眠唤醒等低频失效场景。
         hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) {
             [weak self] _ in
-                guard self != nil else { return }
-                guard AccessibilityChecker.isTrusted else { return }
+                guard let self else { return }
+                // 辅助功能权限被撤销：CGEventTap 会被系统禁用，快捷键全部失效。
+                // 累计计数，超阈值后重新提示一次，避免静默失效且无反馈。
+                // 未授权时不做 stop/start 抖动（tap 本就建不起来或已失效）。
+                guard AccessibilityChecker.isTrusted else {
+                    self.untrustedTickCount += 1
+                    if self.untrustedTickCount >= Self.untrustedRepromptThreshold {
+                        self.untrustedTickCount = 0
+                        Self.logger.warning("[AppCoordinator] Accessibility permission revoked for ~\(Self.untrustedRepromptThreshold) ticks — re-prompting")
+                        AccessibilityChecker.requestAllMissingPermissions()
+                    }
+                    return
+                }
+                self.untrustedTickCount = 0
                 if !HotkeyManager.shared.isTapHealthy {
+                    Self.logger.warning("[AppCoordinator] event tap unhealthy — restarting")
                     HotkeyManager.shared.restart()
                 }
         }
@@ -473,7 +492,10 @@ final class AppCoordinator {
     // MARK: - Clipboard
 
     private func toggleClipboard() {
-        if clipboardPanelController.isPresented {
+        // 用 isEffectivelyVisible（isPresented && panel.isVisible）判断：
+        // 若上次定位失败遗留 isPresented=true 但面板实际不可见，走重新打开
+        // 而非关闭，避免「按一次打不开、再按一次反而关闭」的卡死。
+        if clipboardPanelController.isEffectivelyVisible {
             clipboardPanelController.dismiss()
         } else {
             // 避免双面板并存：切换器仍打开时先关闭，否则两个 panel 同屏、

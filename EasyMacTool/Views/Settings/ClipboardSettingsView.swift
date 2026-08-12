@@ -87,7 +87,7 @@ struct ClipboardSettingsView: View {
                     )
                     Spacer(minLength: 0)
                 }
-                Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。")
+                Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。密码框、登录界面等安全输入场景下，macOS 会禁用全局快捷键，属系统安全限制。")
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
                     .foregroundStyle(.secondary)
             }

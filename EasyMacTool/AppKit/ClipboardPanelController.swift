@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os
 import SwiftUI
 
 /// Owns the bottom-of-screen panel that hosts `ClipboardOverlayView`.
@@ -11,6 +12,7 @@ import SwiftUI
 /// 与 rootView 替换——避免每次重建 SwiftUI 视图树导致的掉帧卡顿。
 @MainActor
 final class ClipboardPanelController: ObservableObject {
+    private static let logger = Logger(subsystem: "com.easymactool", category: "ClipboardPanel")
     private let panel = OverlayPanel()
     /// 常驻的 hosting controller：首次 present 时创建并 attach 到 panel，
     /// 之后保持存活，present 时只更新 rootView（autoPaste 等参数变化）。
@@ -21,6 +23,11 @@ final class ClipboardPanelController: ObservableObject {
     /// 防止 orderFrontRegardless 失败时 isPresented=true 而面板实际不可见
     /// 导致 toggleClipboard 方向错误。
     @Published private(set) var isPresented = false
+
+    /// isPresented 与面板真实可见性的一致性判断。
+    /// 若上次定位失败遗留 isPresented=true（面板实际不可见），返回 false，
+    /// 供 toggleClipboard 决定重新打开而非误判为已打开而关闭。
+    var isEffectivelyVisible: Bool { isPresented && panel.isVisible }
 
     /// 呼出面板前记录的前台 app bundleID。simulatePaste 时校验 frontmostApp
     /// 仍是它，防止面板关闭后焦点未恢复（或用户快速切窗）时把内容粘贴到
@@ -44,6 +51,14 @@ final class ClipboardPanelController: ObservableObject {
         // autoPaste 由 AppCoordinator 在 onReapply 回调中读取 settings.clipboardAutoPaste
         // 决定是否模拟粘贴，本身不影响视图渲染——视图只需 manager 与 controller 引用。
         // 因此 present 不再接收 autoPaste 参数（之前是 dead parameter 被显式丢弃）。
+
+        // 先定位面板：定位失败说明当前无可用的目标屏幕（多屏盲区/显示器热插拔/重排），
+        // 不置 isPresented、不产生任何副作用，让下一次快捷键能重新尝试打开，
+        // 避免「面板带旧 frame（首次为 .zero）不可见 + isPresented=true」导致再按反而关闭。
+        guard positionPanel() else {
+            Self.logger.error("[ClipboardPanel] present aborted: no valid target screen")
+            return
+        }
 
         // 记录呼出面板前的前台 app：nonactivatingPanel 不改变 frontmostApp，
         // 此刻读取的就是 paste 的目标 app。dismiss 后 simulatePaste 用它校验。
@@ -72,7 +87,6 @@ final class ClipboardPanelController: ObservableObject {
             panel.contentViewController = hosting
         }
 
-        positionPanel()
         panel.orderFrontRegardless()
         // 直接设为 true：present 调用即表示意图显示面板。之前读 panel.isVisible
         // 在 app 未完全激活或系统动画进行时可能返回 false，导致视图状态不重置
@@ -112,12 +126,12 @@ final class ClipboardPanelController: ObservableObject {
 
     // MARK: - Private
 
-    private func positionPanel() {
-        // 用鼠标所在屏，避免 nonactivatingPanel 场景下 NSScreen.main 取到其他 app 的
-        // key window 所在屏，导致面板出现在错误屏幕。
-        let mouseLocation = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouseLocation) } ?? NSScreen.main
-        guard let screen else { return }
+    /// 定位面板到目标屏幕底部。返回是否成功设定了有效 frame。
+    /// 失败说明当前没有任何可用屏幕（多屏盲区/显示器热插拔/重排），
+    /// 由调用方决定不置 isPresented，避免「面板不可见 + isPresented=true」卡死。
+    @discardableResult
+    private func positionPanel() -> Bool {
+        guard let screen = targetScreen() else { return false }
         let screenRect = screen.visibleFrame
         // Full screen width, 1/4 of screen height (was 1/5 — increased for
         // taller cards), anchored to the bottom edge with no gap.
@@ -125,6 +139,48 @@ final class ClipboardPanelController: ObservableObject {
         let origin = CGPoint(x: screenRect.minX, y: screenRect.minY)
         let frame = NSRect(origin: origin, size: NSSize(width: screenRect.width, height: height))
         panel.setFrame(frame, display: true)
+        return true
+    }
+
+    /// 三级屏幕定位：前台 app 主窗口所在屏 → 鼠标所在屏 → 主屏/首屏。
+    /// nonactivatingPanel 场景下 NSScreen.main 可能取到其他 app 的 key window
+    /// 所在屏，导致面板出现在错误屏幕；因此优先用前台 app 主窗口所在屏定位
+    /// （用户当前正在工作的屏最可靠），鼠标所在屏作次选，主屏兜底。
+    private func targetScreen() -> NSScreen? {
+        // 1. 前台 app 主窗口所在屏（用户当前正在工作的屏，最可靠）
+        if let bounds = frontmostMainWindowBounds() {
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+                return screen
+            }
+        }
+        // 2. 鼠标所在屏
+        let mouseLocation = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
+            return screen
+        }
+        // 3. 兜底：主屏或首屏
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// 用 CGWindowList 找到前台 app 的普通主窗口（kCGWindowLayer == 0）bounds。
+    /// 与 WindowEnumerator 的过滤口径一致：layer == 0 是普通文档窗口，
+    /// layer > 0 是浮动面板/菜单/下拉框，不参与定位。
+    private func frontmostMainWindowBounds() -> CGRect? {
+        guard let ownerPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for info in list {
+            guard let pid = info[kCGWindowOwnerPID as String] as? Int, pid == ownerPID else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            guard let dict = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let width = dict["Width"], width > 0,
+                  let height = dict["Height"], height > 0 else { continue }
+            return CGRect(x: dict["X"] ?? 0,
+                          y: dict["Y"] ?? 0,
+                          width: width,
+                          height: height)
+        }
+        return nil
     }
 
     private func installDismissMonitors() {

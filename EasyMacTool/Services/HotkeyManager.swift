@@ -169,6 +169,10 @@ final class HotkeyManager {
 
         // The system can temporarily disable the tap under load; re-arm it.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // 诊断日志：便于区分「快捷键未触发（tap 被系统禁用）」与「面板定位失败」。
+            // 安全输入（SecureInput，密码框等）期间系统会禁用所有 event tap，
+            // 此日志会频繁出现——是系统安全限制，会话结束后自动恢复。
+            Self.logger.warning("[HotkeyManager] event tap disabled (\(type.rawValue)) — re-enabling")
             if let port = machPort {
                 CGEvent.tapEnable(tap: port, enable: true)
             }
