@@ -44,9 +44,9 @@ struct ClipboardOverlayView: View {
 
     /// 键盘方向键触发的滚动目标卡片索引（nil = 无需滚动）。
     /// 仅在 handleArrow（键盘选择）中更新，hover 改变选中不更新——
-    /// hover 在滚轮滚动时会随鼠标掠过卡片频繁变化，若也触发居中滚动
-    /// 会与滚轮滚动互相打架（复现"滚不动"）。变化时由 HorizontalWheelScrollView
-    /// 的 updateNSView 去重后滚动到可见。
+    /// hover 在滚轮滚动时会随鼠标掠过卡片频繁变化，若也触发滚动会与滚轮
+    /// 滚动互相打架（复现"滚不动"）。变化时由 HorizontalWheelScrollView
+    /// 的 updateNSView 去重后，对卡片做最小滚动揭示（超出可视区才滚动）。
     @State private var scrollToIndex: Int?
 
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
@@ -850,16 +850,17 @@ struct ClipboardOverlayView: View {
     }
 
     /// ←/→/↑/↓ 切换选中卡片，并滚动到选中卡片可见。搜索框聚焦时不拦截，
-    /// 让 TextField 处理光标移动。
+    /// 让 TextField 处理光标移动。到达首/末张后按同方向键保持不变（不循环）。
     private func handleArrow(direction: Int) {
         let editingText = controller.isEditingAnyText
         guard !editingText, !filtered.isEmpty else { return }
         if previewIsOpen { closePreview() }
-        // 循环导航：到达边界后绕回另一端。
-        let count = filtered.count
-        selectedIndex = (selectedIndex + direction + count) % count
-        // 键盘选择 → 触发列表滚动到选中卡片可见。
-        // 注意：hover 改变选中时不走这里，避免滚轮滚动时自动居中与滚轮打架。
+        // 不循环：到达首/末张后按同方向键保持不变（与滚动翻页到头即停一致）。
+        let newIndex = selectedIndex + direction
+        guard newIndex >= 0, newIndex < filtered.count else { return }
+        selectedIndex = newIndex
+        // 键盘选择 → 触发列表最小滚动到选中卡片可见（仅当卡片超出可视区）。
+        // 注意：hover 改变选中时不走这里，避免滚轮滚动时自动滚动与滚轮打架。
         scrollToIndex = selectedIndex
     }
 
