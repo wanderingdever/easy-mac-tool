@@ -153,7 +153,9 @@ final class RadialLayoutController: ObservableObject {
         didMove = false
         activeAction = .fullScreen
         let location = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(location) }) ?? NSScreen.main else {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(location) })
+            ?? nearestScreen(to: location)
+            ?? NSScreen.main else {
             armed = false
             armedFlag = false
             return
@@ -181,6 +183,24 @@ final class RadialLayoutController: ObservableObject {
         if let action, let screen = activeScreen {
             _ = WindowLayoutManager.shared.apply(action, screen: screen)
         }
+    }
+
+    /// 鼠标在屏幕缝隙（dead zone，两屏交界处）时，按距离选最近的屏，
+    /// 避免误落到主屏（与切换器/剪贴板的多屏兜底策略一致）。
+    private func nearestScreen(to point: CGPoint) -> NSScreen? {
+        guard !NSScreen.screens.isEmpty else { return nil }
+        var best: (screen: NSScreen, distance: CGFloat)?
+        for screen in NSScreen.screens {
+            let rect = screen.frame
+            // 鼠点到 rect 最近点的距离（在 rect 内则距离为 0）
+            let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+            let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+            let distance = sqrt(dx * dx + dy * dy)
+            if best == nil || distance < best!.distance {
+                best = (screen, distance)
+            }
+        }
+        return best?.screen
     }
 
     // MARK: - Panel lifecycle

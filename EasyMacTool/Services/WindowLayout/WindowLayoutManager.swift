@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 
 /// Applies window layout actions (halves / full screen / corners) to the
 /// frontmost window via the Accessibility API. Requires the Accessibility
@@ -7,6 +8,7 @@ import ApplicationServices
 @MainActor
 final class WindowLayoutManager {
     static let shared = WindowLayoutManager()
+    private static let logger = Logger(subsystem: "com.easymactool", category: "WindowLayoutManager")
 
     private init() {}
 
@@ -64,14 +66,16 @@ final class WindowLayoutManager {
     /// The screen containing the frontmost window's current frame, falling
     /// back to the main screen.
     private func screen(for window: AXUIElement) -> NSScreen? {
-        if let pos = cgPoint(window, kAXPositionAttribute as CFString),
-           let size = cgSize(window, kAXSizeAttribute as CFString) {
-            let frame = CGRect(origin: pos, size: size)
-            if let screen = NSScreen.screens.first(where: { $0.frame.contains(frame.center) }) {
-                return screen
-            }
-        }
-        return NSScreen.main
+        guard let pos = cgPoint(window, kAXPositionAttribute as CFString),
+              let size = cgSize(window, kAXSizeAttribute as CFString) else { return NSScreen.main }
+        // AX 坐标以主屏左上为原点、y 向下；NSScreen.frame 以主屏左下为原点、
+        // y 向上。先把 AX 窗口 frame 翻转回 NSScreen 空间再匹配屏幕，
+        // 否则副屏/多屏下会空间错位匹配到主屏。
+        let main = NSScreen.screens.first?.frame ?? .zero
+        let nsFrame = CGRect(x: pos.x + main.minX,
+                             y: main.maxY - pos.y - size.height,
+                             width: size.width, height: size.height)
+        return NSScreen.screens.first(where: { $0.frame.contains(nsFrame.center) }) ?? NSScreen.main
     }
 
     private func focusedWindow(of axApp: AXUIElement) -> AXUIElement? {
@@ -85,9 +89,10 @@ final class WindowLayoutManager {
     @discardableResult
     private func setFrame(_ frame: CGRect, on window: AXUIElement) -> Bool {
         // AX 坐标以主屏左上角为原点、y 向下；NSScreen.visibleFrame 以左下为原点、
-        // y 向上。若把 NSScreen 算出的 frame 直接写入 AX，垂直方向会镜像/偏移
-        // （上下半屏互换、占满高度的窗口顶部留空）。这里把窗口顶边映射到 AX 的 y。
-        let main = NSScreen.main?.frame ?? .zero
+        // y 向上。用主显示器（NSScreen.screens.first，Apple 保证为全局原点所在屏，
+        // 即 AX 坐标系的真实原点）而非 NSScreen.main——菜单栏 app 中 NSScreen.main
+        // 是"key window 所在屏"，可能解析到副屏导致 y 翻转基准错误。
+        let main = NSScreen.screens.first?.frame ?? .zero
         var point = CGPoint(x: frame.minX - main.minX,
                             y: main.maxY - frame.maxY)
         var size = frame.size
@@ -96,7 +101,15 @@ final class WindowLayoutManager {
         guard let positionValue, let sizeValue else { return false }
         let okPos = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
         let okSize = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        return okPos == .success && okSize == .success
+        let success = okPos == .success && okSize == .success
+        // 回读验证：副屏高于/高于主屏时 AX y/x 为负，越界位置可能被
+        // WindowServer 钳制回主屏（多屏错屏）。写回后回读 position 与目标点
+        // 容差比对，不一致时输出诊断日志，便于实机定位钳制行为。
+        if let readback = cgPoint(window, kAXPositionAttribute as CFString),
+           abs(readback.x - point.x) > 2 || abs(readback.y - point.y) > 2 {
+            Self.logger.warning("[WindowLayout] setFrame mispositioned: target=\(NSStringFromRect(frame)) axTarget=\(NSStringFromPoint(point)) readback=\(NSStringFromPoint(readback)) success=\(success) primary=\(NSStringFromRect(main))")
+        }
+        return success
     }
 
     private func cgPoint(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {
