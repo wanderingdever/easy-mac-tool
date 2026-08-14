@@ -29,21 +29,29 @@ final class WheelRedirectScrollView: NSScrollView {
         }
         // 与系统 Shift+滚轮方向一致：滚轮向上（deltaY>0）→ 看左侧/前面内容
         // → bounds.origin.x 减小。每刻度滚动约 40pt。
+        // 直接更新 bounds（去掉逐事件 animator 动画）：快速滚动时旧动画会被
+        // 新事件打断并从未到位处重启动画，导致滚动永远追赶不上输入 → 卡顿
+        // 滚不动。直接定位每个刻度立即生效、线性累积，与输入同步。
         let step: CGFloat = 40
         let dx = -event.deltaY * step
         var origin = contentView.bounds.origin
         origin.x = min(max(0, origin.x + dx), hRoom)
-        // 用 animator() 做短动画过渡，让连续滚轮事件叠加成丝滑惯性滚动。
-        // duration 调到 0.18s 配合 easeOut，新事件到来时动画上下文会自动接续。
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            ctx.allowsImplicitAnimation = true
-            contentView.animator().bounds.origin = origin
-        } completionHandler: {
-            // 同步 scroller 视觉位置（animator 不会自动刷新 scroller）。
-            self.reflectScrolledClipView(self.contentView)
-        }
+        contentView.bounds.origin = origin
+        reflectScrolledClipView(contentView)
+    }
+
+    /// 滚动到第 index 张卡片，使其尽量居中显示（clamp 到可滚范围）。
+    /// 卡片布局：LazyHStack 固定宽 230、间距 12、水平 padding 16 →
+    /// 第 i 张卡片左缘 x = 16 + i*242。无动画直接定位，避免按键连发时
+    /// 动画互相打断（与滚轮策略一致）。
+    func scrollToCard(at index: Int) {
+        guard let doc = documentView else { return }
+        let hRoom = doc.bounds.width - contentSize.width
+        guard hRoom > 0.5 else { return }
+        let cardLeft = 16 + CGFloat(index) * 242
+        let target = cardLeft - (contentSize.width - 230) / 2
+        contentView.bounds.origin.x = min(max(0, target), hRoom)
+        reflectScrolledClipView(contentView)
     }
 }
 
@@ -51,6 +59,9 @@ final class WheelRedirectScrollView: NSScrollView {
 /// Swift 6.3 SIL optimizer crash on generic class deinit).
 final class HWSVCoordinator {
     var hostingController: Any?
+    /// 已执行滚动的目标卡片索引：用于去重，避免每次 body 更新（hover 变化、
+    /// 滚动等）都重复触发 scrollToCard。
+    var lastScrolledIndex: Int?
 }
 
 /// 用 NSHostingController 承载 SwiftUI 内容的横向滚动视图。
@@ -58,9 +69,14 @@ final class HWSVCoordinator {
 /// 高度锚定到 contentView 高度。
 struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
     let content: Content
+    /// 键盘方向键选中的卡片索引：变化时自动滚动到可见（无动画直接定位）。
+    /// 仅在键盘选择（而非 hover）时更新——hover 会在滚轮滚动时随鼠标掠过
+    /// 卡片而频繁变化，若也触发居中滚动会与滚轮滚动互相打架（复现"滚不动"）。
+    var scrollToIndex: Int?
 
-    init(@ViewBuilder content: () -> Content) {
+    init(@ViewBuilder content: () -> Content, scrollToIndex: Int? = nil) {
         self.content = content()
+        self.scrollToIndex = scrollToIndex
     }
 
     func makeCoordinator() -> HWSVCoordinator {
@@ -102,5 +118,13 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
             return
         }
         hosting.rootView = content
+        // 键盘选中索引变化 → 延后到当前布局完成后再滚动到该卡片，
+        // 避免在 SwiftUI 布局中途直接改 bounds 被后续布局覆盖。
+        if let idx = scrollToIndex, idx != context.coordinator.lastScrolledIndex {
+            context.coordinator.lastScrolledIndex = idx
+            DispatchQueue.main.async {
+                nsView.scrollToCard(at: idx)
+            }
+        }
     }
 }

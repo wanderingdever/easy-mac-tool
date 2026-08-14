@@ -314,13 +314,13 @@ final class SystemMonitor: ObservableObject {
             next.diskWriteHistory = self.diskWriteHistory.values
             next.systemPowerHistory = self.powerHistory.values
 
-            // 运行应用内存占用前 12（活动应用内存监控，列表超出高度可滚动）。
+            // 运行中「用户可见应用」内存占用（活动应用内存监控，列表超出高度可滚动）。
             // 全量枚举进程是重活（proc_listallpids + 逐进程 proc_pidpath/proc_pidinfo），
             // 且菜单栏下拉未打开时该区块不可见。节流为每 5 个 tick（≈10s@2s 间隔）
             // 采样一次，其余 tick 复用上次结果，降低常驻后台 CPU 占用。
             var apps = lastTopMemoryApps
             if appMemoryTick % 5 == 0 {
-                apps = AppMemorySampler.sample(limit: 12)
+                apps = AppMemorySampler.sample()
                 lastTopMemoryApps = apps
             }
             appMemoryTick &+= 1

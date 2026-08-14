@@ -42,6 +42,13 @@ struct ClipboardOverlayView: View {
     /// 视觉状态一致。nil 表示无选中（仅当列表为空时）。
     @State private var selectedIndex: Int = 0
 
+    /// 键盘方向键触发的滚动目标卡片索引（nil = 无需滚动）。
+    /// 仅在 handleArrow（键盘选择）中更新，hover 改变选中不更新——
+    /// hover 在滚轮滚动时会随鼠标掠过卡片频繁变化，若也触发居中滚动
+    /// 会与滚轮滚动互相打架（复现"滚不动"）。变化时由 HorizontalWheelScrollView
+    /// 的 updateNSView 去重后滚动到可见。
+    @State private var scrollToIndex: Int?
+
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
     /// opacity/scale 弹入动画。不改变面板高度——内容过长时由 RTFTextView 内部
     /// 上下滚动处理。
@@ -208,6 +215,8 @@ struct ClipboardOverlayView: View {
         .onChange(of: activeFilter) { _, _ in
             selectedIndex = 0
             hoverID = nil
+            // 切筛选后列表重置为第一张（最左），滚动回起点。
+            scrollToIndex = 0
         }
         // 删除卡片后 manager.items.count 变化，selectedIndex 可能越界——clamp 回有效范围。
         .onChange(of: manager.items.count) { _, _ in
@@ -239,6 +248,9 @@ struct ClipboardOverlayView: View {
                 hoverID = nil
                 query = ""
                 activeFilter = nil
+                // 面板重开时清除上轮键盘滚动请求，避免残留索引在新会话里
+                // 触发一次多余的居中滚动（新列表从最左开始，第一张已可见）。
+                scrollToIndex = nil
                 previewItem = nil
                 previewVisible = false
                 showFilterMenu = false
@@ -643,7 +655,7 @@ struct ClipboardOverlayView: View {
             // cardHeight = 可用高度 - vertical padding(20) - 2pt 余量；
             // 同时卡死上限 220pt，避免面板在预览模式下被拉高时卡片跟着变大。
             GeometryReader { geo in
-                HorizontalWheelScrollView {
+                HorizontalWheelScrollView(scrollToIndex: scrollToIndex) {
                     // LazyHStack 仅渲染可见卡片 + 缓冲区，避免 100 条卡片
                     // 同时渲染导致的内存浪费与滚动卡顿。HStack 会一次性构建
                     // 所有子视图，每张卡片的 RTF 解析/图片解码都立即执行，
@@ -837,7 +849,8 @@ struct ClipboardOverlayView: View {
         }
     }
 
-    /// ←/→ 切换选中卡片。搜索框聚焦时不拦截，让 TextField 处理光标移动。
+    /// ←/→/↑/↓ 切换选中卡片，并滚动到选中卡片可见。搜索框聚焦时不拦截，
+    /// 让 TextField 处理光标移动。
     private func handleArrow(direction: Int) {
         let editingText = controller.isEditingAnyText
         guard !editingText, !filtered.isEmpty else { return }
@@ -845,6 +858,9 @@ struct ClipboardOverlayView: View {
         // 循环导航：到达边界后绕回另一端。
         let count = filtered.count
         selectedIndex = (selectedIndex + direction + count) % count
+        // 键盘选择 → 触发列表滚动到选中卡片可见。
+        // 注意：hover 改变选中时不走这里，避免滚轮滚动时自动居中与滚轮打架。
+        scrollToIndex = selectedIndex
     }
 
     /// 回车复制当前选中卡片。搜索框聚焦时不拦截（让 TextField 提交）。
@@ -866,7 +882,7 @@ struct ClipboardOverlayView: View {
 }
 
 /// 局部 NSEvent 监听键盘事件。随宿主视图生命周期安装/卸载。
-/// 监听键：←(123) →(124) Enter(36) Space(49) ⌘F(3+cmdMask) Esc(53)。
+/// 监听键：←(123) →(124) ↑(126) ↓(125) Enter(36) Space(49) ⌘F(3+cmdMask) Esc(53)。
 /// 仅在面板内捕获；当 firstResponder 是 NSTextView（搜索框）时不拦截
 /// ←/→/Enter，让 TextField 自然处理光标移动与提交。⌘F 与 Esc 全局拦截。
 private struct ClipboardKeyObserver: NSViewRepresentable {
@@ -909,13 +925,15 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
                 return nil
             }
             switch event.keyCode {
-            case 123:
-                // 方向键额外检查预览态 RTFTextView 聚焦：用户点击预览文本后，
-                // 方向键应在 selectable NSTextView 中移动选择光标而非触发卡片导航。
+            case 123, 126:
+                // ←(123)/↑(126)：方向键额外检查预览态 RTFTextView 聚焦：用户
+                // 点击预览文本后，方向键应在 selectable NSTextView 中移动选择光标
+                // 而非触发卡片导航。↑ 与 ← 同样映射为"上一个卡片"。
                 if isEditingText() || isPreviewingTextView() { return event }
                 onArrowLeft()
                 return nil
-            case 124:
+            case 124, 125:
+                // →(124)/↓(125)：与 ←/↑ 对称，映射为"下一个卡片"。
                 if isEditingText() || isPreviewingTextView() { return event }
                 onArrowRight()
                 return nil

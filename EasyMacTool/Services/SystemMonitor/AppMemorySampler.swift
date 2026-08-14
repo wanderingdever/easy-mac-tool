@@ -77,18 +77,66 @@ enum AppMemorySampler {
         return system.contains(id)
     }
 
-    /// 返回内存占用最高的 `limit` 个运行用户应用（聚合其全部进程）。
-    static func sample(limit: Int = 5) -> [ActiveAppMemoryInfo] {
-        let own = Bundle.main.bundleIdentifier
+    /// 拥有可见 UI 的 PID 集合：普通/浮动/模态窗口（layer 0...8）或菜单栏
+    /// 状态项（layer 25）。用于把「有界面」的应用与「纯后台无 UI」的代理区分开：
+    /// 后台 agent 即使 activationPolicy 非 prohibited，只要没有窗口/状态项就被剔除。
+    private static func uiPresencePIDs() -> Set<pid_t> {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        var pids = Set<pid_t>()
+        for info in list {
+            guard let layerNum = info[kCGWindowLayer as String] as? NSNumber else { continue }
+            let layer = layerNum.intValue
+            let isWindow = (0...8).contains(layer)
+            let isStatusItem = layer == 25
+            guard isWindow || isStatusItem else { continue }
+            guard let pidNum = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  pidNum.intValue > 0 else { continue }
+            pids.insert(pid_t(pidNum.intValue))
+        }
+        return pids
+    }
 
-        // 1) 候选用户应用：非 prohibited、非自身、非系统 bundleID、路径非系统服务。
+    /// 家族归并：同一产品体系的多个 bundle 合并为一行。返回家族名，nil 表示独立应用。
+    /// 基于本机实际运行的微信体系 bundleID（lsappinfo list）校准：
+    ///   - com.tencent.xinWeChat        → 微信本体
+    ///   - com.tencent.flue.WeChatAppEx / WeApp / helper.renderer → 小程序容器/渲染进程
+    private static func familyName(bundleID: String?, name: String?) -> String? {
+        let id = (bundleID ?? "").lowercased()
+        let n = (name ?? "").lowercased()
+        // 微信体系：微信本体 + 小程序容器/渲染（com.tencent.flue.*）
+        if id.hasPrefix("com.tencent.xinwechat") || id.hasPrefix("com.tencent.flue.") { return "微信" }
+        // 企业微信体系
+        if id.hasPrefix("com.tencent.wework") || id.hasPrefix("com.tencent.wecom") { return "企业微信" }
+        // 名称兜底（某些无 bundleID 或 bundleID 变化的版本）
+        if n.contains("企业微信") || n.contains("wecom") || n.contains("wework") { return "企业微信" }
+        if n.contains("wechat") || n.contains("weixin") || n.contains("微信") { return "微信" }
+        return nil
+    }
+
+    /// 返回运行中「用户可见应用」的内存快照（聚合其全部进程，含 Helper）。
+    /// - 候选集：普通应用（Dock）、前台应用、或拥有普通窗口/菜单栏状态项的应用；
+    ///   纯后台无 UI 的代理被剔除（对齐用户对 macOS「强制退出」列表的认知）。
+    /// - 家族归并：同一产品体系（如微信 + 小程序）合并为一行，内存求和。
+    /// - 排序：按聚合内存降序；`limit` 为 nil 时返回全部（列表可滚动）。
+    static func sample(limit: Int? = nil) -> [ActiveAppMemoryInfo] {
+        let own = Bundle.main.bundleIdentifier
+        let presencePIDs = Self.uiPresencePIDs()
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+        // 1) 候选应用：非 prohibited、非自身、非系统 bundleID、路径非系统服务，
+        //    且「用户可见」——普通应用/前台/拥有窗口或菜单栏状态项。
         let apps = NSWorkspace.shared.runningApplications.filter { app in
             guard app.activationPolicy != .prohibited else { return false }
             guard let bundleID = app.bundleIdentifier, !bundleID.isEmpty else { return false }
             guard bundleID != own, !isSystemBundleID(bundleID) else { return false }
             guard let url = app.bundleURL else { return false }
             let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-            return !isSystemServicePath(path)
+            guard !isSystemServicePath(path) else { return false }
+            if app.activationPolicy == .regular { return true }
+            if app.processIdentifier == frontmostPID { return true }
+            return presencePIDs.contains(app.processIdentifier)
         }
 
         // 2) 计算每个应用的 bundle 根路径前缀。
@@ -110,17 +158,35 @@ enum AppMemorySampler {
             totals[owner.app.processIdentifier, default: 0] += proc.memoryBytes
         }
 
-        // 4) 组装、按内存降序、取前 limit。
-        return attributed.compactMap { item -> ActiveAppMemoryInfo? in
-            guard let mem = totals[item.app.processIdentifier], mem > 0 else { return nil }
-            return ActiveAppMemoryInfo(pid: item.app.processIdentifier,
-                                       name: item.app.localizedName ?? item.app.bundleIdentifier ?? "?",
-                                       bundleID: item.app.bundleIdentifier,
-                                       icon: item.app.icon,
-                                       memoryBytes: mem)
+        // 4) 家族归并：同一 family 的多个应用合并为一行（内存求和、取内存最大者作代表）。
+        var grouped: [String: (total: UInt64, rep: ActiveAppMemoryInfo)] = [:]
+        for item in attributed {
+            guard let mem = totals[item.app.processIdentifier], mem > 0 else { continue }
+            let info = ActiveAppMemoryInfo(pid: item.app.processIdentifier,
+                                           name: item.app.localizedName ?? item.app.bundleIdentifier ?? "?",
+                                           bundleID: item.app.bundleIdentifier,
+                                           icon: item.app.icon,
+                                           memoryBytes: mem)
+            let key = Self.familyName(bundleID: item.app.bundleIdentifier,
+                                      name: item.app.localizedName) ?? info.name
+            if let existing = grouped[key] {
+                grouped[key] = (existing.total + mem,
+                                existing.rep.memoryBytes >= mem ? existing.rep : info)
+            } else {
+                grouped[key] = (mem, info)
+            }
         }
-        .sorted { $0.memoryBytes > $1.memoryBytes }
-        .prefix(limit)
-        .map { $0 }
+
+        // 5) 组装、按内存降序、可选截断。
+        let merged = grouped.map { key, entry in
+            ActiveAppMemoryInfo(pid: entry.rep.pid,
+                                name: key,
+                                bundleID: entry.rep.bundleID,
+                                icon: entry.rep.icon,
+                                memoryBytes: entry.total)
+        }
+        let sorted = merged.sorted { $0.memoryBytes > $1.memoryBytes }
+        guard let limit else { return sorted }
+        return Array(sorted.prefix(limit))
     }
 }
