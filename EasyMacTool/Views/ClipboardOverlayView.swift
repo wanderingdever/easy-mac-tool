@@ -46,7 +46,7 @@ struct ClipboardOverlayView: View {
     /// 仅在 handleArrow（键盘选择）中更新，hover 改变选中不更新——
     /// hover 在滚轮滚动时会随鼠标掠过卡片频繁变化，若也触发滚动会与滚轮
     /// 滚动互相打架（复现"滚不动"）。变化时由 HorizontalWheelScrollView
-    /// 的 updateNSView 去重后，对卡片做最小滚动揭示（超出可视区才滚动）。
+    /// 的 updateNSView 推导方向并步进滚动一张卡片（242pt，与滚轮手感一致）。
     @State private var scrollToIndex: Int?
 
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
