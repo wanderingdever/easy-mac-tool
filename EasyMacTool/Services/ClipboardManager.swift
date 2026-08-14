@@ -17,15 +17,19 @@ final class ClipboardManager: ObservableObject {
 
     /// metadata.json 的 schema 版本号。结构变更时递增，并在 loadFromDisk
     /// 中提供迁移路径。v0 = 旧格式（裸 [ClipboardItem] 数组，无版本字段）；
-    /// v1 = 当前格式（{ schemaVersion: 1, items: [...] }）。
-    private static let currentSchemaVersion = 1
+    /// v1 = { schemaVersion: 1, items: [...] }；v2 = 增加 groups（分组取代置顶）。
+    private static let currentSchemaVersion = 2
 
-    /// metadata.json 的顶层容器结构。包裹 schemaVersion + items 数组，
-    /// 未来 ClipboardItem 结构变更后可通过版本号判断并迁移，避免旧文件
-    /// 解码失败导致历史数据全部丢失。
+    /// metadata.json 的顶层容器结构。包裹 schemaVersion + items + groups。
     private struct ClipboardMetadata: Codable {
         let schemaVersion: Int
         let items: [ClipboardItem]
+        /// 分组列表（v2 新增）。groups 为可选，v1 旧文件无此字段 → 解码为 []。
+        let groups: [ClipboardGroup]?
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion, items, groups
+        }
     }
 
     /// 磁盘快照 DTO（Sendable）：主线程从 ClipboardItem 提取，后台 JSONEncoder
@@ -34,6 +38,12 @@ final class ClipboardManager: ObservableObject {
     private struct ClipboardHistorySnapshot: Codable, Sendable {
         let schemaVersion: Int
         let items: [ItemSnapshot]
+        let groups: [GroupSnapshot]
+    }
+    private struct GroupSnapshot: Codable, Sendable {
+        let id: UUID
+        let name: String
+        let createdAt: Date
     }
     private struct ItemSnapshot: Codable, Sendable {
         let id: UUID
@@ -52,12 +62,14 @@ final class ClipboardManager: ObservableObject {
         let urlTitle: String?
         let fileURLs: [URL]?
         let colorHex: String?
+        let groupID: UUID?
 
         enum CodingKeys: String, CodingKey {
             case id, createdAt, sourceAppBundleID, sourceAppName
             case sourceAppTintR, sourceAppTintG, sourceAppTintB, sourceAppTintA
             case rtfData, imageFileName, kindType
             case textValue, urlValue, urlTitle, fileURLs, colorHex
+            case groupID
         }
     }
 
@@ -101,10 +113,14 @@ final class ClipboardManager: ObservableObject {
                 urlValue: urlValue,
                 urlTitle: urlTitle,
                 fileURLs: fileURLs,
-                colorHex: colorHex
+                colorHex: colorHex,
+                groupID: item.groupID
             )
         }
-        return ClipboardHistorySnapshot(schemaVersion: Self.currentSchemaVersion, items: snapshots)
+        let groupSnapshots = groups.map { GroupSnapshot(id: $0.id, name: $0.name, createdAt: $0.createdAt) }
+        return ClipboardHistorySnapshot(schemaVersion: Self.currentSchemaVersion,
+                                        items: snapshots,
+                                        groups: groupSnapshots)
     }
 
     /// Keep clipboard history bounded even when the user raises the item count
@@ -115,9 +131,9 @@ final class ClipboardManager: ObservableObject {
     /// 导致内存尖峰 + JSON 编码耗时（主线程）+ 搜索过滤卡顿。与图片上限对称。
     private static let maximumTextPayloadBytes = 5 * 1024 * 1024
     private static let maximumHistoryPayloadBytes = 150 * 1024 * 1024
-    /// 热数据阈值：7 天内的 image 条目在启动时加载 data/thumbnail 到内存；
-    /// 超过 7 天的 image 条目仅加载元数据，访问时通过 warmUp() 从磁盘恢复。
-    private static let hotDataCutoff: TimeInterval = 7 * 24 * 60 * 60
+    /// 热数据阈值：3 天内的 image 条目在启动时加载 data/thumbnail 到内存；
+    /// 超过 3 天的 image 条目仅加载元数据，访问时通过 warmUp() 从磁盘恢复。
+    private static let hotDataCutoff: TimeInterval = 3 * 24 * 60 * 60
     private static let sensitiveBundleIDFragments = [
         "1password", "bitwarden", "lastpass", "dashlane", "keepass",
         "enpass", "protonpass", "nordpass", "keepersecurity"
@@ -183,8 +199,20 @@ final class ClipboardManager: ObservableObject {
         storageDirectory.appendingPathComponent("images", isDirectory: true)
     }
 
-    @Published private(set) var items: [ClipboardItem] = []
+    @Published private(set) var items: [ClipboardItem] = [] {
+        didSet { itemsStamp &+= 1 }
+    }
     @Published private(set) var isCapturing = true
+    /// 历史数据是否已从磁盘加载完成。loadFromDisk 是异步的，初次打开剪切板
+    /// 面板时可能尚未加载完——视图据此显示加载态而非误判为空历史。
+    @Published private(set) var isLoaded = false
+    /// 剪贴板分组（v2）。条目通过 `ClipboardItem.groupID` 归属到某一分组。
+    @Published private(set) var groups: [ClipboardGroup] = []
+    /// 数据代次：items 每次变化 +1。供搜索过滤结果缓存判定失效（避免 1000 条
+    /// 历史在每次击键时全量重扫）。
+    private var itemsStamp = 0
+    /// 只读暴露给视图层做结果级缓存。
+    var dataStamp: Int { itemsStamp }
 
     /// Configured maximum history length. Older entries are dropped.
     /// 设置新值时若小于当前条数，立即裁剪尾部，避免降档后仍持有大量旧数据
@@ -227,6 +255,14 @@ final class ClipboardManager: ObservableObject {
     /// 不会并发写 metadata.json。saveToDiskSync 用 sync 派发，等待所有 pending
     /// 异步保存完成后再执行自己的写入，避免退出时旧 Task 覆盖最新数据。
     private let saveQueue = DispatchQueue(label: "com.easymactool.clipboardSave")
+    /// 串行后台读取队列：所有 pasteboard 读取在此执行，避免 pasteboard server
+    /// 阻塞（如密码提示弹窗）时冻结主线程/UI/事件。与 saveQueue 分开，读不等待写。
+    private let readQueue = DispatchQueue(label: "com.easymactool.clipboardRead")
+    /// 同一时刻只允许一个读取在途（pasteboard server 卡住时不堆积并发读）。
+    private var captureInFlight = false
+    /// 读取代次：每次派发读取 +1，后台读取完成后用 generation 校验是否过期，
+    /// 过期读取直接丢弃（避免卡住的读恢复后污染历史）。
+    private var captureGeneration = 0
     /// 待删除的磁盘图片文件路径集合。
     /// remove/clearHistory/removeOlderThan/trimHistoryToLimits 将待清理的
     /// imageFileURL 收集到此集合，saveToDisk 在后台 IO 时统一删除，
@@ -426,7 +462,7 @@ final class ClipboardManager: ObservableObject {
     /// Re-pastes the given item: writes it to the pasteboard and (optionally)
     /// simulates Cmd+V into the previously frontmost app.
     ///
-    /// 冷数据图片（>7天）需先异步 warmUp 从磁盘加载 TIFF Data，避免
+    /// 冷数据图片（>3天）需先异步 warmUp 从磁盘加载 TIFF Data，避免
     /// write(to:) 内部同步 warmUp() 阻塞主线程（30MB TIFF 同步读盘
     /// 可能造成几十毫秒卡顿，刚好是模拟 Cmd+V 前的关键时刻）。
     ///
@@ -460,8 +496,8 @@ final class ClipboardManager: ObservableObject {
             }
             // Move the item to the top so it's most-recently-used.
             if let idx = items.firstIndex(where: { $0.id == item.id }) {
-                let moved = items.remove(at: idx)
-                items.insert(moved, at: 0)
+                let moved = items[idx]
+                moveToFront(moved)
             }
             schedulePersist()
             if autoPaste {
@@ -472,6 +508,234 @@ final class ClipboardManager: ObservableObject {
                 self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
             }
         }
+    }
+
+    /// 纯文本粘贴：只写回 `string` 纯文本（剥掉 RTF/富文本/颜色格式），再走
+    /// simulatePaste。适用于文本/链接/颜色；图片/文件无纯文本形式，回退到
+    /// 普通 reapply。粘贴后剪贴板仅含纯文本（不还原原格式）。
+    func reapplyPlain(_ item: ClipboardItem, autoPaste: Bool, expectedAppBundleID: String? = nil) {
+        guard let plain = Self.plainText(for: item) else {
+            reapply(item, autoPaste: autoPaste, expectedAppBundleID: expectedAppBundleID)
+            return
+        }
+        let token = UUID()
+        reapplyToken = token
+        currentReapplyTask?.cancel()
+        currentReapplyTask = Task {
+            guard !Task.isCancelled, token == reapplyToken else { return }
+            let beforeWrite = NSPasteboard.general.changeCount
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(plain, forType: .string)
+            suppressUntilChangeCount = NSPasteboard.general.changeCount
+            if suppressUntilChangeCount == beforeWrite {
+                suppressUntilChangeCount = nil
+            }
+            // Move the item to the top so it's most-recently-used.
+            if let idx = items.firstIndex(where: { $0.id == item.id }) {
+                let moved = items[idx]
+                moveToFront(moved)
+            }
+            schedulePersist()
+            if autoPaste {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                guard !Task.isCancelled, token == reapplyToken else { return }
+                self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
+            }
+        }
+    }
+
+    /// 返回条目的纯文本形式；图片/文件无纯文本形式返回 nil。
+    private static func plainText(for item: ClipboardItem) -> String? {
+        switch item.kind {
+        case .text(let s): return s
+        case .url(let url, _): return url.absoluteString
+        case .color(_, let hex): return hex
+        case .image, .file: return nil
+        }
+    }
+
+    /// 把条目移到列表最前（MRU 语义）。分组不改变排序，仅用于 filter 过滤。
+    private func moveToFront(_ item: ClipboardItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let moved = items.remove(at: idx)
+        items.insert(moved, at: 0)
+    }
+
+    // MARK: - 分组
+
+    /// 新建分组并返回其 id。名称已去空白。颜色从色板中随机挑选一个
+    /// 尚未被现有分组占用的索引，保证各分组颜色互不相同；色板用尽时
+    /// 回退到随机（允许重复）。
+    @discardableResult
+    func createGroup(name: String) -> UUID {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let used = Set(groups.map { $0.colorIndex % ClipboardGroupPalette.count })
+        var candidates = (0..<ClipboardGroupPalette.count).filter { !used.contains($0) }
+        if candidates.isEmpty {
+            candidates = Array(0..<ClipboardGroupPalette.count)
+        }
+        let colorIndex = candidates.randomElement() ?? 0
+        let group = ClipboardGroup(name: trimmed.isEmpty ? "未命名分组" : trimmed,
+                                   colorIndex: colorIndex)
+        groups.append(group)
+        schedulePersist()
+        return group.id
+    }
+
+    func renameGroup(_ id: UUID, name: String) {
+        guard let idx = groups.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        groups[idx].name = trimmed
+        schedulePersist()
+    }
+
+    /// 删除分组：连同该分组下的条目一并删除（含其磁盘图片文件）。
+    func deleteGroup(_ id: UUID) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        groups.removeAll { $0.id == id }
+        // 收集被删除条目的 image 磁盘文件路径，待 saveToDisk 时清理。
+        for item in items where item.groupID == id {
+            if let path = item.imageFileURL?.path {
+                pendingImageDeletions.insert(path)
+            }
+        }
+        // 移除该分组下所有条目。数组变化触发 didSet → itemsStamp+1，自动失效
+        // filtered 缓存，无需手动递增。
+        items.removeAll { $0.groupID == id }
+        schedulePersist()
+    }
+
+    /// 把条目加入/移出分组（nil = 移出 → 回到「全部」）。
+    func assign(_ item: ClipboardItem, toGroup groupID: UUID?) {
+        guard items.contains(where: { $0.id == item.id }) else { return }
+        guard item.groupID != groupID else { return }
+        item.groupID = groupID
+        // item 是引用类型，items 数组本身不变，didSet 不触发——手动递增
+        // 数据代次以失效 filtered 缓存，否则分组归属变化后 UI 不刷新。
+        itemsStamp &+= 1
+        schedulePersist()
+    }
+
+    func group(for id: UUID) -> ClipboardGroup? {
+        groups.first { $0.id == id }
+    }
+
+    /// 当前多选（Cmd 点击）的条目 ID 集合。非空时面板显示「复制全部/清除」。
+    @Published private(set) var batchSelectionIDs: Set<UUID> = []
+    /// shift 区间选的锚点（最近一次 toggle 选中的最后一项的 index）。
+    private var batchAnchorIndex: Int?
+
+    func isBatchSelected(_ item: ClipboardItem) -> Bool {
+        batchSelectionIDs.contains(item.id)
+    }
+
+    /// Cmd 点击切换多选。
+    func toggleBatchSelection(_ item: ClipboardItem) {
+        if let idx = items.firstIndex(where: { $0.id == item.id }) {
+            batchAnchorIndex = idx
+        }
+        if batchSelectionIDs.contains(item.id) {
+            batchSelectionIDs.remove(item.id)
+        } else {
+            batchSelectionIDs.insert(item.id)
+        }
+    }
+
+    /// Finder 式 shift 区间选：选中从锚点到目标项之间的所有条目。
+    func extendBatchSelection(to item: ClipboardItem) {
+        guard let targetIndex = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let anchorIndex = batchAnchorIndex ?? targetIndex
+        let lo = min(anchorIndex, targetIndex)
+        let hi = max(anchorIndex, targetIndex)
+        if lo >= 0, hi < items.count {
+            for i in lo...hi { batchSelectionIDs.insert(items[i].id) }
+        }
+        batchAnchorIndex = targetIndex
+    }
+
+    func clearBatchSelection() {
+        batchSelectionIDs.removeAll()
+        batchAnchorIndex = nil
+    }
+
+    /// 当前选中的条目（按 items 顺序）。
+    func selectedBatchItems() -> [ClipboardItem] {
+        items.filter { batchSelectionIDs.contains($0.id) }
+    }
+
+    /// 批量复制/粘贴：全文件 → 写入文件；否则 → 富文本（文本合并 + 图片附件）。
+    func reapplyBatch(autoPaste: Bool, expectedAppBundleID: String? = nil) {
+        let selected = selectedBatchItems()
+        guard !selected.isEmpty else { return }
+        let token = UUID()
+        reapplyToken = token
+        currentReapplyTask?.cancel()
+        currentReapplyTask = Task {
+            guard !Task.isCancelled, token == reapplyToken else { return }
+            let beforeWrite = NSPasteboard.general.changeCount
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            let allFiles = selected.allSatisfy { if case .file = $0.kind { return true } else { return false } }
+            if allFiles {
+                let urls = selected.flatMap { item -> [URL] in
+                    if case .file(let u) = item.kind { return u } else { return [] }
+                }
+                pb.writeObjects(urls as [NSPasteboardWriting])
+            } else {
+                let rich = Self.batchAttributedString(selected)
+                pb.writeObjects([rich])
+                let plain = Self.batchPlainText(selected)
+                if !plain.isEmpty { pb.setString(plain, forType: .string) }
+            }
+            suppressUntilChangeCount = NSPasteboard.general.changeCount
+            if suppressUntilChangeCount == beforeWrite {
+                suppressUntilChangeCount = nil
+            }
+            // 把选中项移到最前（保持顺序 reversed 以避免索引漂移）。
+            for item in selected.reversed() {
+                if let idx = items.firstIndex(where: { $0.id == item.id }) {
+                    moveToFront(items[idx])
+                }
+            }
+            schedulePersist()
+            if autoPaste {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                guard !Task.isCancelled, token == reapplyToken else { return }
+                self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
+            }
+        }
+    }
+
+    /// 批量纯文本：文本/链接/颜色用其字符串，文件用路径，图片跳过。
+    private static func batchPlainText(_ items: [ClipboardItem]) -> String {
+        items.compactMap { item -> String? in
+            if case .file(let urls) = item.kind {
+                return urls.map(\.path).joined(separator: "\n")
+            }
+            return Self.plainText(for: item)
+        }.joined(separator: "\n")
+    }
+
+    /// 批量富文本：文本/链接/颜色合并为文本，图片内嵌为附件。
+    private static func batchAttributedString(_ items: [ClipboardItem]) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for item in items {
+            if case .image = item.kind {
+                if let img = item.fullImage {
+                    let attach = NSTextAttachment()
+                    attach.image = img
+                    result.append(NSAttributedString(attachment: attach))
+                    result.append(NSAttributedString(string: "\n"))
+                }
+            } else if let text = Self.plainText(for: item) {
+                result.append(NSAttributedString(string: text + "\n"))
+            } else if case .file(let urls) = item.kind {
+                result.append(NSAttributedString(string: urls.map(\.path).joined(separator: "\n") + "\n"))
+            }
+        }
+        return result
     }
 
     func clearHistory() {
@@ -511,60 +775,180 @@ final class ClipboardManager: ObservableObject {
     // MARK: - Polling
 
     private func poll() {
-        let pb = NSPasteboard.general
-        let current = pb.changeCount
+        let current = NSPasteboard.general.changeCount
         guard current != lastChangeCount else { return }
         lastChangeCount = current
 
         guard isCapturing else { return }
 
         // 精确抑制：只抑制 reapply write 引起的 changeCount 变化。
-        // - current == suppressUntilChangeCount：是 write 引起的，抑制
-        // - current > suppressUntilChangeCount：用户在 write 后又复制了，不抑制
-        // 这避免了布尔标志误抑制用户在 write 后立即复制的内容。
         if let suppress = suppressUntilChangeCount, current == suppress {
             suppressUntilChangeCount = nil
             return
         }
-        // current > suppress 或 suppress 为 nil：正常捕获
         suppressUntilChangeCount = nil
 
-        // Quick type check before expensive readObjects call.
-        guard let types = pb.types, !types.isEmpty else { return }
-        // 遵守 concealed/transient 约定：密码管理器等写入剪贴板时附带这些
-        // 类型标记表示"不应被记录"。比 bundleID 黑名单更可靠（浏览器自动
-        // 填充复制的密码来源是浏览器，黑名单覆盖不到）。检查优先级最高。
-        if types.contains(where: { Self.sensitivePasteboardMarkers.contains($0) }) { return }
+        // 一次只允许一个读取在途：pasteboard server 卡住时不堆积并发读，
+        // 卡住的读用 generation token 作废，避免永久禁用历史。
+        guard !captureInFlight else { return }
+        captureInFlight = true
+        captureGeneration &+= 1
+        let generation = captureGeneration
+        scheduleCaptureTimeout(generation: generation)
+
+        // 真正的 pasteboard 读取（可能阻塞）在后台串行队列执行，
+        // 主线程只做 changeCount 判断与最终的 ClipboardItem 构建。
+        readQueue.async { [weak self] in
+            let content = Self.readContent(ignoredApps: Set(AppSettings.shared.ignoredClipboardApps))
+            DispatchQueue.main.async {
+                guard let self, self.captureGeneration == generation else { return }
+                self.captureInFlight = false
+                guard self.isCapturing, let content, let item = self.makeItem(from: content) else { return }
+                self.ingest(item)
+            }
+        }
+    }
+
+    /// 后台读取在途超过 5s（pasteboard server 卡住）时释放 inFlight 标志，
+    /// 让后续 poll 能继续派发新读取；卡住的旧读被 generation token 丢弃。
+    private func scheduleCaptureTimeout(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.captureGeneration == generation, self.captureInFlight else { return }
+            self.captureInFlight = false
+        }
+    }
+
+    /// 在后台队列读取剪贴板原始内容。返回 nil 表示应跳过（无内容/敏感标记/
+    /// 疑似密码/敏感来源）。只做 pasteboard 读取与轻量分类，不构造 @MainActor
+    /// 的 ClipboardItem——pasteboard server 阻塞时不会冻结主线程。
+    private static func readContent(ignoredApps: Set<String>) -> CapturedContent? {
+        let pb = NSPasteboard.general
+        guard let types = pb.types, !types.isEmpty else { return nil }
+        // 遵守 concealed/transient 约定：密码管理器等写入剪贴板时附带的标记。
+        if types.contains(where: { Self.sensitivePasteboardMarkers.contains($0) }) { return nil }
         let hasURL = types.contains(.URL)
         let hasString = types.contains(.string)
         let hasTIFF = types.contains(.tiff)
         let hasFileURL = types.contains(.fileURL)
-        guard hasURL || hasString || hasTIFF || hasFileURL else { return }
+        guard hasURL || hasString || hasTIFF || hasFileURL else { return nil }
 
-        // 浏览器密码启发式检测：Chrome/Firefox/Edge 等浏览器从自动填充
-        // 密码字段复制时不设置 ConcealedType（仅 Safari macOS 14+ 设置
-        // com.apple.security.passwords，已在上面的 markers 检查中捕获）。
-        // 对仅含 string 类型 + 来源是浏览器的复制，用启发式判断是否像密码。
-        // 误报代价（跳过正常文本复制）低于漏报代价（密码被明文持久化到磁盘）。
+        let (name, bundleID, tint) = Self.readSourceApp()
+
+        // 浏览器密码启发式检测：Chrome/Firefox/Edge 等从自动填充字段复制密码
+        // 时不设置标记。误报代价低于漏报（密码被明文持久化）。
         if hasString && !hasURL && !hasTIFF && !hasFileURL,
-           let sourceBundleID = currentSourceBundleID,
+           let sourceBundleID = bundleID,
            Self.browserBundleIDs.contains(sourceBundleID) {
             let candidate = pb.string(forType: .string) ?? ""
-            if looksLikePassword(candidate) { return }
+            if Self.looksLikePassword(candidate) { return nil }
         }
+        // 敏感来源 bundleID 黑名单。
+        if Self.isSensitiveSource(bundleID: bundleID) { return nil }
+        // 用户配置的「忽略来源 app」列表。
+        if let bundleID = bundleID, ignoredApps.contains(bundleID) { return nil }
 
-        guard let item = snapshot() else { return }
-        // 去重：遍历全部历史，若已有相同 payload 的条目，把旧条目移到第一位，
-        // 不创建新副本。这比"只检查第一项 + 丢弃"更合理：
-        // - 解决 A→B→A 场景下 A 不被去重的问题（旧逻辑只查 items.first）
-        // - 重复时提升旧条目到顶部（MRU 语义），而非保留旧位置
-        // - 节省内存：不重复创建 ClipboardItem 和图片副本
-        // 保留旧条目的 id 和 createdAt（稳定标识 + 原始创建时间），
-        // 来源信息保留旧的——避免因"最近从 app Y 复制了相同内容"而丢失
-        // 原始来源 X 的记录，原始来源对用户追溯更有意义。
+        // 读取各类型原始内容，主线程按 文件>图片>URL>文本 优先级构建 item。
+        let fileURLs: [URL]? = hasFileURL
+            ? (pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL])
+            : nil
+        let tiffData: Data? = hasTIFF ? pb.data(forType: .tiff) : nil
+        let urlTypeString: String? = hasURL ? pb.string(forType: .URL) : nil
+        let plainString: String? = hasString ? pb.string(forType: .string) : nil
+        let rtfData: Data? = (hasString && pb.availableType(from: [.rtf]) != nil)
+            ? pb.data(forType: .rtf) : nil
+        let srgb = tint.usingColorSpace(.sRGB) ?? tint
+        return CapturedContent(fileURLs: fileURLs,
+                               tiffData: tiffData,
+                               urlTypeString: urlTypeString,
+                               plainString: plainString,
+                               rtfData: rtfData,
+                               sourceName: name,
+                               sourceAppBundleID: bundleID,
+                               tintR: Double(srgb.redComponent),
+                               tintG: Double(srgb.greenComponent),
+                               tintB: Double(srgb.blueComponent),
+                               tintA: Double(srgb.alphaComponent))
+    }
+
+    /// 后台读取当前前台 app 的来源信息（离线安全，不依赖主线程）。
+    private static func readSourceApp() -> (name: String?, bundleID: String?, tint: NSColor) {
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        var tint = NSColor(red: 0x0A/255.0, green: 0x84/255.0, blue: 0xFF/255.0, alpha: 1.0)
+        if let app = frontmost, let appIcon = app.icon {
+            tint = AppTintExtractor.tint(from: appIcon, bundleIdentifier: app.bundleIdentifier)
+        }
+        return (frontmost?.localizedName, frontmost?.bundleIdentifier, tint)
+    }
+
+    /// 主线程根据后台读取的 CapturedContent 构建 ClipboardItem（优先级：
+    /// 文件 > 图片 > URL > 文本（含颜色/URL 启发式））。语义与旧 snapshot() 一致。
+    private func makeItem(from content: CapturedContent) -> ClipboardItem? {
+        let tint = NSColor(red: CGFloat(content.tintR),
+                           green: CGFloat(content.tintG),
+                           blue: CGFloat(content.tintB),
+                           alpha: CGFloat(content.tintA))
+        // 文件（必须全部是 file URL，避免网页链接被误判为文件）。
+        if let urls = content.fileURLs, !urls.isEmpty, urls.allSatisfy({ $0.isFileURL }) {
+            return ClipboardItem(kind: .file(URLs: urls),
+                                 sourceAppBundleID: content.sourceAppBundleID,
+                                 sourceAppName: content.sourceName,
+                                 sourceAppTint: tint)
+        }
+        // 图片（缩略图生成失败则继续往下尝试 URL/文本）。
+        if let tiff = content.tiffData, tiff.count <= Self.maximumImagePayloadBytes,
+           let thumbnail = ClipboardItem.makeThumbnail(from: tiff, max: 256) {
+            if let bundleID = content.sourceAppBundleID,
+               let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+               let appIcon = app.icon {
+                AppIconCache.prewarm(appIcon, for: bundleID)
+            }
+            let item = ClipboardItem(kind: .image(tiff, thumbnail: thumbnail),
+                                     sourceAppBundleID: content.sourceAppBundleID,
+                                     sourceAppName: content.sourceName,
+                                     sourceAppTint: tint)
+            item.imageFileURL = Self.imagesDirectoryURL.appendingPathComponent("\(item.id.uuidString).tiff")
+            item.imagePixelSize = ClipboardItem.readPixelSize(from: tiff)
+            return item
+        }
+        // URL（带 string 伴生）。
+        if let urlStr = content.urlTypeString, let url = URL(string: urlStr) {
+            return ClipboardItem(kind: .url(url, title: url.host),
+                                 sourceAppBundleID: content.sourceAppBundleID,
+                                 sourceAppName: content.sourceName,
+                                 sourceAppTint: tint)
+        }
+        // 文本（含颜色/URL 启发式）。
+        if let text = content.plainString {
+            if let (color, hex) = ColorStringParser.parse(text) {
+                return ClipboardItem(kind: .color(color, hex: hex),
+                                     sourceAppBundleID: content.sourceAppBundleID,
+                                     sourceAppName: content.sourceName,
+                                     sourceAppTint: tint)
+            }
+            if let url = URL(string: text),
+               let scheme = url.scheme,
+               scheme == "http" || scheme == "https" {
+                return ClipboardItem(kind: .url(url, title: url.host),
+                                     sourceAppBundleID: content.sourceAppBundleID,
+                                     sourceAppName: content.sourceName,
+                                     sourceAppTint: tint)
+            }
+            guard text.utf8.count <= Self.maximumTextPayloadBytes else { return nil }
+            return ClipboardItem(kind: .text(text),
+                                 sourceAppBundleID: content.sourceAppBundleID,
+                                 sourceAppName: content.sourceName,
+                                 sourceAppTint: tint,
+                                 rtfData: content.rtfData)
+        }
+        return nil
+    }
+
+    /// 去重 + 插入 + 裁剪 + 落盘（主线程）。与旧 poll 尾部逻辑一致。
+    private func ingest(_ item: ClipboardItem) {
+        // 去重：遍历全部历史，若已有相同 payload 的条目把旧条目移到所属分组最前。
         if let existingIndex = items.firstIndex(where: { isSamePayload($0, item) }) {
-            let existing = items.remove(at: existingIndex)
-            items.insert(existing, at: 0)
+            let existing = items[existingIndex]
+            moveToFront(existing)
             schedulePersist()
             return
         }
@@ -573,108 +957,20 @@ final class ClipboardManager: ObservableObject {
         schedulePersist()
     }
 
-    /// Snapshots whatever is currently on the pasteboard into a ClipboardItem.
-    /// Also captures the frontmost app's bundleID/name/tint so the card header
-    /// can show its origin.
-    private func snapshot() -> ClipboardItem? {
-        let pb = NSPasteboard.general
-        let (appName, appBundleID, appIcon, appTint) = captureSourceApp()
-        guard !isSensitiveSource(bundleID: appBundleID) else { return nil }
-
-        // File URLs take priority — copy/paste of Finder selections.
-        // 必须过滤 isFileURL：readObjects([NSURL.self], options: nil) 同时
-        // 接受 public.url（网页链接），不过滤的话浏览器复制的链接会被误
-        // 归类为 .file（显示"1 个文件"卡片），后续 .url 分支成为死代码。
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-           !urls.isEmpty,
-           urls.allSatisfy({ $0.isFileURL }) {
-            return ClipboardItem(kind: .file(URLs: urls),
-                                 sourceAppBundleID: appBundleID,
-                                 sourceAppName: appName,
-                                 sourceAppTint: appTint)
-        }
-
-        // Images. Keep the original TIFF only within a strict per-item budget;
-        // otherwise a single pasted bitmap could make the history unusable.
-        if let tiff = pb.data(forType: .tiff),
-           tiff.count <= Self.maximumImagePayloadBytes,
-           let thumbnail = ClipboardItem.makeThumbnail(from: tiff, max: 256) {
-            // Prewarm AppIconCache 以避免后续访问时扫描 runningApplications
-            if let appIcon, let appBundleID {
-                AppIconCache.prewarm(appIcon, for: appBundleID)
-            }
-            let item = ClipboardItem(kind: .image(tiff, thumbnail: thumbnail),
-                                     sourceAppBundleID: appBundleID,
-                                     sourceAppName: appName,
-                                     sourceAppTint: appTint)
-            // 设置图片文件 URL，saveToDisk() 会将 TIFF Data 写入此路径。
-            item.imageFileURL = Self.imagesDirectoryURL.appendingPathComponent("\(item.id.uuidString).tiff")
-            // 捕获时填充像素尺寸缓存：footerText 直接读缓存，搜索过滤时
-            // 不再对每个图片条目重复做 ImageIO 元数据解析。
-            item.imagePixelSize = ClipboardItem.readPixelSize(from: tiff)
-            return item
-        }
-
-        // URLs with a string companion.
-        if let urlStr = pb.string(forType: .URL),
-           let url = URL(string: urlStr) {
-            return ClipboardItem(kind: .url(url, title: url.host),
-                                 sourceAppBundleID: appBundleID,
-                                 sourceAppName: appName,
-                                 sourceAppTint: appTint)
-        }
-
-        // Plain text (also catches URLs copied as plain text).
-        if let text = pb.string(forType: .string) {
-            // 单条文本大小上限：超大文本（如导出的 JSON、日志全选复制）会
-            // 导致内存尖峰 + JSON 编码耗时 + 搜索卡顿，跳过记录。
-            // 颜色/URL 启发式判断在大小检查之前，短字符串不受影响。
-            let rtfData = pb.data(forType: .rtf)
-            // Heuristic: looks like a color string (#RRGGBB / rgb() / hsl()) —
-            // render as a color card.
-            if let (color, hex) = ColorStringParser.parse(text) {
-                return ClipboardItem(kind: .color(color, hex: hex),
-                                     sourceAppBundleID: appBundleID,
-                                     sourceAppName: appName,
-                                     sourceAppTint: appTint)
-            }
-            // Heuristic: looks like a URL — render as a URL card.
-            if let url = URL(string: text),
-               let scheme = url.scheme,
-               scheme == "http" || scheme == "https" {
-                return ClipboardItem(kind: .url(url, title: url.host),
-                                     sourceAppBundleID: appBundleID,
-                                     sourceAppName: appName,
-                                     sourceAppTint: appTint)
-            }
-            // 文本单条大小上限：超过 maximumTextPayloadBytes 的巨型文本跳过记录，
-            // 避免内存尖峰 + JSON 编码耗时 + 搜索卡顿。
-            guard text.utf8.count <= Self.maximumTextPayloadBytes else { return nil }
-            return ClipboardItem(kind: .text(text),
-                                 sourceAppBundleID: appBundleID,
-                                 sourceAppName: appName,
-                                 sourceAppTint: appTint,
-                                 rtfData: rtfData)
-        }
-
-        return nil
-    }
-
-    /// Captures the currently frontmost app's bundleID, name, icon, and tint
-    /// so the card header can show the source. icon 用于 prewarm AppIconCache
-    /// 后即丢弃——ClipboardItem 只持有 bundleID，后续通过缓存查询。
-    private func captureSourceApp() -> (String?, String?, NSImage?, NSColor) {
-        let frontmost = NSWorkspace.shared.frontmostApplication
-        let name = frontmost?.localizedName
-        let bundleID = frontmost?.bundleIdentifier
-        // Safe sRGB fallback — avoids catalog-color component crashes.
-        var icon: NSImage?
-        var tint: NSColor = NSColor(red: 0x0A/255.0, green: 0x84/255.0, blue: 0xFF/255.0, alpha: 1.0)
-        if let app = frontmost, let appIcon = app.icon {
-            icon = appIcon
-            tint = AppTintExtractor.tint(from: appIcon, bundleIdentifier: app.bundleIdentifier)
-        }
-        return (name, bundleID, icon, tint)
+    /// 后台读取的剪贴板原始内容（Sendable）：主线程据此构建 ClipboardItem。
+    /// 只携带原始数据与来源元数据，pasteboard 读取完全在后台队列完成。
+    private struct CapturedContent: Sendable {
+        let fileURLs: [URL]?
+        let tiffData: Data?
+        let urlTypeString: String?
+        let plainString: String?
+        let rtfData: Data?
+        let sourceName: String?
+        let sourceAppBundleID: String?
+        let tintR: Double
+        let tintG: Double
+        let tintB: Double
+        let tintA: Double
     }
 
     private func trimHistoryToLimits() {
@@ -796,8 +1092,8 @@ final class ClipboardManager: ObservableObject {
     /// 从磁盘加载剪贴板历史。
     /// - 读取 metadata.json 解码所有条目
     /// - image 条目：设置 imageFileURL 为绝对路径
-    /// - 热数据（≤7天）：异步 warmUp() 加载 data + thumbnail 到内存
-    /// - 冷数据（>7天）：仅保留元数据，访问时按需 warmUp()
+    /// - 热数据（≤3天）：异步 warmUp() 加载 data + thumbnail 到内存
+    /// - 冷数据（>3天）：仅保留元数据，访问时按需 warmUp()
     ///
     /// 异步化策略：
     /// 1. 后台队列读取 JSON 文件数据（避免主线程同步文件 IO）
@@ -808,14 +1104,20 @@ final class ClipboardManager: ObservableObject {
     /// 可导致 app 启动时主线程冻结数百毫秒到数秒。现在 JSON 读取在后台，
     /// 解码后立即设置 items（UI 瞬时显示卡片占位），热图异步加载填入。
     private func loadFromDisk() {
-        guard Self.storageIsAvailable else { return }
+        guard Self.storageIsAvailable else {
+            isLoaded = true
+            return
+        }
         let metaURL = Self.metadataURL
         let imgDir = Self.imagesDirectoryURL
-        guard FileManager.default.fileExists(atPath: metaURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: metaURL.path) else {
+            isLoaded = true
+            return
+        }
         // Step 1: 后台读取 JSON 文件数据（纯 Data，无 @MainActor 依赖）
         DispatchQueue.global(qos: .userInitiated).async {
             guard let fileData = try? Data(contentsOf: metaURL) else {
-                Task { @MainActor in self.items = [] }
+                Task { @MainActor in self.items = []; self.isLoaded = true }
                 return
             }
             // Step 2: 回主线程解码 JSON（ClipboardItem 是 @MainActor 隔离）
@@ -828,12 +1130,16 @@ final class ClipboardManager: ObservableObject {
                 let loaded: [ClipboardItem]
                 if let metadata = try? decoder.decode(ClipboardMetadata.self, from: fileData) {
                     loaded = metadata.items
+                    // v2 分组；v1 旧文件无 groups 字段 → 空。
+                    self.groups = metadata.groups ?? []
                 } else if let legacy = try? decoder.decode([ClipboardItem].self, from: fileData) {
-                    // v0 旧格式：裸数组，无 schemaVersion 字段
+                    // v0 旧格式：裸数组，无 schemaVersion 字段，也无分组。
                     loaded = legacy
+                    self.groups = []
                 } else {
                     Self.logger.error("Load failed: decode error")
                     self.items = []
+                    self.isLoaded = true
                     return
                 }
                 let hotCutoff = Date().addingTimeInterval(-Self.hotDataCutoff)
@@ -863,6 +1169,7 @@ final class ClipboardManager: ObservableObject {
                     merged.insert(item, at: 0)
                 }
                 self.items = merged
+                self.isLoaded = true
                 // 异步加载完成后立即裁剪并落盘：磁盘上的条目可能超过当前 historyLimit
                 // （如用户在设置中降低了上限后重启），保证启动后内存与上限一致，
                 // 同时修正磁盘 metadata.json。start() 中的同步 trim 是 no-op（此时
@@ -887,13 +1194,6 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    /// 当前前台 app 的 bundleID，用于浏览器密码启发式检测。
-    /// 与 captureSourceApp() 取相同来源（NSWorkspace.frontmostApplication），
-    /// 但只返回 bundleID，避免在仅需 bundleID 的场景下构造完整元组。
-    private var currentSourceBundleID: String? {
-        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-    }
-
     /// 浏览器密码启发式检测：判断字符串是否像密码。
     /// 仅在来源是已知浏览器 + 剪贴板仅含 string 类型时调用。
     /// 规则（全部满足才判定为密码）：
@@ -903,7 +1203,7 @@ final class ClipboardManager: ObservableObject {
     /// 4. 含数字或符号（排除纯字母的普通词）
     /// 5. 不是常见非密码文本（如 URL、邮箱、IP）
     /// 误报代价（跳过正常文本复制）低于漏报代价（密码被明文持久化）。
-    private func looksLikePassword(_ candidate: String) -> Bool {
+    private static func looksLikePassword(_ candidate: String) -> Bool {
         let len = candidate.count
         // 长度范围：6-64（密码通常在此范围，过短/过长都不像）
         guard len >= 6, len <= 64 else { return false }
@@ -936,7 +1236,7 @@ final class ClipboardManager: ObservableObject {
         return hasLetter && (hasDigit || hasSymbol)
     }
 
-    private func isSensitiveSource(bundleID: String?) -> Bool {
+    private static func isSensitiveSource(bundleID: String?) -> Bool {
         guard let bundleID = bundleID?.lowercased() else { return false }
         return Self.sensitiveBundleIDFragments.contains { bundleID.contains($0) }
     }
@@ -994,6 +1294,10 @@ final class ClipboardManager: ObservableObject {
               let cmdUp = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false) else { return }
         cmdDown.flags = .maskCommand
         cmdUp.flags = .maskCommand
+        // 打上与 HotkeyManager 一致的合成事件标记，使自家 event tap 跳过这些
+        // 事件，杜绝重入/误匹配（合成 Cmd+V 不会再被当作快捷键处理）。
+        cmdDown.setIntegerValueField(.eventSourceUserData, value: HotkeyManager.syntheticMarker)
+        cmdUp.setIntegerValueField(.eventSourceUserData, value: HotkeyManager.syntheticMarker)
         cmdDown.post(tap: .cghidEventTap)
         cmdUp.post(tap: .cghidEventTap)
         // 合成事件经过自己的 .cgSessionEventTap 可能触发 tap 被系统临时禁用

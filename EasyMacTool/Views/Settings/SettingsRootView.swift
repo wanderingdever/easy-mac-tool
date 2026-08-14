@@ -8,7 +8,10 @@ import SwiftUI
 struct SettingsRootView: View {
     enum Section: String, CaseIterable, Identifiable {
         case windowSwitcher = "窗口切换"
+        case windowLayout = "窗口布局"
         case clipboard = "剪切板"
+        case systemMonitor = "系统监控"
+        case uninstaller = "卸载器"
         case permissions = "权限"
         case about = "关于"
         var id: String { rawValue }
@@ -33,6 +36,10 @@ struct SettingsRootView: View {
         // 权限缺失时跳转到「权限设置」section，让用户立即看到各项权限状态。
         .onReceive(NotificationCenter.default.publisher(for: .focusPermissionSection)) { _ in
             selection = .permissions
+        }
+        // 从菜单栏「系统监控」入口定位到系统监控 section。
+        .onReceive(NotificationCenter.default.publisher(for: .focusSystemMonitorSection)) { _ in
+            selection = .systemMonitor
         }
     }
 
@@ -88,30 +95,10 @@ struct SettingsRootView: View {
     // MARK: - Detail
 
     private var detailPanel: some View {
-        VStack(spacing: 0) {
-            // Detail toolbar：44pt 高，17pt semibold 页面标题 + 底部渐变发丝线。
-            HStack(spacing: 8) {
-                Text(selection.rawValue)
-                    .font(.system(size: DesignTokens.SettingsTypography.pageTitle, weight: .semibold))
-                    .foregroundStyle(.primary)
-                Spacer()
-            }
-            .padding(.horizontal, 24)
-            .frame(height: DesignTokens.Settings.toolbarHeight)
-            .overlay(alignment: .bottom) {
-                DesignTokens.Aurora.brandHorizontal
-                    .opacity(0.25)
-                    .frame(height: 1)
-                    .mask(
-                        LinearGradient(colors: [.black, .black, .clear],
-                                       startPoint: .leading, endPoint: .trailing)
-                    )
-            }
-
-            // Content area — each page manages its own padding/scroll.
-            detail
-        }
-        .background(DesignTokens.Aurora.pageBackground)
+        // 去掉顶部页面标题栏（原 toolbar 44pt 标题 + 渐变发丝线），
+        // 让设置内容直接顶到顶部显示。各内容页自带 padding 与背景。
+        detail
+            .background(DesignTokens.Aurora.pageBackground)
     }
 
     @ViewBuilder
@@ -119,8 +106,14 @@ struct SettingsRootView: View {
         switch selection {
         case .windowSwitcher:
             WindowSwitcherSettingsView()
+        case .windowLayout:
+            WindowLayoutSettingsView()
         case .clipboard:
             ClipboardSettingsView()
+        case .systemMonitor:
+            SystemMonitorSettingsView()
+        case .uninstaller:
+            UninstallerSettingsView()
         case .permissions:
             PermissionsSettingsView()
         case .about:
@@ -131,7 +124,10 @@ struct SettingsRootView: View {
     private func iconName(for section: Section) -> String {
         switch section {
         case .windowSwitcher: return "square.grid.2x2"
+        case .windowLayout: return "rectangle.split.2x2"
         case .clipboard: return "list.clipboard"
+        case .systemMonitor: return "gauge"
+        case .uninstaller: return "trash"
         case .permissions: return "shield"
         case .about: return "info"
         }
@@ -140,13 +136,16 @@ struct SettingsRootView: View {
     /// Activates the app and brings the settings window to the front.
     private func activateAndBringToFront() {
         DispatchQueue.main.async {
+            // 先激活 app，再显示窗口：确保首帧以正确外观渲染，避免
+            // 偶发的「整页按钮全灰」渲染闪烁（此前先 orderFront 后 activate，
+            // 首帧可能在 app 激活前完成，品牌渐变/语义色未解析）。
+            NSApp.activate()
             // OverlayPanel.canBecomeMain=false、ClipboardPanel 同理、
             // MenuBarExtra 窗口也不能成为 main，因此设置窗口是唯一
             // canBecomeMain=true 的窗口，无需依赖标题字符串。
             for window in NSApp.windows where window.canBecomeMain {
                 window.makeKeyAndOrderFront(nil)
             }
-            NSApp.activate()
         }
     }
 }
@@ -195,6 +194,7 @@ private struct SidebarNavItem: View {
             }
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .accessibilityLabel(section.rawValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }

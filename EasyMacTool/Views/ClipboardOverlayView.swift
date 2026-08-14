@@ -21,6 +21,16 @@ struct ClipboardOverlayView: View {
     @State private var hoverID: UUID?
     @State private var activeFilter: ClipboardItem.ContentKind?
     @State private var showFilterMenu: Bool = false
+    /// 当前浏览分组（nil = 全部）。
+    @State private var activeGroupID: UUID?
+    @State private var showNewGroupAlert: Bool = false
+    @State private var newGroupName: String = ""
+    /// 「新建分组」后要归属的条目（从卡片右键菜单新建时非 nil）。
+    @State private var pendingAssignItem: ClipboardItem?
+    /// 右键 Tag 操作的目标分组 + 重命名弹窗状态。
+    @State private var actionGroup: ClipboardGroup?
+    @State private var showRenameGroupAlert: Bool = false
+    @State private var renameGroupName: String = ""
 
     /// 焦点管理：参考 Paste，默认焦点在卡片而非搜索框——这样用户呼出
     /// 面板后即可用 ←/→ 切换卡片、Enter 复制。需要搜索时主动点击搜索框
@@ -46,22 +56,32 @@ struct ClipboardOverlayView: View {
     /// 清空全部历史前的确认弹窗。
     @State private var showClearAlert: Bool = false
 
+    /// 搜索过滤结果缓存：query/filter/分组/数据代次均未变时复用结果，
+    /// 避免 1000 条历史在每次击键时全量重扫。
+    /// 引用类型缓存容器：把缓存对象放在 box 的属性中，仅 @State 持有 box。
+    /// 若直接 `@State var filterCache: FilterCache?`，`filtered` 计算属性在 body
+    /// 求值期间写 @State setter 会触发「Modifying state during view update」告警
+    /// （滚动时 dataStamp 变化 → cache miss → 逐帧写 state）。box 只用 @State
+    /// 保证视图重绘间存续，写 `/读` 对象属性不触发 @State 变更。
+    @State private var filterCacheBox = FilterCacheBox()
+
     /// 过滤后的卡片列表（计算属性）。
-    /// 之前用 @State filtered + onReceive(manager.$items) 手动更新，但右键菜单
-    /// (NSMenu) 的 modal session 会延迟 onReceive 回调，导致删除/新增后 UI 不
-    /// 立即刷新。改为计算属性后，manager.items（@Published）的任何变化都会
-    /// 通过 @ObservedObject 自动触发 body 重绘，filtered 随之重算。
-    /// 性能：body 中多次访问 filtered 会多次计算，但 manager.items 通常 ≤ 100，
-    /// filter 闭包开销可忽略；真正昂贵的是卡片渲染（已用 LazyHStack 懒加载）。
     private var filtered: [ClipboardItem] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return manager.items.filter { item in
+        if let cache = filterCacheBox.value,
+           cache.query == q, cache.filter == activeFilter, cache.groupID == activeGroupID, cache.stamp == manager.dataStamp {
+            return cache.result
+        }
+        let result = manager.items.filter { item in
+            if let gid = activeGroupID, item.groupID != gid { return false }
             if let f = activeFilter, item.contentKind != f { return false }
             guard !q.isEmpty else { return true }
-            // searchableText 已预计算并缓存小写的 title + footerText，
-            // 避免每次击键对 1000 条历史重复 lowercased() + footerText 的 trimming/split。
+            // searchableText 已预计算并缓存小写的 title + footerText。
             return item.searchableText.contains(q)
         }
+        filterCacheBox.value = FilterCache(query: q, filter: activeFilter, groupID: activeGroupID,
+                                          stamp: manager.dataStamp, result: result)
+        return result
     }
 
     private var previewIsOpen: Bool { previewItem != nil }
@@ -87,9 +107,13 @@ struct ClipboardOverlayView: View {
                                        startPoint: .leading, endPoint: .trailing)
                     )
                     .padding(.horizontal, 20)
-                // Spacer 把卡片条压到底部：面板在预览模式被拉高时，卡片仍贴底，
-                // 预览放大卡片可向上溢出到 Spacer 留出的空白区。
-                Spacer(minLength: 0)
+                // 有内容时 Spacer 把卡片条压到底部（预览模式被拉高时卡片仍贴底、
+                // 预览可向上溢出）；加载/空状态时 cardStrip 自身撑满居中，无需
+                // 额外 Spacer，否则两处弹性空间冲突导致布局错乱。
+                if !filteredItems.isEmpty {
+                    Spacer(minLength: 0)
+                }
+                batchFooter
                 cardStrip(filtered: filteredItems)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -121,8 +145,9 @@ struct ClipboardOverlayView: View {
             )
             .padding(.horizontal, 10)
             .padding(.top, 6)
-            // 底部同步留白：卡片完全浮起，不再贴屏幕底边。
-            .padding(.bottom, 10)
+            // 底部贴边：面板本身锚定屏幕底缘，底部留极小间距让卡片浮起感，
+            // 但基本贴边（原来 10pt 底部空隙被用户认为没贴边）。
+            .padding(.bottom, 0)
             // Click anywhere outside the filter menu / preview to dismiss it.
             .contentShape(Rectangle())
             .onTapGesture {
@@ -159,7 +184,9 @@ struct ClipboardOverlayView: View {
             onArrowRight: { handleArrow(direction: +1) },
             onEnter:      { handleEnter() },
             onSpace:      { handleSpaceKey() },
-            onCmdF:       { focusTarget = .search },
+            onCmdF: {
+                focusTarget = .search
+            },
             onEsc: {
                 if focusTarget == .search {
                     // 搜索态：清空查询 + 焦点回到卡片（不关闭面板）。
@@ -170,7 +197,7 @@ struct ClipboardOverlayView: View {
                     controller.dismiss()
                 }
             },
-            isEditingText: { focusTarget == .search },
+            isEditingText: { controller.isEditingAnyText || controller.hasModalPresentation },
             isPreviewingTextView: { previewIsOpen && controller.firstResponderIsTextView }
         ).frame(width: 0, height: 0))
         // 搜索/筛选变化导致列表缩短时，把 selectedIndex 拉回有效范围。
@@ -237,6 +264,39 @@ struct ClipboardOverlayView: View {
                 showClearAlert = false
             }
         }
+        // 新建分组 alert（分组按钮或卡片右键「新建分组」触发）。
+        .alert("新建分组", isPresented: $showNewGroupAlert) {
+            TextField("分组名称", text: $newGroupName)
+            Button("创建") {
+                let gid = manager.createGroup(name: newGroupName)
+                if let item = pendingAssignItem {
+                    manager.assign(item, toGroup: gid)
+                    pendingAssignItem = nil
+                } else {
+                    activeGroupID = gid
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingAssignItem = nil
+            }
+        } message: {
+            Text("输入新分组名称")
+        }
+        // 管理分组：右键 Tag 触发重命名 / 删除，不再使用独立 sheet。
+        .alert("重命名分组", isPresented: $showRenameGroupAlert) {
+            TextField("分组名称", text: $renameGroupName)
+            Button("重命名") {
+                if let group = actionGroup {
+                    manager.renameGroup(group.id, name: renameGroupName)
+                }
+                actionGroup = nil
+            }
+            Button("取消", role: .cancel) {
+                actionGroup = nil
+            }
+        } message: {
+            Text("输入新的分组名称")
+        }
     }
 
     // MARK: - Search bar (compact, centered)
@@ -247,7 +307,7 @@ struct ClipboardOverlayView: View {
 
     private func searchBar(filtered: [ClipboardItem]) -> some View {
         HStack(spacing: 12) {
-            // 1. 统计数量（左）：渐变图标 chip + 计数（Aurora v2）。
+            // 左：统计数量（渐变图标 chip + 计数）。
             HStack(spacing: 8) {
                 AuroraIconChip(systemName: "list.clipboard", size: 26)
                 Text("\(filtered.count) 条")
@@ -255,65 +315,92 @@ struct ClipboardOverlayView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: 0)
+            // 中：分组 Tag（水平滚动，占中间区域）。
+            groupTagRow
 
-            // 2. 搜索框 + 筛选按钮（中）：胶囊玻璃搜索框。
-            // 聚焦时外圈品牌渐变描边（聚焦环），非聚焦发丝描边。
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(focusTarget == .search
-                                     ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
-                                     : AnyShapeStyle(.secondary))
-                TextField("搜索…", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14))
-                    .frame(width: 170)
-                    .lineLimit(1)
-                    // 与卡片共享 @FocusState：仅当用户主动点击此处或按 ⌘F
-                    // 时才获得焦点，避免面板出现时自动抢占焦点导致 ←/→ 失效。
-                    .focused($focusTarget, equals: .search)
-                filterButton
+            // 右：搜索框 + 删除按钮。
+            HStack(spacing: 8) {
+                searchGroup
+                ClearHistoryButton { showClearAlert = true }
             }
-            .padding(.horizontal, 12)
-            .frame(height: 36)
-            .background(
-                Capsule()
-                    .fill(.ultraThinMaterial)
-            )
-            // 单 overlay 描边：聚焦时用品牌渐变 1.5pt，非聚焦时用极淡 primary 0.08。
-            // 之前两个堆叠 overlay 在聚焦时同时渲染（primary 底 + 渐变聚焦环），
-            // 形成双描边视觉污染。合并为条件内容后只渲染一层。
-            .overlay(
-                Capsule()
-                    .strokeBorder(focusTarget == .search
-                                   ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
-                                   : AnyShapeStyle(Color.primary.opacity(0.08)),
-                                  lineWidth: focusTarget == .search ? 1.5 : 1)
-            )
-            // 筛选菜单 overlay 锚定在这个搜索框组的右上角，菜单紧贴筛选
-            // 按钮下方出现。offset(y: 42) 让菜单越过 36pt 高度 + 一点间隙。
-            .overlay(alignment: .topTrailing) {
-                if showFilterMenu {
-                    filterMenu
-                        .offset(y: 42)
-                        .zIndex(999)
-                        .transition(.opacity)
-                        .transaction { $0.animation = nil }
-                        .onTapGesture { /* swallow */ }
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            // 3. 删除按钮（右）—— 圆形 hover 红色淡底，点击弹出确认 alert。
-            ClearHistoryButton { showClearAlert = true }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         // 头部高度 58pt，所有元素垂直居中。
         .frame(height: 58, alignment: .center)
         .zIndex(1)
+    }
+
+    /// 搜索是否处于展开态：聚焦中或已有查询文本。
+    private var isSearchActive: Bool {
+        focusTarget == .search || !query.isEmpty
+    }
+
+    /// 搜索框：默认只显示放大镜图标，点击/⌘F 聚焦后展开输入框。
+    /// 聚焦时外圈品牌渐变描边（聚焦环），非聚焦发丝描边；筛选菜单锚定在
+    /// 展开态胶囊的右上角。
+    private var searchGroup: some View {
+        // 折叠态 spacing 归 0：图标是唯一可见内容，正好独占可用宽度居中。
+        // 展开态恢复 spacing 6。否则折叠态 TextField(宽 0) 仍占一个 spacing，
+        // 内容宽度(图标+spacing) 超出胶囊可用区，图标几何偏移。
+        HStack(spacing: isSearchActive ? 6 : 0) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(focusTarget == .search
+                                 ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                                 : AnyShapeStyle(.secondary))
+                .frame(width: 20, height: 20)
+            // TextField 始终保留在视图树中（不做条件插入）——否则折叠态下
+            // @FocusState 没有可聚焦的目标，search 无法生效。用宽度 + 透明度
+            // 控制展开/折叠，聚焦始终有目标对象。
+            TextField("搜索…", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .frame(width: isSearchActive ? 170 : 0)
+                .opacity(isSearchActive ? 1 : 0)
+                .lineLimit(1)
+                // 与卡片共享 @FocusState：仅当用户主动点击此处或按 ⌘F
+                // 时才获得焦点，避免面板出现时自动抢占焦点导致 ←/→ 失效。
+                .focused($focusTarget, equals: .search)
+                .allowsHitTesting(isSearchActive)
+            if isSearchActive {
+                filterButton
+            }
+        }
+        .padding(.horizontal, isSearchActive ? 12 : 8)
+        .frame(height: 36)
+        .frame(width: isSearchActive ? nil : 36)
+        .background(
+            Capsule()
+                .fill(.ultraThinMaterial)
+        )
+        // 单 overlay 描边：聚焦时用品牌渐变 1.5pt，非聚焦时用极淡 primary 0.08。
+        .overlay(
+            Capsule()
+                .strokeBorder(focusTarget == .search
+                               ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                               : AnyShapeStyle(Color.primary.opacity(0.08)),
+                              lineWidth: focusTarget == .search ? 1.5 : 1)
+        )
+        // 折叠态点击整颗胶囊聚焦展开。
+        .contentShape(Rectangle())
+        .onTapGesture {
+            focusTarget = .search
+        }
+        // 筛选菜单 overlay 锚定在这个搜索框组的右上角，菜单紧贴筛选
+        // 按钮下方出现。offset(y: 42) 让菜单越过 36pt 高度 + 一点间隙。
+        .overlay(alignment: .topTrailing) {
+            if showFilterMenu {
+                filterMenu
+                    .offset(y: 42)
+                    .zIndex(999)
+                    .transition(.opacity)
+                    .transaction { $0.animation = nil }
+                    .onTapGesture { /* swallow */ }
+            }
+        }
     }
 
     private var filterButton: some View {
@@ -356,6 +443,89 @@ struct ClipboardOverlayView: View {
                 )
         )
         .shadow(color: DesignTokens.Aurora.floatShadowColor, radius: 12, y: 4)
+    }
+
+    // MARK: - 分组（平铺 Tag）
+
+    /// 分组平铺 Tag 行：全部 + 各分组 + 末尾 + 新建。
+    /// 点 Tag 切换分组；右键 Tag 重命名/删除；+ 图标新建分组。
+    /// 与搜索框同一行，占剩余宽度（标签多时内部滚动）。
+    private var groupTagRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                groupTag(id: nil, label: "全部", isActive: activeGroupID == nil) {
+                    activeGroupID = nil
+                }
+                ForEach(manager.groups) { group in
+                    groupTag(id: group.id,
+                             label: group.name,
+                             color: ClipboardGroupPalette.color(group.colorIndex),
+                             isActive: activeGroupID == group.id) {
+                        activeGroupID = group.id
+                    }
+                    .contextMenu {
+                        Button("重命名…") {
+                            actionGroup = group
+                            renameGroupName = group.name
+                            showRenameGroupAlert = true
+                        }
+                        Button("删除") {
+                            manager.deleteGroup(group.id)
+                            if activeGroupID == group.id { activeGroupID = nil }
+                        }
+                    }
+                }
+                // 末尾 + 图标：新建分组。
+                Button {
+                    pendingAssignItem = nil
+                    newGroupName = ""
+                    showNewGroupAlert = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .background(Capsule().fill(.ultraThinMaterial))
+                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+                }
+                .buttonStyle(.borderless)
+                .help("新建分组")
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(height: 30)
+    }
+
+    /// 单个分组 Tag 胶囊。color 为 nil（「全部」）时不显示色点。
+    private func groupTag(id: UUID?, label: String, color: Color? = nil, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let color {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                } else {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 9, weight: .medium))
+                }
+                Text(label)
+                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isActive
+                             ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                             : AnyShapeStyle(Color.primary.opacity(0.95)))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(Capsule().fill(isActive
+                                       ? DesignTokens.Aurora.tint.opacity(0.14)
+                                       : Color.primary.opacity(0.16)))
+            .overlay(Capsule().strokeBorder(isActive
+                                            ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+                                            : AnyShapeStyle(Color.primary.opacity(0.12)),
+                                            lineWidth: isActive ? 1.2 : 1))
+        }
+        .buttonStyle(.borderless)
     }
 
     private func filterRow(_ kind: ClipboardItem.ContentKind?, label: String) -> some View {
@@ -421,7 +591,28 @@ struct ClipboardOverlayView: View {
 
     @ViewBuilder
     private func cardStrip(filtered: [ClipboardItem]) -> some View {
-        if filtered.isEmpty {
+        if !manager.isLoaded {
+            // 历史尚未从磁盘加载完成（loadFromDisk 异步）：显示全面板居中的
+            // 加载占位，避免误判为空历史导致「只出现头部操作栏 / 无数据小窗口」。
+            // 视觉与空状态一致（Aurora 渐变圆托底），撑满面板、上下居中。
+            VStack {
+                Spacer()
+                VStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(DesignTokens.Aurora.brandGradient.opacity(0.10))
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    .frame(width: 56, height: 56)
+                    Text("正在加载剪切板历史…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if filtered.isEmpty {
             VStack {
                 Spacer()
                 VStack(spacing: 10) {
@@ -459,9 +650,8 @@ struct ClipboardOverlayView: View {
                     // 100 条历史时滚动明显掉帧。
                     LazyHStack(spacing: 12) {
                         ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
-                            // 卡片高亮 = 鼠标 hover OR 键盘选中（任一为 true）。
-                            // 视觉上鼠标与键盘状态合并，避免双重边框冲突。
-                            let isHighlighted = hoverID == item.id || index == selectedIndex
+                            // 卡片高亮 = 鼠标 hover OR 键盘选中 OR 多选中的任一项。
+                            let isHighlighted = hoverID == item.id || index == selectedIndex || manager.isBatchSelected(item)
                             ClipboardCard(item: item,
                                          isHover: isHighlighted,
                                          isDimmed: previewIsOpen && previewItem?.id != item.id,
@@ -478,10 +668,18 @@ struct ClipboardOverlayView: View {
                                 }
                                 .onTapGesture {
                                     selectedIndex = index
-                                    // 点击卡片后焦点切回卡片区，便于后续键盘操作。
                                     focusTarget = .cards
-                                    if previewIsOpen { closePreview() }
-                                    else { reapply(item) }
+                                    let flags = NSEvent.modifierFlags
+                                    if flags.contains(.command) {
+                                        // Cmd 点击：切换多选。
+                                        manager.toggleBatchSelection(item)
+                                    } else if flags.contains(.shift) {
+                                        // Shift 点击：Finder 式区间多选。
+                                        manager.extendBatchSelection(to: item)
+                                    } else {
+                                        if previewIsOpen { closePreview() }
+                                        else { reapply(item) }
+                                    }
                                 }
                                 .contextMenu {
                                     Button("预览") {
@@ -493,6 +691,26 @@ struct ClipboardOverlayView: View {
                                         selectedIndex = index
                                         focusTarget = .cards
                                         reapply(item)
+                                    }
+                                    Divider()
+                                    Menu("添加到分组") {
+                                        Button("全部（移出分组）") {
+                                            manager.assign(item, toGroup: nil)
+                                        }
+                                        if !manager.groups.isEmpty {
+                                            Divider()
+                                            ForEach(manager.groups) { group in
+                                                Button(group.name) {
+                                                    manager.assign(item, toGroup: group.id)
+                                                }
+                                            }
+                                        }
+                                        Divider()
+                                        Button("新建分组…") {
+                                            pendingAssignItem = item
+                                            newGroupName = ""
+                                            showNewGroupAlert = true
+                                        }
                                     }
                                     Divider()
                                     Button("删除") { manager.remove(item) }
@@ -578,11 +796,39 @@ struct ClipboardOverlayView: View {
         controller.onReapply?(item)
     }
 
+    /// 多选底部操作条：非空时显示「已选 N 项 + 复制全部/清除」。
+    @ViewBuilder
+    private var batchFooter: some View {
+        if !manager.batchSelectionIDs.isEmpty {
+            HStack(spacing: 12) {
+                Text("已选 \(manager.batchSelectionIDs.count) 项")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button("清除") { manager.clearBatchSelection() }
+                Button("复制全部") { copyBatch() }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+        }
+    }
+
+    /// 复制全部选中项（批量复制/粘贴）。
+    private func copyBatch() {
+        let items = manager.selectedBatchItems()
+        guard !items.isEmpty else { return }
+        manager.clearBatchSelection()
+        controller.dismiss()
+        controller.onReapplyBatch?(items)
+    }
+
     /// 空格键触发：若预览已开则关闭；否则预览当前选中卡片。
     private func handleSpaceKey() {
-        // 用 focusTarget 判断搜索框聚焦，避免 NSApp.keyWindow 在 nonactivatingPanel
-        // 场景下取错导致误判。
-        let editingText = focusTarget == .search
+        // 用 controller.isEditingAnyText 判断是否正在编辑文本（搜索框或
+        // modal alert 的 TextField）；hasModalPresentation 覆盖无文本框的
+        // 模态 alert（如清空确认）。避免在输入分组名或弹窗确认时按空格
+        // 误触发预览。
+        let editingText = controller.isEditingAnyText || controller.hasModalPresentation
         if previewIsOpen {
             closePreview()
         } else if !editingText,
@@ -593,7 +839,7 @@ struct ClipboardOverlayView: View {
 
     /// ←/→ 切换选中卡片。搜索框聚焦时不拦截，让 TextField 处理光标移动。
     private func handleArrow(direction: Int) {
-        let editingText = focusTarget == .search
+        let editingText = controller.isEditingAnyText
         guard !editingText, !filtered.isEmpty else { return }
         if previewIsOpen { closePreview() }
         // 循环导航：到达边界后绕回另一端。
@@ -603,7 +849,7 @@ struct ClipboardOverlayView: View {
 
     /// 回车复制当前选中卡片。搜索框聚焦时不拦截（让 TextField 提交）。
     private func handleEnter() {
-        let editingText = focusTarget == .search
+        let editingText = controller.isEditingAnyText
         guard !editingText, filtered.indices.contains(selectedIndex) else { return }
         let item = filtered[selectedIndex]
         if previewIsOpen { closePreview() }
@@ -764,6 +1010,22 @@ private enum FocusTarget: Hashable {
     case search
 }
 
+/// `filtered` 搜索/筛选结果缓存的引用容器。见 ClipboardOverlayView 中
+/// `filterCacheBox` 的注释：用 box 持有缓存，避免在 body 求值期间写
+/// @State setter 触发「Modifying state during view update」告警。
+private final class FilterCacheBox {
+    var value: FilterCache?
+}
+
+/// 搜索过滤结果缓存快照：query/filter/分组/数据代次均未变时复用结果。
+private struct FilterCache {
+    let query: String
+    let filter: ClipboardItem.ContentKind?
+    let groupID: UUID?
+    let stamp: Int
+    let result: [ClipboardItem]
+}
+
 /// 放大预览卡片：与常规 ClipboardCard 同结构（header/middle/footer），
 /// 但内容完整可滚动（RTFTextView 无行数限制、图片文件异步加载预览、
 /// 链接显示完整 URL）。footer 含操作按钮。
@@ -814,7 +1076,7 @@ private struct ClipboardPreviewCard: View {
                     await MainActor.run { loadedFileImage = NSImage(data: data) }
                 }
             }
-            // 冷数据图片（>7天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
+            // 冷数据图片（>3天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
             // 预览卡片同样需要触发 warmUp，否则全屏预览显示空白。
             if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
                 await item.warmUpAsync()
@@ -1082,7 +1344,7 @@ private struct ClipboardCard: View {
                     await MainActor.run { loadedFileImage = NSImage(data: data) }
                 }
             }
-            // 冷数据图片（>7天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
+            // 冷数据图片（>3天）：warmUpAsync() 从磁盘加载 TIFF Data + thumbnail。
             // 之前卡片渲染路径完全不触发 warmUp，冷数据图片显示空白 NSImage()。
             // warmUpAsync 内部用 Task.detached 在后台读盘，回主线程更新 kind，
             // 避免阻塞主线程。

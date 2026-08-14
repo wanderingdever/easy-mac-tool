@@ -20,8 +20,14 @@ final class AppSettings: ObservableObject {
     /// When true, re-selecting a clipboard item auto-pastes into the previously
     /// frontmost app (Paste-style). When false, only copies back to clipboard.
     @Published var clipboardAutoPaste: Bool = true { didSet { debouncePersist() } }
+    /// 默认纯文本粘贴：开启后重新选中历史条目时只写回纯文本（剥掉 RTF/格式），
+    /// 适合代码/网页粘贴场景。图片/文件/颜色条目不受影响。
+    @Published var clipboardPlainPaste: Bool = false { didSet { debouncePersist() } }
     /// Lets users suspend clipboard observation without quitting the app.
     @Published var clipboardCapturingEnabled: Bool = true { didSet { debouncePersist() } }
+    /// 用户可配置的「忽略来源 app」bundleID 列表：这些 app 复制的剪贴板内容
+    /// 不被记录（如 IM、特定工具）。在硬编码密码黑名单之上叠加。
+    @Published var ignoredClipboardApps: [String] = [] { didSet { debouncePersist() } }
     /// 链接预览：开启后对复制的 http/https URL 后台抓取网页标题与站点图标
     /// （类 Paste 链接卡片）。默认关闭——复制私有/带 token 的链接时 app 主动
     /// 访问可能触发服务端副作用或泄露信息，需用户明确知情开启。
@@ -29,6 +35,35 @@ final class AppSettings: ObservableObject {
     /// 窗口切换功能全局开关。关闭后所有窗口切换快捷键透传至系统，
     /// 恢复 macOS 原生 Cmd+Tab 行为。
     @Published var windowSwitcherEnabled: Bool = true { didSet { debouncePersist() } }
+
+    // MARK: - 系统监控
+    /// 系统监控总开关。关闭时不采样、不启动定时器、菜单栏不渲染指标块（零开销）。
+    @Published var systemMonitorEnabled: Bool = false { didSet { debouncePersist() } }
+    /// 采样间隔（秒）。
+    @Published var monitorInterval: Int = 2 { didSet { debouncePersist() } }
+    /// 温度单位（TemperatureUnit.rawValue）。
+    @Published var temperatureUnit: String = TemperatureUnit.celsius.rawValue { didSet { debouncePersist() } }
+    /// 各菜单栏指标是否启用（key: MenuBarMetric.settingsKey → enabled）。
+    @Published var menuBarMetrics: [String: Bool] = [:] { didSet { debouncePersist() } }
+    /// 菜单栏指标显示顺序（MenuBarMetric.rawValue 数组）。
+    @Published var menuBarMetricOrder: [String] = [] { didSet { debouncePersist() } }
+    /// 设置页预览区各 section 是否显示。
+    @Published var monitorShowCPU: Bool = true { didSet { debouncePersist() } }
+    @Published var monitorShowGPU: Bool = true { didSet { debouncePersist() } }
+    @Published var monitorShowMemory: Bool = true { didSet { debouncePersist() } }
+    @Published var monitorShowNetwork: Bool = true { didSet { debouncePersist() } }
+    @Published var monitorShowDisk: Bool = true { didSet { debouncePersist() } }
+    @Published var monitorShowPower: Bool = true { didSet { debouncePersist() } }
+
+    // MARK: - 窗口布局
+    /// 窗口布局总开关。关闭后不匹配任何布局快捷键、不安装径向监视器（零监听）。
+    @Published var windowLayoutEnabled: Bool = false { didSet { debouncePersist() } }
+    /// 径向菜单（按住鼠标中键 + 移动鼠标）是否启用。
+    @Published var windowLayoutRadialEnabled: Bool = true { didSet { debouncePersist() } }
+    /// 径向菜单的修饰键长按触发（区分左右）。modifiersRaw==0 表示未启用键盘触发。
+    @Published var windowLayoutRadialKeyTrigger: RadialKeyTrigger = .none { didSet { debouncePersist() } }
+    /// 每个布局动作的自定义快捷键。
+    @Published var windowLayoutShortcuts: [LayoutShortcut] = WindowLayoutAction.defaultShortcuts { didSet { debouncePersist() } }
 
     private let defaults = UserDefaults.standard
     private let storageKey = "appSettings.v1"
@@ -74,6 +109,32 @@ final class AppSettings: ObservableObject {
            clipboardShortcut.keyCode == keyCode,
            clipboardShortcut.modifiers == modifiers {
             return "已被剪切板快捷键使用"
+        }
+        return nil
+    }
+
+    /// Reject duplicate global shortcut combinations for window layout actions.
+    /// Checks against window-switcher shortcuts, the clipboard shortcut, and
+    /// other layout shortcuts.
+    func layoutShortcutConflictMessage(keyCode: CGKeyCode,
+                                       modifiers: CGEventFlags,
+                                       excludingAction: WindowLayoutAction) -> String? {
+        if Self.isReservedSystemCombo(keyCode: keyCode, modifiers: modifiers) {
+            return "系统保留快捷键，不可使用"
+        }
+        if let existing = shortcuts.first(where: {
+            $0.keyCode == keyCode && $0.modifiers == modifiers
+        }) {
+            return "已被窗口切换快捷键「\(existing.name)」使用"
+        }
+        if clipboardShortcut.keyCode == keyCode,
+           clipboardShortcut.modifiers == modifiers {
+            return "已被剪切板快捷键使用"
+        }
+        if let existing = windowLayoutShortcuts.first(where: {
+            $0.action != excludingAction && $0.keyCode == keyCode && $0.modifiers == modifiers
+        }) {
+            return "已被窗口布局「\(existing.action.displayName)」使用"
         }
         return nil
     }
@@ -173,9 +234,29 @@ final class AppSettings: ObservableObject {
         var clipboardShortcut: ShortcutConfig?
         var clipboardHistoryLimit: Int?
         var clipboardAutoPaste: Bool?
+        var clipboardPlainPaste: Bool?
         var clipboardCapturingEnabled: Bool?
+        var ignoredClipboardApps: [String]?
         var clipboardLinkPreviewEnabled: Bool?
         var windowSwitcherEnabled: Bool?
+
+        // 系统监控
+        var systemMonitorEnabled: Bool?
+        var monitorInterval: Int?
+        var temperatureUnit: String?
+        var menuBarMetrics: [String: Bool]?
+        var menuBarMetricOrder: [String]?
+        var monitorShowCPU: Bool?
+        var monitorShowGPU: Bool?
+        var monitorShowMemory: Bool?
+        var monitorShowNetwork: Bool?
+        var monitorShowDisk: Bool?
+        var monitorShowPower: Bool?
+        // 窗口布局
+        var windowLayoutEnabled: Bool?
+        var windowLayoutRadialEnabled: Bool?
+        var windowLayoutRadialKeyTrigger: RadialKeyTrigger?
+        var windowLayoutShortcuts: [LayoutShortcut]?
     }
 
     private func persist() {
@@ -185,9 +266,26 @@ final class AppSettings: ObservableObject {
             clipboardShortcut: clipboardShortcut,
             clipboardHistoryLimit: clipboardHistoryLimit,
             clipboardAutoPaste: clipboardAutoPaste,
+            clipboardPlainPaste: clipboardPlainPaste,
             clipboardCapturingEnabled: clipboardCapturingEnabled,
+            ignoredClipboardApps: ignoredClipboardApps,
             clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled,
-            windowSwitcherEnabled: windowSwitcherEnabled
+            windowSwitcherEnabled: windowSwitcherEnabled,
+            systemMonitorEnabled: systemMonitorEnabled,
+            monitorInterval: monitorInterval,
+            temperatureUnit: temperatureUnit,
+            menuBarMetrics: menuBarMetrics,
+            menuBarMetricOrder: menuBarMetricOrder,
+            monitorShowCPU: monitorShowCPU,
+            monitorShowGPU: monitorShowGPU,
+            monitorShowMemory: monitorShowMemory,
+            monitorShowNetwork: monitorShowNetwork,
+            monitorShowDisk: monitorShowDisk,
+            monitorShowPower: monitorShowPower,
+            windowLayoutEnabled: windowLayoutEnabled,
+            windowLayoutRadialEnabled: windowLayoutRadialEnabled,
+            windowLayoutRadialKeyTrigger: windowLayoutRadialKeyTrigger,
+            windowLayoutShortcuts: windowLayoutShortcuts
         )
         do {
             let data = try JSONEncoder().encode(snapshot)
@@ -211,14 +309,36 @@ final class AppSettings: ObservableObject {
             if let cs = snapshot.clipboardShortcut { clipboardShortcut = cs }
             if let limit = snapshot.clipboardHistoryLimit { clipboardHistoryLimit = limit }
             if let autoPaste = snapshot.clipboardAutoPaste { clipboardAutoPaste = autoPaste }
+            if let plainPaste = snapshot.clipboardPlainPaste { clipboardPlainPaste = plainPaste }
             if let capturingEnabled = snapshot.clipboardCapturingEnabled {
                 clipboardCapturingEnabled = capturingEnabled
+            }
+            if let ignoredApps = snapshot.ignoredClipboardApps {
+                ignoredClipboardApps = ignoredApps
             }
             if let linkPreview = snapshot.clipboardLinkPreviewEnabled {
                 clipboardLinkPreviewEnabled = linkPreview
             }
             if let wsEnabled = snapshot.windowSwitcherEnabled {
                 windowSwitcherEnabled = wsEnabled
+            }
+            if let v = snapshot.systemMonitorEnabled { systemMonitorEnabled = v }
+            if let v = snapshot.monitorInterval { monitorInterval = v }
+            if let v = snapshot.temperatureUnit { temperatureUnit = v }
+            if let v = snapshot.menuBarMetrics { menuBarMetrics = v }
+            if let v = snapshot.menuBarMetricOrder { menuBarMetricOrder = v }
+            if let v = snapshot.monitorShowCPU { monitorShowCPU = v }
+            if let v = snapshot.monitorShowGPU { monitorShowGPU = v }
+            if let v = snapshot.monitorShowMemory { monitorShowMemory = v }
+            if let v = snapshot.monitorShowNetwork { monitorShowNetwork = v }
+            if let v = snapshot.monitorShowDisk { monitorShowDisk = v }
+            if let v = snapshot.monitorShowPower { monitorShowPower = v }
+            if let v = snapshot.windowLayoutEnabled { windowLayoutEnabled = v }
+            if let v = snapshot.windowLayoutRadialEnabled { windowLayoutRadialEnabled = v }
+            if let v = snapshot.windowLayoutRadialKeyTrigger { windowLayoutRadialKeyTrigger = v }
+            // 空数组时保持默认（默认无快捷键），不覆盖用户清空后的状态
+            if let layouts = snapshot.windowLayoutShortcuts, !layouts.isEmpty {
+                windowLayoutShortcuts = layouts
             }
         } catch {
             Self.logger.error("Failed to decode persisted settings: \(error.localizedDescription, privacy: .public). Using defaults.")

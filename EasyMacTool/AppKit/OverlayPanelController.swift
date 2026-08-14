@@ -98,6 +98,8 @@ final class OverlayPanelController: ObservableObject {
 
         positionPanel()
         panel.orderFrontRegardless()
+        // 同步 event tap 路由镜像：面板已可见，tap 线程需将该会话路由到主线程。
+        HotkeyManager.shared.setSwitcherOpen(true)
         // Make the panel key so it accepts mouse clicks immediately (first click
         // works without needing to click twice).
         // 注意：不能用 NSApp.activate()——它会把 EasyMacTool 变成前台 app，
@@ -118,6 +120,7 @@ final class OverlayPanelController: ObservableObject {
         axWatchTimer = nil
         panel.orderOut(nil)
         // isSwitcherOpen 现在是计算属性，orderOut 后自动变为 false。
+        HotkeyManager.shared.setSwitcherOpen(false)
         HotkeyManager.shared.resetActiveShortcut()
         items = []
         selectedIndex = 0

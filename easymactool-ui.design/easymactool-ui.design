@@ -13,10 +13,10 @@
         "group": 0,
         "layoutSnapshot": {
           "version": 1,
-          "contentHeight": 752,
+          "contentHeight": 900,
           "viewportWidth": 1440,
           "sourceHash": "fnv1a-d3b2ae44",
-          "measuredAt": 1785483103485
+          "measuredAt": 1786610871338
         }
       },
       "devMetadata": {
@@ -153,12 +153,7 @@
       "createdAt": 1722336000,
       "canvasData": {
         "x": 0,
-        "y": 1116,
-        "overrideWidth": 360,
-        "naturalSize": {
-          "width": 1024,
-          "height": 1024
-        }
+        "y": 1131
       },
       "devMetadata": {
         "imageSrc": "assets/app-icon-v3.png"
@@ -172,12 +167,8 @@
       "version": 1,
       "createdAt": 1722336000,
       "canvasData": {
-        "x": 516,
-        "y": 1080,
-        "naturalSize": {
-          "width": 1024,
-          "height": 1024
-        }
+        "x": 504,
+        "y": 1080
       },
       "devMetadata": {
         "imageSrc": "assets/menubar-icon-bw-v3.png"
@@ -192,14 +183,44 @@
       "createdAt": 1722336000,
       "canvasData": {
         "x": 1044,
-        "y": 1092,
-        "naturalSize": {
-          "width": 1024,
-          "height": 1024
-        }
+        "y": 1092
       },
       "devMetadata": {
         "imageSrc": "assets/menubar-icon-color-v3.png"
+      }
+    },
+    {
+      "id": "image-004",
+      "type": "image",
+      "name": "菜单栏 Bar UI",
+      "title": "菜单栏 Bar UI · 窗口切换",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 0,
+        "y": 2200
+      },
+      "devMetadata": {
+        "imageSrc": "assets/menubar-bar-ui.jpg"
+      }
+    },
+    {
+      "id": "image-005",
+      "type": "image",
+      "name": "同心圆窗口切换 Bar",
+      "title": "同心圆窗口切换 Bar · 放射布局",
+      "version": 1,
+      "createdAt": 1722336000,
+      "canvasData": {
+        "x": 620,
+        "y": 2200,
+        "naturalSize": {
+          "width": 1920,
+          "height": 1920
+        }
+      },
+      "devMetadata": {
+        "imageSrc": "assets/menubar-bar-ui-v2.jpg"
       }
     }
   ],

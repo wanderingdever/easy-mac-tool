@@ -62,9 +62,44 @@ final class WindowActivator {
 
         let axApp = AXUIElementCreateApplication(item.pid)
         guard let window = resolvedWindow ?? findAXWindow(axApp, matching: item) else { return false }
+        focus(window: window, pid: item.pid)
+        // Space 切换 / 部分 app 的 main window 是异步落位（晚一两个 run loop），
+        // 单次设置可能失败。按延迟序列重试 focus，直到前台稳定为目标 app。
+        scheduleFocusRetries(item: item, delays: [0.12])
+        return true
+    }
+
+    /// Returns the app's frontmost pid if it matches the target; nil otherwise.
+    /// 仅当目标 app 仍是前台时才重试，避免在用户已切走的窗口上抢焦点。
+    private static func frontmostPID(matching pid: pid_t) -> pid_t? {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              front.processIdentifier == pid else { return nil }
+        return pid
+    }
+
+    /// 对一个窗口做强 focus：设为 app 的 focused/main 窗口并 raise。
+    private func focus(window: AXUIElement, pid: pid_t) {
+        let axApp = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, window)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        return true
+    }
+
+    /// 激活后按延迟序列重试 focus，处理异步落位窗口（全屏 / 慢应用）。
+    /// 每次重试前守卫：目标 app 仍在运行、仍是前台、目标窗口仍可解析。
+    private func scheduleFocusRetries(item: WindowItem, delays: [TimeInterval]) {
+        let pid = item.pid
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                // 目标 app 已退出，或前台已不是目标 app（用户已切走），放弃重试。
+                guard let app = NSRunningApplication(processIdentifier: pid),
+                      !app.isTerminated,
+                      Self.frontmostPID(matching: pid) != nil else { return }
+                let axApp = AXUIElementCreateApplication(pid)
+                guard let window = self.findAXWindow(axApp, matching: item) else { return }
+                self.focus(window: window, pid: pid)
+            }
+        }
     }
 
     /// Closes the window by pressing its AX close button.

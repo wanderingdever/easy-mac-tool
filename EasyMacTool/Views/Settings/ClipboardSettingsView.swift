@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Clipboard-history settings (Aurora v2)：分组卡片布局。
 /// 呼出快捷键 / 行为 / 历史 三个 section，每个 = 渐变图标 chip 标题 +
@@ -67,13 +68,29 @@ struct ClipboardSettingsView: View {
 
     private var hotkeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("快捷键", systemImage: "keyboard")
+            sectionHeader("通用", systemImage: "gear")
             sectionCard {
+                toggleRow(
+                      isOn: Binding(
+                          get: { settings.clipboardCapturingEnabled },
+                          set: { newValue in
+                              if settings.clipboardCapturingEnabled != newValue {
+                                  settings.clipboardCapturingEnabled = newValue
+                                  ClipboardManager.shared.setCapturing(newValue)
+                              }
+                          }
+                      ),
+                      title: "启用剪切板",
+                      desc: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。"
+                  )
+                  Rectangle()
+                      .fill(DesignTokens.Aurora.insetSeparator)
+                      .frame(height: 1)
+                
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("快捷键")
-                        .font(.system(size: DesignTokens.SettingsTypography.formLabel))
+                        .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
                         .foregroundStyle(.primary)
-                        .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                     KeyRecorderView(
                         keyCode: $settings.clipboardShortcut.keyCode,
                         modifiers: $settings.clipboardShortcut.modifiers,
@@ -87,7 +104,7 @@ struct ClipboardSettingsView: View {
                     )
                     Spacer(minLength: 0)
                 }
-                Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。密码框、登录界面等安全输入场景下，macOS 会禁用全局快捷键，属系统安全限制。")
+                Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。")
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
                     .foregroundStyle(.secondary)
             }
@@ -100,22 +117,6 @@ struct ClipboardSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("行为", systemImage: "switch.2")
             sectionCard {
-              toggleRow(
-                    isOn: Binding(
-                        get: { settings.clipboardCapturingEnabled },
-                        set: { newValue in
-                            if settings.clipboardCapturingEnabled != newValue {
-                                settings.clipboardCapturingEnabled = newValue
-                                ClipboardManager.shared.setCapturing(newValue)
-                            }
-                        }
-                    ),
-                    title: "启用剪切板",
-                    desc: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。"
-                )
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
                 toggleRow(
                     isOn: $settings.clipboardAutoPaste,
                     title: "自动粘贴",
@@ -125,12 +126,106 @@ struct ClipboardSettingsView: View {
                     .fill(DesignTokens.Aurora.insetSeparator)
                     .frame(height: 1)
                 toggleRow(
+                    isOn: $settings.clipboardPlainPaste,
+                    title: "纯文本粘贴",
+                    desc: "重新选中文本/链接/颜色时只写回纯文本（剥掉字体、颜色等格式）。图片与文件不受影响。"
+                )
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(height: 1)
+                toggleRow(
                     isOn: $settings.clipboardLinkPreviewEnabled,
                     title: "链接预览",
-                    desc: "开启后对复制的网页链接后台获取标题与站点图标。默认关闭：复制私有或带访问令牌的链接时，应用会主动访问该地址，可能触发服务端副作用。"
+                    desc: "开启后对复制的网页链接后台获取标题与站点图标。"
                 )
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(height: 1)
+                ignoredAppsEditor
             }
         }
+    }
+
+    /// 「忽略来源 app」编辑器：从应用列表选择添加，列表可移除。
+    private var ignoredAppsEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("忽略来源 app")
+                .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
+                .foregroundStyle(.primary)
+            Text("这些应用复制的剪贴板内容将不被记录。")
+                .font(.system(size: DesignTokens.SettingsTypography.caption))
+                .foregroundStyle(.secondary)
+            Button {
+                presentIgnoreAppPicker()
+            } label: {
+                Label("选择要忽略的应用…", systemImage: "plus")
+            }
+            if !settings.ignoredClipboardApps.isEmpty {
+                ForEach(settings.ignoredClipboardApps, id: \.self) { bundleID in
+                    HStack(spacing: 8) {
+                        AppIconView(bundleID: bundleID)
+                        Text(appDisplayName(for: bundleID))
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Button {
+                            settings.ignoredClipboardApps.removeAll { $0 == bundleID }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 调起系统原生 NSOpenPanel 选择要忽略的 .app 包，读取所选包的
+    /// bundle ID 加入忽略列表。可多选，含未打开的应用。
+    private func presentIgnoreAppPicker() {
+        let panel = NSOpenPanel()
+        panel.title = "选择要忽略的应用"
+        panel.prompt = "选择"
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.application] // 仅 .app 包
+        // 本 app 是菜单栏 app，设置窗口是唯一 canBecomeMain 窗口；优先以
+        // sheet 挂载 key window，无 key window 时回退独立模态，避免面板无宿主。
+        if let keyWindow = NSApp.keyWindow {
+            panel.beginSheetModal(for: keyWindow) { response in
+                self.applySelectedApps(from: panel, response: response)
+            }
+        } else {
+            panel.begin { response in
+                self.applySelectedApps(from: panel, response: response)
+            }
+        }
+    }
+
+    /// 把 NSOpenPanel 选中的 .app 包 bundle ID 追加到忽略列表（去重）。
+    private func applySelectedApps(from panel: NSOpenPanel, response: NSApplication.ModalResponse) {
+        guard response == .OK else { return }
+        for url in panel.urls {
+            guard let bundleID = Bundle(url: url)?.bundleIdentifier,
+                  !bundleID.isEmpty,
+                  !settings.ignoredClipboardApps.contains(bundleID) else { continue }
+            settings.ignoredClipboardApps.append(bundleID)
+        }
+    }
+
+    /// 从 bundle ID 解析应用显示名（找不到回退到 bundle ID）。
+    private func appDisplayName(for bundleID: String) -> String {
+        if let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == bundleID }) {
+            return app.localizedName ?? bundleID
+        }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return url.deletingPathExtension().lastPathComponent
+        }
+        return bundleID
     }
 
     /// Toggle row：标题 toggleTitle(15pt) medium + 描述 caption(12pt) secondary，
@@ -252,6 +347,21 @@ private struct DestructiveOutlineButton<Label: View>: View {
                         .strokeBorder(DesignTokens.Colors.error.opacity(0.6), lineWidth: 1)
                 )
                 .animation(DesignTokens.Aurora.standard, value: isHovering)
+        }
+    }
+}
+
+/// 按 bundle ID 显示应用图标（复用 AppIconCache，未运行的 app 显示占位符）。
+private struct AppIconView: View {
+    let bundleID: String
+    var body: some View {
+        if let icon = AppIconCache.icon(for: bundleID) {
+            Image(nsImage: icon)
+                .resizable()
+                .frame(width: 22, height: 22)
+        } else {
+            Image(systemName: "app")
+                .frame(width: 22, height: 22)
         }
     }
 }

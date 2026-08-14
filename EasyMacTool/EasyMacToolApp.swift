@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let openSettings = Notification.Name("EasyMacToolOpenSettings")
+    static let focusSystemMonitorSection = Notification.Name("EasyMacToolFocusSystemMonitorSection")
 }
 
 /// Wires the hotkey manager to the enumerator, capture manager, activator,
@@ -166,6 +167,39 @@ final class AppCoordinator {
             self?.handle(event)
         }
         HotkeyManager.shared.start()
+        // 系统监控：按总开关启停采样，并常驻菜单栏指标渲染控制器。
+        SystemMonitor.shared.setEnabled(settings.systemMonitorEnabled, interval: settings.monitorInterval)
+        _ = SystemMonitorMenuBarController.shared
+        settings.$systemMonitorEnabled
+            .dropFirst()
+            .sink { enabled in
+                SystemMonitor.shared.setEnabled(enabled, interval: settings.monitorInterval)
+            }
+            .store(in: &cancellables)
+        settings.$monitorInterval
+            .dropFirst()
+            .sink { interval in
+                SystemMonitor.shared.setInterval(seconds: interval)
+            }
+            .store(in: &cancellables)
+        // 窗口布局：总开关 + 径向开关/触发键联动 RadialLayoutController，
+        // 布局快捷键由 HotkeyManager 的 RouteMirror 同步（见其 bindSettings）。
+        WindowLayoutManager.shared  // 预热（无副作用，单例常驻）
+        syncRadialController()
+        settings.$windowLayoutEnabled
+            .dropFirst()
+            .sink { [weak self] _ in self?.syncRadialController() }
+            .store(in: &cancellables)
+        settings.$windowLayoutRadialEnabled
+            .dropFirst()
+            .sink { [weak self] _ in self?.syncRadialController() }
+            .store(in: &cancellables)
+        settings.$windowLayoutRadialKeyTrigger
+            .dropFirst()
+            .sink { [weak self] _ in self?.syncRadialController() }
+            .store(in: &cancellables)
+        // 后台预热窗口缩略图缓存，让切换器冷窗口首次呼出即有图。
+        captureManager.startWarming()
         // CGEventTap 健康监控定时器：
         // 1. 首次启动时用户可能尚未授权辅助功能，定时器检测到 isTrusted=true
         //    后调用 start() 重建 tap。
@@ -243,6 +277,9 @@ final class AppCoordinator {
             .store(in: &cancellables)
         clipboardPanelController.onReapply = { [weak self] item in
             self?.reapplyClipboard(item)
+        }
+        clipboardPanelController.onReapplyBatch = { [weak self] items in
+            self?.reapplyClipboardBatch(items)
         }
     }
 
@@ -363,6 +400,20 @@ final class AppCoordinator {
             }
         case .clipboard:
             toggleClipboard()
+        case .layoutAction(let action):
+            RadialLayoutController.shared.clearActiveAction()
+            _ = WindowLayoutManager.shared.apply(action)
+        }
+    }
+
+    /// Enables/disables the radial layout controller based on the current
+    /// settings (master switch + radial sub-switch) and trigger configuration.
+    private func syncRadialController() {
+        let enabled = settings.windowLayoutEnabled && settings.windowLayoutRadialEnabled
+        if enabled {
+            RadialLayoutController.shared.start(keyTrigger: settings.windowLayoutRadialKeyTrigger)
+        } else {
+            RadialLayoutController.shared.stop()
         }
     }
 
@@ -486,6 +537,10 @@ final class AppCoordinator {
 
     private func commitSelection() {
         if let item = panelController.selectedItem {
+            // 提交瞬间显式记录切换，让快速来回切换的 MRU 立即跟手。
+            AppUsageTracker.shared.recordSwitch(to: item.id,
+                                                pid: item.pid,
+                                                from: AppUsageTracker.shared.focusedWindowID)
             activator.activate(item)
             closeSwitcher()
         } else if openTask != nil, !panelController.isPresented {
@@ -521,6 +576,9 @@ final class AppCoordinator {
 
     /// Called when the user clicks a cell while the switcher is open.
     func activateItem(_ item: WindowItem) {
+        AppUsageTracker.shared.recordSwitch(to: item.id,
+                                            pid: item.pid,
+                                            from: AppUsageTracker.shared.focusedWindowID)
         activator.activate(item)
         closeSwitcher()
     }
@@ -550,12 +608,20 @@ final class AppCoordinator {
     /// by the time this runs (see ClipboardPanelController.onReapply), so the
     /// previously frontmost app regains focus before we (optionally) paste.
     private func reapplyClipboard(_ item: ClipboardItem) {
-        clipboardManager.reapply(item,
-                                  autoPaste: settings.clipboardAutoPaste,
-                                  expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
-        // tap 健康检查已移到 ClipboardManager.simulatePaste() 内部：
-        // 无论 warmUpAsync 耗时多久（文本立即、冷图片数秒），simulatePaste
-        // 执行后都会在 50ms 后检查并恢复 tap。原 0.2s 检查在 reapplyClipboard
-        // 调用时刻计时，对冷图片场景失效（0.2s 时 simulatePaste 还没执行）。
+        if settings.clipboardPlainPaste {
+            clipboardManager.reapplyPlain(item,
+                                           autoPaste: settings.clipboardAutoPaste,
+                                           expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
+        } else {
+            clipboardManager.reapply(item,
+                                      autoPaste: settings.clipboardAutoPaste,
+                                      expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
+        }
+    }
+
+    /// 批量复制/粘贴（多选 → 复制全部）。
+    private func reapplyClipboardBatch(_ items: [ClipboardItem]) {
+        clipboardManager.reapplyBatch(autoPaste: settings.clipboardAutoPaste,
+                                       expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
     }
 }

@@ -81,7 +81,7 @@ struct PermissionsSettingsView: View {
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("权限", systemImage: "checkmark.shield")
-            Text("EasyMacTool 需要以下权限才能正常运行。点击「请求权限」后会同时调用系统 API 并打开系统设置，让应用出现在列表中，再开启开关。授权后约 2 秒状态自动刷新。")
+            Text("需要以下权限才能正常运行，点击「请求权限」后会同时调用系统 API 并打开系统设置，让应用出现在列表中，再开启开关。授权后约 2 秒状态自动刷新。")
                 .font(.system(size: DesignTokens.SettingsTypography.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

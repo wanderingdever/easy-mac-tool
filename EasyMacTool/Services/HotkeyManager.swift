@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreGraphics
 import os
 
@@ -12,6 +13,7 @@ enum HotkeyEvent {
     case close                 // Cmd+Q while open
     case minimize              // Cmd+W while open
     case clipboard             // summon the clipboard history panel
+    case layoutAction(WindowLayoutAction)  // a window-layout shortcut fired
 }
 
 /// Virtual key codes (from Carbon/HIToolbook Events.h) — inlined to avoid the
@@ -28,23 +30,103 @@ private enum VK {
     static let w: CGKeyCode = 0x0D           // 13
 }
 
+/// Thread-safe mirror of the minimal routing state the background tap thread
+/// reads. Written only on the main thread; read by the tap thread under lock.
+/// This lets the tap decide "is this event interesting?" with pure math and no
+/// main-thread round trip, so ordinary keys never block on (or freeze with) the
+/// main run loop.
+private final class RouteMirror: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _isRecording = false
+    /// True while a switcher session is open *or in flight* (shortcut pressed,
+    /// panel not yet shown). The tap must keep routing key/flags events to the
+    /// main thread during that window so release detection (flick) still works.
+    private var _sessionActive = false
+    private var _clipboardEnabled = false
+    private var _clipboardKeyCode: CGKeyCode = 0
+    private var _clipboardMods: CGEventFlags = []
+    private var _switcherEnabled = false
+    private var _switcherCombos: [(keyCode: CGKeyCode, mods: CGEventFlags)] = []
+    private var _layoutEnabled = false
+    private var _layoutCombos: [(keyCode: CGKeyCode, mods: CGEventFlags, action: WindowLayoutAction)] = []
+    private var _syntheticMarker: Int64 = 0
+
+    var isRecording: Bool { lock.lock(); defer { lock.unlock() }; return _isRecording }
+    var sessionActive: Bool { lock.lock(); defer { lock.unlock() }; return _sessionActive }
+    var syntheticMarker: Int64 { lock.lock(); defer { lock.unlock() }; return _syntheticMarker }
+
+    var clipboardEnabled: Bool { lock.lock(); defer { lock.unlock() }; return _clipboardEnabled }
+    /// (keyCode, modifiers) or nil when disabled.
+    var clipboardCombo: (keyCode: CGKeyCode, mods: CGEventFlags)? {
+        lock.lock(); defer { lock.unlock() }
+        return _clipboardEnabled ? (_clipboardKeyCode, _clipboardMods) : nil
+    }
+    var switcherEnabled: Bool { lock.lock(); defer { lock.unlock() }; return _switcherEnabled }
+    var switcherCombos: [(keyCode: CGKeyCode, mods: CGEventFlags)] {
+        lock.lock(); defer { lock.unlock() }; return _switcherCombos
+    }
+    var layoutEnabled: Bool { lock.lock(); defer { lock.unlock() }; return _layoutEnabled }
+    var layoutCombos: [(keyCode: CGKeyCode, mods: CGEventFlags, action: WindowLayoutAction)] {
+        lock.lock(); defer { lock.unlock() }; return _layoutCombos
+    }
+
+    func setRecording(_ value: Bool) { lock.lock(); defer { lock.unlock() }; _isRecording = value }
+    func setSessionActive(_ value: Bool) { lock.lock(); defer { lock.unlock() }; _sessionActive = value }
+    func setSyntheticMarker(_ value: Int64) { lock.lock(); defer { lock.unlock() }; _syntheticMarker = value }
+
+    func setClipboard(enabled: Bool, keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        lock.lock(); defer { lock.unlock() }
+        _clipboardEnabled = enabled
+        _clipboardKeyCode = keyCode
+        _clipboardMods = modifiers
+    }
+    func setSwitcher(enabled: Bool, combos: [(keyCode: CGKeyCode, mods: CGEventFlags)]) {
+        lock.lock(); defer { lock.unlock() }
+        _switcherEnabled = enabled
+        _switcherCombos = combos
+    }
+    func setLayout(enabled: Bool, combos: [(keyCode: CGKeyCode, mods: CGEventFlags, action: WindowLayoutAction)]) {
+        lock.lock(); defer { lock.unlock() }
+        _layoutEnabled = enabled
+        _layoutCombos = combos
+    }
+}
+
 /// Owns the `CGEventTap` that intercepts the system Cmd+Tab and routes semantic
-/// events to `onEvent`. All callbacks arrive on the main run loop.
+/// events to `onEvent`.
+///
+/// The tap runs on its own dedicated thread (not the main run loop). A live
+/// `.defaultTap` makes the WindowServer hold every keystroke in the login
+/// session until the callback returns, so a main-thread stall would freeze
+/// typing system-wide. The callback therefore does only pure-math routing off a
+/// lock-protected mirror and hands matched events to the main thread via a
+/// synchronous hop; ordinary keys are passed straight through without waiting.
 @MainActor
 final class HotkeyManager {
     static let shared = HotkeyManager()
-    private static let logger = Logger(subsystem: "com.easymactool", category: "HotkeyManager")
+    nonisolated private static let logger = Logger(subsystem: "com.easymactool", category: "HotkeyManager")
 
-    /// Set by `AppCoordinator`. Invoked synchronously from the event tap (main thread).
+    /// Marks synthetic events this app posts (clipboard paste), so the tap can
+    /// skip them and never re-enter on its own output. "EAST".
+    static let syntheticMarker: Int64 = 0x4541_5354
+
+    /// Restrict to the modifier bits we care about (drop non-modifier flags).
+    nonisolated private static let modifierMask: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+
+    /// Set by `AppCoordinator`. Invoked from the main thread (via handle).
     var onEvent: (@MainActor (HotkeyEvent) -> Void)?
 
     /// The live `AppSettings` — read at event time so config edits take effect
     /// without restarting the event tap.
-    var settings: AppSettings?
+    var settings: AppSettings? {
+        didSet {
+            guard let settings else { return }
+            syncRouteMirror()
+            bindSettings(settings)
+        }
+    }
 
     /// True iff the switcher overlay is currently on screen.
-    /// 计算属性：直接反映 OverlayPanel.isVisible，避免手动同步导致的
-    /// 状态不一致（panel 被系统隐藏但 isSwitcherOpen 仍为 true → Tab 被劫持）。
     var isSwitcherOpen: Bool {
         switcherPanel?.isVisible ?? false
     }
@@ -53,94 +135,155 @@ final class HotkeyManager {
     private weak var switcherPanel: OverlayPanel?
 
     /// When true, the event tap passes ALL events through without processing.
-    /// Used during shortcut recording so key presses reach the recorder
-    /// without being intercepted by the tap.
-    /// 计算属性：基于 recordingSessions 引用计数。之前是布尔，两个
-    /// KeyRecorderView 同时进入录制态时，先结束的一方把它置 false，
-    /// 仍在录制的另一方按键会被 event tap 正常拦截（录制失灵）。
+    /// 计算属性：基于 recordingSessions 引用计数。
     private(set) var isRecording: Bool = false
     /// 录制会话引用计数：每次 beginRecording +1，endRecording -1。
     private var recordingSessions = 0
 
-    /// 进入快捷键录制（引用计数 +1）。与 endRecording 成对调用。
-    func beginRecording() {
-        recordingSessions += 1
-        isRecording = true
-    }
-
-    /// 退出快捷键录制（引用计数 -1，归零才真正恢复 event tap 拦截）。
-    func endRecording() {
-        assert(recordingSessions > 0, "beginRecording/endRecording not paired")
-        recordingSessions = max(0, recordingSessions - 1)
-        isRecording = recordingSessions > 0
-    }
-
     /// The shortcut whose key combo opened the switcher, so we can detect its
     /// hold-modifier release and apply the configured release behavior.
-    /// 作为单一数据源：AppCoordinator 通过 setActiveShortcut/resetActiveShortcut 读写，
-    /// 避免两个独立 activeShortcut 变量不同步导致快速操作时状态混乱。
     internal private(set) var activeShortcut: ShortcutConfig?
 
-    private var machPort: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var currentFlags: CGEventFlags = []
+    /// Thread lifecycle state. Only touched under `lifecycleLock`; the tap
+    /// thread reads/writes its own run loop fields there too.
+    private nonisolated(unsafe) let lifecycleLock = NSLock()
+    private nonisolated(unsafe) var tap: CFMachPort?
+    private nonisolated(unsafe) var runLoopSource: CFRunLoopSource?
+    private nonisolated(unsafe) var tapRunLoop: CFRunLoop?
+    private nonisolated(unsafe) var tapThread: Thread?
+    private nonisolated(unsafe) var shouldStopTapThread = false
+    private nonisolated(unsafe) var pendingStartAfterStop = false
 
-    private init() {}
+    /// Routing mirror read by the tap thread.
+    private nonisolated(unsafe) let routeMirror = RouteMirror()
+    private var cancellables = Set<AnyCancellable>()
+
+    private init() {
+        routeMirror.setSyntheticMarker(Self.syntheticMarker)
+    }
 
     /// 注册切换器面板，供 isSwitcherOpen 计算属性查询。
     func setSwitcherPanel(_ panel: OverlayPanel) {
         switcherPanel = panel
+        updateSessionMirror()
     }
 
     /// 设置当前打开切换器的快捷键。由 AppCoordinator.openSwitcher 调用。
     func setActiveShortcut(_ shortcut: ShortcutConfig?) {
         activeShortcut = shortcut
+        updateSessionMirror()
+    }
+
+    /// 切换器面板实际显示/隐藏时同步镜像（由 OverlayPanelController 调用）。
+    func setSwitcherOpen(_ open: Bool) {
+        updateSessionMirror()
+    }
+
+    /// Called by `OverlayPanelController` when the switcher closes.
+    func resetActiveShortcut() {
+        setActiveShortcut(nil)
+    }
+
+    /// 同步镜像.sessionActive：会话「进行中或已打开」即需要主线程路由。
+    private func updateSessionMirror() {
+        routeMirror.setSessionActive(activeShortcut != nil || isSwitcherOpen)
+    }
+
+    func beginRecording() {
+        recordingSessions += 1
+        isRecording = true
+        routeMirror.setRecording(true)
+    }
+
+    func endRecording() {
+        assert(recordingSessions > 0, "beginRecording/endRecording not paired")
+        recordingSessions = max(0, recordingSessions - 1)
+        isRecording = recordingSessions > 0
+        routeMirror.setRecording(isRecording)
+    }
+
+    /// 把当前 settings 的快捷键路由信息同步进镜像（tap 线程只读）。
+    func syncRouteMirror() {
+        guard let settings else { return }
+        routeMirror.setSyntheticMarker(Self.syntheticMarker)
+        routeMirror.setClipboard(enabled: settings.clipboardCapturingEnabled,
+                                 keyCode: settings.clipboardShortcut.keyCode,
+                                 modifiers: settings.clipboardShortcut.modifiers)
+        routeMirror.setSwitcher(enabled: settings.windowSwitcherEnabled,
+                                combos: settings.shortcuts.map { ($0.keyCode, $0.modifiers) })
+        routeMirror.setLayout(enabled: settings.windowLayoutEnabled,
+                              combos: settings.windowLayoutShortcuts.map { ($0.keyCode, $0.modifiers, $0.action) })
+    }
+
+    private func bindSettings(_ settings: AppSettings) {
+        cancellables = []
+        settings.$clipboardCapturingEnabled
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
+        settings.$clipboardShortcut
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
+        settings.$windowSwitcherEnabled
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
+        settings.$shortcuts
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
+        settings.$windowLayoutEnabled
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
+        settings.$windowLayoutShortcuts
+            .sink { [weak self] _ in self?.syncRouteMirror() }
+            .store(in: &cancellables)
     }
 
     func start() {
         // 若 machPort 已存在但 tap 已被系统禁用（睡眠唤醒、锁屏、长时间运行等），
-        // 先 stop 清理旧资源再重建，避免 guard machPort == nil 阻止恢复。
-        if let port = machPort, !CGEvent.tapIsEnabled(tap: port) {
+        // 先 stop 清理旧资源再重建。
+        if let port = tap, !CGEvent.tapIsEnabled(tap: port) {
             stop()
         }
-        guard machPort == nil else { return }
-        let mask: CGEventMask =
-            (1 << CGEventType.keyDown.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue)
-
-        guard let port = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: hotkeyCallback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            // Missing Accessibility permission or sandbox is still on.
-            // 静默返回会让快捷键失效且无任何反馈，难以排查。
-            Self.logger.error("CGEvent.tapCreate failed — needs Accessibility permission")
-            return
+        let thread = lifecycleLock.withLock { () -> Thread? in
+            if tapThread != nil {
+                if shouldStopTapThread { pendingStartAfterStop = true }
+                return nil
+            }
+            shouldStopTapThread = false
+            pendingStartAfterStop = false
+            let t = Thread { [weak self] in self?.runEventTap() }
+            t.name = "EasyMacTool Hotkey"
+            t.qualityOfService = .userInteractive
+            tapThread = t
+            return t
         }
-        machPort = port
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
-        runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        thread?.start()
     }
 
     func stop() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            runLoopSource = nil
+        let snapshot = lifecycleLock.withLock { () -> (runLoop: CFRunLoop?, tap: CFMachPort?, threadExists: Bool) in
+            shouldStopTapThread = true
+            pendingStartAfterStop = false
+            return (tapRunLoop, tap, tapThread != nil)
         }
-        if let port = machPort {
+        if let port = snapshot.tap {
             // 必须先禁用再 invalidate，彻底释放 system-level CGEventTap 资源。
-            // 只把 machPort 引用设为 nil 会让 tap 在系统层面继续存在，
-            // 每次 restart() 都会积累僵尸 tap，最终触及系统 tap 数量上限
-            // 导致 CGEvent.tapCreate 返回 nil，快捷键永久失效。
-            // 与 AccessibilityChecker 和 PermissionsSettingsView 中的做法一致。
             CGEvent.tapEnable(tap: port, enable: false)
-            CFMachPortInvalidate(port)
-            machPort = nil
+        }
+        if let runLoop = snapshot.runLoop {
+            // 从外部停止 run loop，绝不 join——停止与 tap 线程正在主线程上的工作
+            // 之间不会互相死锁。
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+                CFRunLoopStop(runLoop)
+            }
+            CFRunLoopWakeUp(runLoop)
+        } else if !snapshot.threadExists {
+            lifecycleLock.withLock {
+                shouldStopTapThread = false
+                tapThread = nil
+            }
         }
     }
 
@@ -150,99 +293,190 @@ final class HotkeyManager {
         start()
     }
 
-    /// 检测 CGEventTap 是否仍然有效。machPort 存在且 tap 仍启用时为 true。
-    /// AppCoordinator.hotkeyRetryTimer 定期检查，失效时调用 restart() 恢复。
+    /// 检测 CGEventTap 是否仍然有效。AppCoordinator.hotkeyRetryTimer 定期检查。
     var isTapHealthy: Bool {
-        guard let port = machPort else { return false }
+        guard let port = tap else { return false }
         return CGEvent.tapIsEnabled(tap: port)
     }
 
-    /// Called by `OverlayPanelController` when the switcher closes.
-    func resetActiveShortcut() {
-        activeShortcut = nil
+    // MARK: - Tap thread
+
+    nonisolated private func runEventTap() {
+        autoreleasepool {
+            let runLoop = CFRunLoopGetCurrent()
+            lifecycleLock.withLock { tapRunLoop = runLoop }
+
+            guard !lifecycleLock.withLock({ shouldStopTapThread }) else {
+                if clearEventTapThread() { restartOnMain() }
+                return
+            }
+
+            let mask: CGEventMask =
+                (1 << CGEventType.keyDown.rawValue) |
+                (1 << CGEventType.flagsChanged.rawValue)
+            guard let port = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .defaultTap,
+                eventsOfInterest: mask,
+                callback: hotkeyCallback,
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            ) else {
+                Self.logger.error("CGEvent.tapCreate failed — needs Accessibility permission")
+                _ = clearEventTapThread()
+                return
+            }
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+            lifecycleLock.withLock { tap = port; runLoopSource = source }
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            CGEvent.tapEnable(tap: port, enable: true)
+
+            if lifecycleLock.withLock({ shouldStopTapThread }) {
+                CGEvent.tapEnable(tap: port, enable: false)
+            } else {
+                CFRunLoopRun()
+            }
+
+            CGEvent.tapEnable(tap: port, enable: false)
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+            if clearEventTapThread() { restartOnMain() }
+        }
     }
 
-    // MARK: - Tap callback (called on main run loop)
+    nonisolated private func clearEventTapThread() -> Bool {
+        lifecycleLock.withLock {
+            let shouldRestart = pendingStartAfterStop
+            tap = nil
+            runLoopSource = nil
+            tapRunLoop = nil
+            tapThread = nil
+            shouldStopTapThread = false
+            pendingStartAfterStop = false
+            return shouldRestart
+        }
+    }
+
+    nonisolated private func restartOnMain() {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.start() }
+        }
+    }
+
+    /// Runs on the tap thread. Pure-math routing: only events the main thread
+    /// may actually consume hop over; everything else passes straight through.
+    nonisolated fileprivate func route(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            let currentTap = lifecycleLock.withLock { shouldStopTapThread ? nil : tap }
+            if let currentTap { CGEvent.tapEnable(tap: currentTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        // 自家合成事件（如剪贴板粘贴）：绝不重新进入处理流程。
+        if event.getIntegerValueField(.eventSourceUserData) == routeMirror.syntheticMarker {
+            return Unmanaged.passUnretained(event)
+        }
+        // 录制快捷键时放行所有键。
+        if routeMirror.isRecording {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let sessionActive = routeMirror.sessionActive
+        switch type {
+        case .keyDown:
+            if sessionActive {
+                return dispatchToMain(event)
+            }
+            // 会话未开：只有命中配置快捷键才值得派发主线程（纯数学匹配）。
+            let keyCode = CGKeyCode(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
+            let mods = event.flags.intersection(Self.modifierMask)
+            let clipMatch = routeMirror.clipboardCombo.map { $0.keyCode == keyCode && $0.mods == mods } == true
+            let switcherMatch = routeMirror.switcherEnabled
+                && routeMirror.switcherCombos.contains { $0.keyCode == keyCode && $0.mods == mods }
+            let layoutMatch = routeMirror.layoutEnabled
+                && routeMirror.layoutCombos.contains { $0.keyCode == keyCode && $0.mods == mods }
+            if clipMatch || switcherMatch || layoutMatch {
+                return dispatchToMain(event)
+            }
+            return Unmanaged.passUnretained(event)
+        case .flagsChanged:
+            // 会话未开时修饰键翻转与快捷键无关，直接放行；会话中才需主线程
+            // 做释放检测（含轻点 flick 的 in-flight 窗口）。
+            if sessionActive {
+                return dispatchToMain(event)
+            }
+            return Unmanaged.passUnretained(event)
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+    }
+
+    /// Synchronous hop to the main thread. The tap holds the login session's
+    /// keystrokes until this returns, so it must stay fast; it is only reached
+    /// for events the switcher may actually consume.
+    nonisolated private func dispatchToMain(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated { handle(event: event) }
+        }
+    }
+
+    // MARK: - Main-thread handling
 
     fileprivate func handle(event: CGEvent) -> Unmanaged<CGEvent>? {
         let type = event.type
 
-        // The system can temporarily disable the tap under load; re-arm it.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            // 诊断日志：便于区分「快捷键未触发（tap 被系统禁用）」与「面板定位失败」。
-            // 安全输入（SecureInput，密码框等）期间系统会禁用所有 event tap，
-            // 此日志会频繁出现——是系统安全限制，会话结束后自动恢复。
-            Self.logger.warning("[HotkeyManager] event tap disabled (\(type.rawValue)) — re-enabling")
-            if let port = machPort {
+            // 安全输入（SecureInput，密码框等）期间系统会禁用所有 event tap。
+            if let port = tap {
                 CGEvent.tapEnable(tap: port, enable: true)
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
-        // During shortcut recording, pass all events through unmodified so
-        // the recorder can capture the exact key combo without interference.
+        if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticMarker {
+            return Unmanaged.passUnretained(event)
+        }
+
         if isRecording {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         if type == .flagsChanged {
             return handleFlagsChanged(event)
         }
-
-        // keyDown
         return handleKeyDown(event)
     }
 
     private func handleFlagsChanged(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let oldFlags = currentFlags
-        currentFlags = event.flags
-
-        // 检测修饰键释放并应用释放行为。
-        // 之前用 isSwitcherOpen 作为前置条件，但 activeShortcut 在 handleKeyDown
-        // 中设置后、openSwitcher 异步 snapshot 完成前，面板尚未 visible（isSwitcherOpen=false），
-        // 此时用户释放修饰键会导致释放检测被跳过，面板永远无法自动关闭（竞态条件）。
+        // 修饰键释放检测。activeShortcut 只在按住修饰键打开时被设置，所以
+        // “需要的修饰键不再被按住”即等于“释放”——无需跨事件跟踪 oldFlags。
         if let shortcut = activeShortcut {
-            let requiredModifiers = shortcut.modifiers
+            let required = shortcut.modifiers
                 .intersection([.maskCommand, .maskControl, .maskAlternate])
-            if !requiredModifiers.isEmpty {
-                let stillHeld = currentFlags.contains(requiredModifiers)
-                let wasHeld = oldFlags.contains(requiredModifiers)
-                if wasHeld && !stillHeld {
+            if !required.isEmpty {
+                let stillHeld = event.flags.intersection(required) == required
+                if !stillHeld {
                     switch shortcut.releaseBehavior {
                     case .focus:
                         // 释放即激活选中窗口（AltTab 默认行为）
                         onEvent?(.activate)
                     case .hold:
-                        // 释放后保持打开（AltTab "释放后按住"行为）：
-                        // 切换器不消失，用户可以鼠标 hover 看预览、
-                        // 单击卡片立即切换、Esc / 点击外部关闭。
-                        // 关键：清空 activeShortcut 但保持 isSwitcherOpen=true。
-                        // 这样用户再按 Cmd+Shift+Tab 时，handleKeyDown 中
-                        // `if isSwitcherOpen` 分支的 Tab 处理会先检查
-                        // activeShortcut 是否为 nil——若 nil 说明已释放过，
-                        // 应当作新的 .open 而非 .prev，避免卡死。
+                        // 释放后保持打开（AltTab "释放后按住"行为）
                         activeShortcut = nil
+                        updateSessionMirror()
                     }
                 }
             }
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     private func handleKeyDown(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = CGKeyCode(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
-        let modifiers = event.flags.intersection(modifierMask)
+        let modifiers = event.flags.intersection(Self.modifierMask)
 
-        // 剪贴板快捷键优先检测（独立于窗口切换器，无论切换器是否打开都生效）。
-        // 必须在 matchShortcut 之前，否则当剪贴板快捷键与某个 window switcher
-        // 快捷键的 keyCode+modifiers 完全相同时，matchShortcut 会先匹配触发 .open，
-        // 剪贴板快捷键被永久屏蔽，用户按 Cmd+Shift+V 会打开切换器而非剪切板。
-        // 剪切板功能关闭时，快捷键透传至系统，不做任何处理。
+        // 剪贴板快捷键优先检测（独立于窗口切换器）。
         if settings?.clipboardCapturingEnabled == true,
            let cs = settings?.clipboardShortcut,
            cs.keyCode == keyCode && cs.modifiers == modifiers {
-            // autorepeat 守卫：按住剪贴板快捷键时系统会连续产生重复 keyDown。
-            // 第一次按下已触发 .clipboard，重复事件直接吞掉，避免面板反复开合。
             if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
                 return nil
             }
@@ -250,32 +484,33 @@ final class HotkeyManager {
             return nil
         }
 
-        // Switcher open: handle navigation keys (regardless of which shortcut opened it).
+        // 窗口布局快捷键：独立于窗口切换器/剪贴板，命中即触发布局动作。
+        if !isSwitcherOpen,
+           settings?.windowLayoutEnabled == true,
+           let action = matchLayoutAction(keyCode: keyCode, modifiers: modifiers) {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
+            // 权限预检：缺辅助功能权限时不吞事件，避免全局劫持却无效果。
+            if !AccessibilityChecker.missingPermissions.isEmpty {
+                return Unmanaged.passUnretained(event)
+            }
+            onEvent?(.layoutAction(action))
+            return nil
+        }
+
         if isSwitcherOpen {
-            // 关键修复：在 .hold 模式下，用户释放 modifier 后 activeShortcut
-            // 被清空（但 isSwitcherOpen 仍为 true）。此时用户再按 Cmd+Shift+Tab
-            // 应当作新的 .open（重新打开切换器），而非 .prev（在已打开的切换器
-            // 里导航）。否则用户重复按快捷键会被解释为 .prev，切换器永不关闭，
-            // 键盘被劫持，用户感觉"卡死"。
-            // 逻辑：如果当前 modifiers 完整匹配某个配置的 shortcut，且
-            // activeShortcut 为 nil（说明 .hold 模式已释放过），当作新的 open。
             if activeShortcut == nil,
                settings?.windowSwitcherEnabled == true,
                let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
                 activeShortcut = shortcut
+                updateSessionMirror()
                 onEvent?(.open(shortcut))
                 return nil
             }
 
             switch keyCode {
             case VK.tab:
-                // Tab cycles forward, Shift+Tab cycles backward while the switcher is open.
-                // .hold 释放后 activeShortcut 为 nil 但切换器仍打开（AltTab 风格），
-                // 此时 Tab 仍应作为导航键，避免用户感觉切换器卡死。
-                // 注意：上面 activeShortcut==nil && matchShortcut 分支已拦截"完整快捷键重按"
-                // 的情况，走到这里的 nil 一定是 .hold 释放后的纯 Tab 键。
-                // 用 event.flags 而非 currentFlags：flagsChanged 事件在 tap 重启周期中
-                // 被丢弃时 currentFlags 会过期，而 event.flags 是当前事件的最新状态。
                 onEvent?(event.flags.contains(.maskShift) ? .prev : .next)
                 return nil
             case VK.return:
@@ -294,65 +529,53 @@ final class HotkeyManager {
                 break
             }
 
-            // 切换器打开期间吞掉未匹配的无修饰可打印按键：panel 是
-            // nonactivatingPanel，passRetained 会把按键派发给前台 app，
-            // 用户在切换器上随手按到字母键会直接输入到当前文档中。
-            // 带 Command/Control/Option 的组合键仍放行（可能是有意义的系统操作）。
+            // 切换器打开期间吞掉未匹配的无修饰可打印按键，避免漏进前台 app。
             let hardModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate]
             if modifiers.intersection(hardModifiers).isEmpty { return nil }
         }
 
-        // Switcher closed (or no matching nav key): check if this key combo opens it.
-        // 窗口切换功能关闭时，快捷键透传至系统（恢复原生 Cmd+Tab 行为）。
         if !isSwitcherOpen,
            settings?.windowSwitcherEnabled == true,
            let shortcut = matchShortcut(keyCode: keyCode, modifiers: modifiers) {
-            // autorepeat 守卫：按住快捷键时系统连续产生重复 keyDown（初始按下已触发
-            // .open 并启动异步 snapshot）。若不拦截，每个重复事件都会重新走 .open →
-            // openTask?.cancel() + 新 snapshot，快照被反复取消重启（SCShareableContent
-            // 与 Task.detached AX 预取不可中途取消，还会堆积后台 IPC），面板迟迟无法
-            // 出现——即"高频连按/长按快捷键无法呼出"的放大器。重复事件直接吞掉。
             if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
                 return nil
             }
             // 权限预检：若权限缺失，不吞事件，让 Cmd+Tab 传递到系统作为兜底。
-            // 否则权限被撤销时事件被吞但切换器打不开，用户感觉快捷键卡死。
-            // openSwitcher 中会再次检查权限并弹设置页，这里只负责事件路由决策。
             if !AccessibilityChecker.missingPermissions.isEmpty {
-                return Unmanaged.passRetained(event)
+                return Unmanaged.passUnretained(event)
             }
             activeShortcut = shortcut
+            updateSessionMirror()
             onEvent?(.open(shortcut))
-            return nil  // swallow the opening keypress
+            return nil
         }
 
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     /// Returns the configured shortcut whose key combo matches the event, or nil.
     private func matchShortcut(keyCode: CGKeyCode, modifiers: CGEventFlags) -> ShortcutConfig? {
         guard let shortcuts = settings?.shortcuts else { return nil }
-        // 防御性排除系统保留组合：即使旧版本设置中已存留了保留组合
-        // （黑名单校验是后加的），也不匹配不吞键，让系统正常响应。
         if AppSettings.isReservedSystemCombo(keyCode: keyCode, modifiers: modifiers) {
             return nil
         }
-        // Exact match: same key, same modifiers (including Shift for backward variants).
         return shortcuts.first { $0.keyCode == keyCode && $0.modifiers == modifiers }
     }
 
-    /// Restrict to the modifier bits we care about (drop non-modifier flags).
-    private var modifierMask: CGEventFlags {
-        [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+    /// Returns the window-layout action whose shortcut matches the event, or nil.
+    private func matchLayoutAction(keyCode: CGKeyCode, modifiers: CGEventFlags) -> WindowLayoutAction? {
+        guard let shortcuts = settings?.windowLayoutShortcuts else { return nil }
+        if AppSettings.isReservedSystemCombo(keyCode: keyCode, modifiers: modifiers) {
+            return nil
+        }
+        return shortcuts.first { $0.keyCode == keyCode && $0.modifiers == modifiers }?.action
     }
 }
 
 // `@convention(c)` bridge: cannot capture `self`, so we pass it via `userInfo`.
-private let hotkeyCallback: CGEventTapCallBack = { _, _, event, userInfo in
+// Runs on the dedicated tap thread.
+private let hotkeyCallback: CGEventTapCallBack = { _, type, event, userInfo in
     guard let userInfo = userInfo else { return nil }
     let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
-    // The tap runs on the main run loop, so we can re-enter MainActor synchronously.
-    return MainActor.assumeIsolated {
-        manager.handle(event: event)
-    }
+    return manager.route(type: type, event: event)
 }

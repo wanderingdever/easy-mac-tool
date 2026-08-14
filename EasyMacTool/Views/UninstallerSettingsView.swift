@@ -1,0 +1,352 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// 卸载器设置页（Aurora v2）：拖入或选择 .app，查看残留文件并移至废纸篓。
+struct UninstallerSettingsView: View {
+    @ObservedObject private var uninstaller = AppUninstaller.shared
+    @State private var apps: [InstalledApps.InstalledApp] = []
+    @State private var appQuery = ""
+    @State private var isScanningApps = false
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(DesignTokens.Aurora.pageBackground)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch uninstaller.phase {
+        case .empty: emptyState
+        case .scanning: busyState("正在扫描残留文件…")
+        case .results: resultsState
+        case .removing: busyState("正在移动至废纸篓…")
+        case let .done(freed, failed): doneState(freed: freed, failed: failed)
+        }
+    }
+
+    // MARK: Empty / app list
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("已安装应用")
+                    .font(.system(size: 16, weight: .semibold))
+                Text("\(uninstallableApps.count) 个")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: refreshApps) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("刷新应用列表")
+                if isScanningApps {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            TextField("搜索应用…", text: $appQuery)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+            appList
+            Text("卸载操作会将文件移至废纸篓，可随时恢复。")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear(perform: loadAppsIfNeeded)
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let app = urls.first(where: { $0.pathExtension == "app" }) ?? urls.first else { return false }
+            uninstaller.select(appURL: app)
+            return true
+        } isTargeted: { _ in }
+    }
+
+    /// 可卸载的非系统应用：排除本应用自身与符号链接。
+    private var uninstallableApps: [InstalledApps.InstalledApp] {
+        apps.filter { app in
+            app.url.standardizedFileURL != Bundle.main.bundleURL.standardizedFileURL
+                && !Self.isSymbolicLink(app.url)
+        }
+    }
+
+    private var filteredApps: [InstalledApps.InstalledApp] {
+        let trimmed = appQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return uninstallableApps }
+        return uninstallableApps.filter { app in
+            app.name.localizedCaseInsensitiveContains(trimmed)
+                || (app.bundleID?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
+    }
+
+    @ViewBuilder
+    private var appList: some View {
+        let shown = filteredApps
+        if isScanningApps && apps.isEmpty {
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("正在扫描应用…").font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(maxHeight: .infinity)
+        } else if shown.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "app.dashed")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("未找到应用").font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(shown) { app in
+                        UninstallableAppRow(app: app) {
+                            uninstaller.select(appURL: app.url)
+                        }
+                    }
+                }
+                .padding(.vertical, 3)
+            }
+        }
+    }
+
+    private func loadAppsIfNeeded() {
+        guard apps.isEmpty, !isScanningApps else { return }
+        performLoad()
+    }
+
+    /// 清空缓存并重新扫描应用列表（用于应用安装/卸载后手动刷新）。
+    private func refreshApps() {
+        InstalledApps.invalidateInstalledApplicationsCache()
+        apps = []
+        performLoad()
+    }
+
+    private func performLoad() {
+        isScanningApps = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loaded = InstalledApps.installedApplications()
+            DispatchQueue.main.async {
+                apps = loaded
+                isScanningApps = false
+            }
+        }
+    }
+
+    private static func isSymbolicLink(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
+    }
+
+    // MARK: Busy
+
+    private func busyState(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Spacer()
+            ProgressView().controlSize(.large)
+            Text(message).foregroundStyle(.secondary)
+            if let target = uninstaller.target {
+                HStack(spacing: 8) {
+                    Image(nsImage: target.icon).resizable().frame(width: 18, height: 18)
+                    Text(target.name).font(.callout)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: Results
+
+    private var resultsState: some View {
+        VStack(spacing: 0) {
+            targetHeader
+            Rectangle()
+                .fill(DesignTokens.Aurora.insetSeparator)
+                .frame(height: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(AppUninstaller.Category.allCases, id: \.self) { category in
+                        let group = uninstaller.items.filter { $0.category == category }
+                        if !group.isEmpty {
+                            Text(label(for: category))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 10)
+                                .padding(.bottom, 2)
+                            ForEach(group) { item in row(item) }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+            Rectangle()
+                .fill(DesignTokens.Aurora.insetSeparator)
+                .frame(height: 1)
+            footer
+        }
+    }
+
+    private var targetHeader: some View {
+        HStack(spacing: 12) {
+            if let target = uninstaller.target {
+                Image(nsImage: target.icon).resizable().frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(target.name).font(.system(size: 16, weight: .semibold))
+                    Text(target.bundleID ?? target.url.path)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(Self.byteString(uninstaller.totalSize))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text("共发现文件").font(.caption2).foregroundStyle(.secondary)
+            }
+            Button { uninstaller.reset() } label: {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+    }
+
+    private func row(_ item: AppUninstaller.Leftover) -> some View {
+        HStack(spacing: 10) {
+            Toggle("", isOn: includeBinding(item)).labelsHidden().toggleStyle(.checkbox)
+            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                .resizable().frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name).font(.system(size: 12.5)).lineLimit(1).truncationMode(.middle)
+                Text(prettyPath(item.url))
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.head)
+            }
+            Spacer()
+            Text(Self.byteString(item.size))
+                .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var footer: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("已选 \(uninstaller.items.filter(\.include).count) / \(uninstaller.items.count) 项")
+                    .font(.system(size: 12, weight: .medium))
+                Text(Self.byteString(uninstaller.selectedSize))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("取消") { uninstaller.reset() }
+            Button("移除") { uninstaller.removeSelected() }
+                .buttonStyle(.borderedProminent)
+                .tint(DesignTokens.Colors.error)
+                .disabled(!uninstaller.items.contains(where: \.include))
+        }
+        .padding(16)
+    }
+
+    // MARK: Done
+
+    private func doneState(freed: Int64, failed: Int) -> some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 54))
+                .foregroundStyle(.green)
+            Text("卸载完成").font(.system(size: 20, weight: .bold))
+            Text("已释放 \(Self.byteString(freed))")
+                .font(.system(size: 13)).foregroundStyle(.secondary)
+            if failed > 0 {
+                Text("有 \(failed) 项未能移除，可能被占用或需要管理员权限。")
+                    .font(.caption).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+            }
+            Button("继续卸载") { uninstaller.reset() }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 6)
+            Spacer()
+        }
+        .padding(28)
+    }
+
+    // MARK: Helpers
+
+    private func includeBinding(_ item: AppUninstaller.Leftover) -> Binding<Bool> {
+        Binding(
+            get: { uninstaller.items.first(where: { $0.id == item.id })?.include ?? false },
+            set: { uninstaller.setInclude($0, for: item.id) }
+        )
+    }
+
+    private func prettyPath(_ url: URL) -> String {
+        url.deletingLastPathComponent().path
+            .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
+    private func label(for category: AppUninstaller.Category) -> String {
+        switch category {
+        case .app: return "应用"
+        case .support: return "支持文件"
+        case .caches: return "缓存"
+        case .preferences: return "偏好设置"
+        case .containers: return "容器与脚本"
+        case .logs: return "日志"
+        case .state: return "状态"
+        case .other: return "其他"
+        }
+    }
+
+    private static func byteString(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+/// 已安装应用行：图标 + 名称/bundleID + 占用存储 + 行尾「卸载」按钮。
+private struct UninstallableAppRow: View {
+    let app: InstalledApps.InstalledApp
+    var onUninstall: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: app.icon)
+                .resizable()
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(app.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(app.bundleID ?? app.url.path)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            Text(Self.byteString(app.sizeBytes))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Button("卸载", action: onUninstall)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(DesignTokens.Colors.error)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private static func byteString(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}

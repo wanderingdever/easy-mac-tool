@@ -8,6 +8,9 @@ import SwiftUI
 struct WindowSwitcherSettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var selectedShortcutID: ShortcutConfig.ID?
+    /// 多屏幕分段的本地状态：避免直接在视图更新阶段写回 @Published 触发
+    /// "Publishing changes from within view updates" 警告，改由 onChange 写回。
+    @State private var displayTarget: AppSettings.DisplayTarget = .active
     /// Tracks the proportional width of the left column. Default 0.2 (20%),
     /// so the shortcut list is narrow and the detail editor is wide (80%).
     @State private var splitFraction: CGFloat = 0.2
@@ -21,7 +24,13 @@ struct WindowSwitcherSettingsView: View {
         .padding(DesignTokens.Settings.contentPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(DesignTokens.Aurora.pageBackground)
-        .onAppear { selectFirstShortcutIfNeeded() }
+        .onAppear {
+            displayTarget = settings.displayTarget
+            selectFirstShortcutIfNeeded()
+        }
+        .onChange(of: displayTarget) { _, newValue in
+            settings.displayTarget = newValue
+        }
         .onChange(of: selectedShortcutID) { _, newValue in
             if newValue == nil {
                 selectedShortcutID = settings.shortcuts.first?.id
@@ -46,7 +55,7 @@ struct WindowSwitcherSettingsView: View {
     /// 窗口切换功能全局开关：关闭后所有窗口切换快捷键恢复系统原生行为。
     private var globalToggleSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("通用", systemImage: "power")
+            sectionHeader("通用", systemImage: "gear")
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -79,13 +88,16 @@ struct WindowSwitcherSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("多屏幕", systemImage: "display")
             VStack(alignment: .leading, spacing: 10) {
-                Picker("显示于", selection: $settings.displayTarget) {
+                // 与「预览图大小」的 segmented Picker 一致：非空 label + .labelsHidden()，
+                // 不包 HStack，直接放在 VStack(.leading) 里顶格，避免前导空格。
+                Picker("显示于", selection: $displayTarget) {
                     ForEach(AppSettings.DisplayTarget.allCases) { target in
                         Text(target.displayName).tag(target)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 480)
+                .labelsHidden()
+                .frame(maxWidth: 480, alignment: .leading)
                 Text("切换窗口面板在哪个屏幕弹出。当前：\(settings.displayTarget.displayName)")
                     .font(.system(size: DesignTokens.SettingsTypography.caption))
                     .foregroundStyle(.secondary)
@@ -269,6 +281,7 @@ private struct ShortcutItemView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .animation(DesignTokens.Aurora.standard, value: isSelected)
         .animation(DesignTokens.Aurora.standard, value: isHovered)
         .onHover { hovering in
@@ -316,6 +329,7 @@ private struct ShortcutToolbarButton: View {
                 .opacity(disabled ? 0.4 : 1.0)
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .disabled(disabled)
         .onHover { hovering in
             guard !disabled else { return }
@@ -382,6 +396,16 @@ struct ShortcutDetailView: View {
                         .padding(.top, 2)
                 }
                 groupCard("显示窗口", systemImage: "macwindow") {
+                    Toggle("仅当前桌面窗口", isOn: $shortcut.currentSpaceOnly)
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
+                        .controlSize(.small)
+                        .help("仅显示当前桌面上的窗口")
+                    Text("关闭后切换器会显示其他桌面上的窗口（跨桌面切换）。默认开启，仅显示当前桌面可见窗口。")
+                        .font(.system(size: DesignTokens.SettingsTypography.caption))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                    divider
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)

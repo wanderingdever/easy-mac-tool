@@ -18,6 +18,9 @@ final class ClipboardPanelController: ObservableObject {
     /// 之后保持存活，present 时只更新 rootView（autoPaste 等参数变化）。
     private var hostingController: NSHostingController<ClipboardOverlayView>?
     private var globalMonitor: Any?
+    /// 等数据就绪再弹面板的订阅：present 时若历史未加载完，订阅
+    /// manager.$isLoaded 等 true 后再弹；避免首开显示「形变」的加载占位。
+    private var presentDisposable: AnyCancellable?
     /// 注意：isPresented 是 @Published 存储属性（ClipboardOverlayView 用
     /// .onChange 观察），但每次 present/dismiss 后与 panel.isVisible 同步，
     /// 防止 orderFrontRegardless 失败时 isPresented=true 而面板实际不可见
@@ -35,6 +38,31 @@ final class ClipboardPanelController: ObservableObject {
     /// 后者在 nonactivatingPanel 场景下可能取错 key window。
     var firstResponderIsTextView: Bool {
         panel.firstResponder is NSTextView
+    }
+
+    /// 是否正在编辑任何文本字段（搜索框、或「新建分组/重命名/清空」等模态
+    /// alert 的 TextField）。用于让局部 key monitor 放行打字键，避免在输入
+    /// 分组名时按空格误触发卡片预览。
+    /// 只命中「可编辑」的 NSTextView：预览态的 RTFTextView 是 selectable 但
+    /// 不可编辑，空格应继续触发关闭预览而非被吞掉。
+    /// 同时检查 panel 与 key window 的 firstResponder：modal alert 的文本框
+    /// 属于 alert 窗口，panel.firstResponder 可能取不到，需回退到 key window。
+    var isEditingAnyText: Bool {
+        if let tv = panel.firstResponder as? NSTextView, tv.isEditable { return true }
+        if let keyFR = NSApp.keyWindow?.firstResponder as? NSTextView,
+           keyFR.isEditable { return true }
+        return false
+    }
+
+    /// 是否有模态 alert/sheet 附着在面板上（新建分组/重命名/清空确认等）。
+    /// 模态弹窗出现时不应再让局部 key monitor 拦截空格/回车触发卡片预览。
+    var hasModalPresentation: Bool {
+        if panel.attachedSheet != nil { return true }
+        if panel.sheets.contains(where: { $0.isVisible }) { return true }
+        // SwiftUI .alert 可能不挂到 attachedSheet：key window 变成 alert 自身的
+        // 模态窗口（非 panel）时同样视为模态。
+        if let keyWindow = NSApp.keyWindow, keyWindow !== panel { return true }
+        return false
     }
 
     /// 面板所在屏幕。多屏场景下供 ClipboardOverlayView 计算预览高度等使用，
@@ -58,11 +86,36 @@ final class ClipboardPanelController: ObservableObject {
     /// Set by AppCoordinator; called when the user picks an item. AppCoordinator
     /// is responsible for re-applying the payload and (optionally) pasting.
     var onReapply: ((ClipboardItem) -> Void)?
+    /// Set by AppCoordinator; called when the user picks a batch of items
+    /// (multi-select → 复制全部).
+    var onReapplyBatch: (([ClipboardItem]) -> Void)?
 
     func present(manager: ClipboardManager) {
+        // 等数据就绪再弹面板：历史尚未从磁盘加载完时，先订阅 manager.$isLoaded，
+        // 等 true 后再真正弹出，避免首开显示「形变」的加载占位（用户需再按一次）。
+        // 已就绪则立即弹出。用 presentDisposable 持有订阅，重复 present 前先取消旧的。
+        presentDisposable?.cancel()
+        presentDisposable = nil
+        if manager.isLoaded {
+            presentPanel(manager: manager)
+            return
+        }
+        presentDisposable = manager.$isLoaded
+            .filter { $0 }
+            .first()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.presentDisposable = nil
+                self.presentPanel(manager: manager)
+            }
+    }
+
+    /// 实际弹出面板的主体逻辑。由 `present(manager:)` 在数据就绪后调用。
+    private func presentPanel(manager: ClipboardManager) {
         // autoPaste 由 AppCoordinator 在 onReapply 回调中读取 settings.clipboardAutoPaste
         // 决定是否模拟粘贴，本身不影响视图渲染——视图只需 manager 与 controller 引用。
-        // 因此 present 不再接收 autoPaste 参数（之前是 dead parameter 被显式丢弃）。
+        // 因此这里不再接收 autoPaste 参数（之前是 dead parameter 被显式丢弃）。
 
         // 先定位面板：定位失败说明当前无可用的目标屏幕（多屏盲区/显示器热插拔/重排），
         // 不置 isPresented、不产生任何副作用，让下一次快捷键能重新尝试打开，
@@ -125,6 +178,9 @@ final class ClipboardPanelController: ObservableObject {
     }
 
     func dismiss() {
+        // 取消等数据就绪的挂起订阅：dismiss 后不应再弹出面板。
+        presentDisposable?.cancel()
+        presentDisposable = nil
         if let global = globalMonitor {
             NSEvent.removeMonitor(global)
             globalMonitor = nil

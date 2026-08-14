@@ -31,9 +31,12 @@ final class ClipboardItem: Identifiable, Codable {
     let rtfData: Data?
 
     /// 图片 TIFF 数据的磁盘文件引用（仅持久化后的 image kind 有值）。
-    /// 热数据（≤7天）：imageData 与 thumbnail 在内存中。
-    /// 冷数据（>7天）：imageData 与 thumbnail 为 nil，需 warmUp() 从文件加载。
+    /// 热数据（≤3天）：imageData 与 thumbnail 在内存中。
+    /// 冷数据（>3天）：imageData 与 thumbnail 为 nil，需 warmUp() 从文件加载。
     var imageFileURL: URL?
+
+    /// 归属分组：nil = 未分组（显示在「全部」下）。分组取代了旧的置顶标记。
+    var groupID: UUID?
 
     /// 图片像素尺寸缓存（仅 image kind）：snapshot / warmUp 时通过 ImageIO
     /// 读一次元数据并缓存。footerText 直接读缓存——之前每次访问都
@@ -131,6 +134,7 @@ final class ClipboardItem: Identifiable, Codable {
         case sourceAppTintR, sourceAppTintG, sourceAppTintB, sourceAppTintA
         case rtfData, imageFileName, kindType
         case textValue, urlValue, urlTitle, fileURLs, colorHex
+        case groupID
     }
 
     required init(from decoder: Decoder) throws {
@@ -158,7 +162,7 @@ final class ClipboardItem: Identifiable, Codable {
             kind = .url(url, title: title)
         case "image":
             // image 的 TIFF Data 存独立文件，加载时按需读取。
-            // 冷数据（>7天）不加载 data/thumbnail，需 warmUp()。
+            // 冷数据（>3天）不加载 data/thumbnail，需 warmUp()。
             // imageFileURL 由 ClipboardManager.loadFromDisk() 设置为绝对路径。
             kind = .image(nil, thumbnail: nil)
         case "file":
@@ -187,6 +191,8 @@ final class ClipboardItem: Identifiable, Codable {
         if kindType == "image", let imageName {
             imageFileURL = URL(fileURLWithPath: imageName, relativeTo: nil)
         }
+        // 归属分组（向后兼容：旧数据无 groupID 字段时默认未分组）。
+        groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -201,6 +207,7 @@ final class ClipboardItem: Identifiable, Codable {
         try c.encode(Double(srgb.blueComponent), forKey: .sourceAppTintB)
         try c.encode(Double(srgb.alphaComponent), forKey: .sourceAppTintA)
         try c.encodeIfPresent(rtfData, forKey: .rtfData)
+        try c.encodeIfPresent(groupID, forKey: .groupID)
 
         switch kind {
         case .text(let text):

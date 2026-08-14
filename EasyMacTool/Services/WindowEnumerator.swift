@@ -73,13 +73,19 @@ final class WindowEnumerator {
             Self.logger.error("AX not trusted! minimized/hidden windows will not be detected. Grant Accessibility permission.")
         }
 
-        // 2. SCShareableContent 仅用于获取 visible 窗口（需要 SCWindow 来捕获预览）。
-        //    onScreenWindowsOnly 始终为 true——离屏窗口由 AX 获取，不依赖 SCShareableContent。
+        // 2. SCShareableContent 用于获取窗口（需要 SCWindow 来捕获预览）。
+        //    currentSpaceOnly=true（默认）：仅当前桌面（Space）可见窗口，
+        //    剔除其他桌面上的窗口——收紧默认过滤，避免切快捷键时出现
+        //    「不在当前桌面」的窗口。
+        //    currentSpaceOnly=false（用户关闭）：包含其他 Space 上可见的窗口，
+        //    让切换器能列出并切到其他桌面（类 Windows Alt+Tab「跨桌面」语义）。
+        //    激活他桌窗口时 macOS 会自动切换 Space。离屏（minimized/hidden）
+        //    窗口仍由 AX 获取，SCShareableContent 不返回它们。
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(
                 true,
-                onScreenWindowsOnly: true
+                onScreenWindowsOnly: filter.currentSpaceOnly
             )
         } catch {
             Self.logger.error("SCShareableContent failed: \(error.localizedDescription, privacy: .public)")

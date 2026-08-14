@@ -11,6 +11,9 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
     var modifiersRaw: UInt64
     var showMinimized: Bool
     var showHidden: Bool
+    /// 仅显示当前桌面（Space）的窗口。默认 true：切换器只列当前桌面可见窗口，
+    /// 剔除其他桌面上的窗口。关闭后 `onScreenWindowsOnly=false`，可跨桌面切换。
+    var currentSpaceOnly: Bool
     var releaseBehavior: ReleaseBehavior
     /// Per-shortcut preview thumbnail size. Different shortcuts can use
     /// different sizes — e.g. a primary shortcut uses small previews while
@@ -38,6 +41,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
          modifiers: CGEventFlags,
          showMinimized: Bool = false,
          showHidden: Bool = false,
+         currentSpaceOnly: Bool = true,
          releaseBehavior: ReleaseBehavior = .focus,
          previewSize: AppSettings.PreviewSize = .small,
          isDefault: Bool = false) {
@@ -47,6 +51,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         self.modifiersRaw = modifiers.rawValue
         self.showMinimized = showMinimized
         self.showHidden = showHidden
+        self.currentSpaceOnly = currentSpaceOnly
         self.releaseBehavior = releaseBehavior
         self.previewSize = previewSize
         self.isDefault = isDefault
@@ -63,7 +68,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
     /// lack the `previewSize` field by falling back to `.small`.
     private enum CodingKeys: String, CodingKey {
         case id, name, keyCode, modifiersRaw
-        case showMinimized, showHidden
+        case showMinimized, showHidden, currentSpaceOnly
         case releaseBehavior, previewSize, isDefault
     }
 
@@ -75,6 +80,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         modifiersRaw = try c.decode(UInt64.self, forKey: .modifiersRaw)
         showMinimized = try c.decodeIfPresent(Bool.self, forKey: .showMinimized) ?? false
         showHidden = try c.decodeIfPresent(Bool.self, forKey: .showHidden) ?? false
+        currentSpaceOnly = try c.decodeIfPresent(Bool.self, forKey: .currentSpaceOnly) ?? true
         releaseBehavior = try c.decodeIfPresent(ReleaseBehavior.self, forKey: .releaseBehavior) ?? .focus
         previewSize = try c.decodeIfPresent(AppSettings.PreviewSize.self, forKey: .previewSize) ?? .small
         isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
@@ -88,6 +94,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         try c.encode(modifiersRaw, forKey: .modifiersRaw)
         try c.encode(showMinimized, forKey: .showMinimized)
         try c.encode(showHidden, forKey: .showHidden)
+        try c.encode(currentSpaceOnly, forKey: .currentSpaceOnly)
         try c.encode(releaseBehavior, forKey: .releaseBehavior)
         try c.encode(previewSize, forKey: .previewSize)
         try c.encode(isDefault, forKey: .isDefault)

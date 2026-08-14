@@ -12,6 +12,8 @@ struct KeyRecorderView: View {
     @Binding var modifiers: CGEventFlags
     /// Return a user-facing reason to reject a recorded combination.
     var validationMessage: (CGKeyCode, CGEventFlags) -> String? = { _, _ in nil }
+    /// Shared mutex so only ONE recorder on screen can be recording at a time.
+    var isGlobalRecording: Binding<Bool> = .constant(false)
 
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -97,8 +99,11 @@ struct KeyRecorderView: View {
         // 两次，导致旧 monitor 引用被覆盖而永久泄漏。泄漏的 monitor 会持续
         // 拦截按键并悄悄修改快捷键，用户难以察觉。
         guard monitor == nil else { return }
+        // 全局互斥：已有其他录制器在录制时，本录制器不介入。
+        if isGlobalRecording.wrappedValue { return }
         rejectionMessage = nil
         isRecording = true
+        isGlobalRecording.wrappedValue = true
         // Disable the global event tap so it doesn't intercept the key being
         // recorded. The recorder needs to see the raw keypress.
         // 引用计数语义：多个录制器同时处于录制态时互不干扰。
@@ -164,6 +169,7 @@ struct KeyRecorderView: View {
         // 2. 录制中按 Esc，本地 monitor 与 .onExitCommand 各触发一次 stopRecording。
         guard isRecording else { return }
         isRecording = false
+        isGlobalRecording.wrappedValue = false
         // Re-enable the global event tap（引用计数 -1，归零才恢复拦截）。
         HotkeyManager.shared.endRecording()
     }
