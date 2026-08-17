@@ -2,10 +2,21 @@ import AppKit
 import SwiftUI
 
 nonisolated enum HorizontalScrollGeometry {
-    static let lineScrollStep: CGFloat = 40
+    static let animationFactor: CGFloat = 0.18
+    static let settleThreshold: CGFloat = 0.5
 
-    static func redirectedDelta(verticalDelta: CGFloat, isPrecise: Bool) -> CGFloat {
-        -verticalDelta * (isPrecise ? 1 : lineScrollStep)
+    static func discreteStep(verticalDelta: CGFloat) -> Int? {
+        guard verticalDelta != 0 else { return nil }
+        return verticalDelta < 0 ? 1 : -1
+    }
+
+    static func smoothedOrigin(current: CGFloat,
+                               target: CGFloat,
+                               factor: CGFloat = animationFactor,
+                               settleThreshold: CGFloat = settleThreshold) -> CGFloat {
+        guard abs(target - current) > settleThreshold else { return target }
+        let clampedFactor = min(max(factor, 0), 1)
+        return current + (target - current) * clampedFactor
     }
 
     static func targetOrigin(index: Int,
@@ -30,14 +41,18 @@ nonisolated enum HorizontalScrollGeometry {
     }
 }
 
-/// 横向滚动手势的 NSScrollView 子类：将「无 Shift 修饰的垂直滚轮」
-/// 重定向为横向滚动，使鼠标滚轮可直接横向滚动剪切板卡片列表。
-/// 保留 trackpad 横向手势（deltaX）、Shift+滚轮、纵向 scroll view 默认行为。
+/// 将离散鼠标滚轮转换为逐卡选择；精确触控板事件继续使用系统的连续增量。
+/// 程序化揭示由单个 120Hz timer 追踪最新目标，连续输入不会排队动画。
 final class WheelRedirectScrollView: NSScrollView {
+    var onDiscreteStep: ((Int) -> Void)?
+    var onAnimationStateChange: ((Bool) -> Void)?
+    var reduceMotion = false
+
+    private var animationTimer: Timer?
+    private var targetOriginX: CGFloat?
+    private var animationActive = false
+
     override func scrollWheel(with event: NSEvent) {
-        // 仅拦截「无 Shift 修饰 + 纯垂直滚轮（deltaY≠0 且 deltaX≈0）」的事件。
-        // trackpad 横向手势（deltaX≠0）、Shift+滚轮（系统默认已重定向）、
-        // 其他修饰键组合（如 ⌘ 缩放）一律走默认行为。
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .function])
         guard mods.isEmpty else {
@@ -50,25 +65,24 @@ final class WheelRedirectScrollView: NSScrollView {
             super.scrollWheel(with: event)
             return
         }
-        // 仅在横向可滚（文档宽 > 可视宽）时重定向；否则走默认（纵向不滚）。
-        let hRoom = doc.bounds.width - contentSize.width
-        guard hRoom > 0.5 else {
+
+        let horizontalRoom = doc.bounds.width - contentSize.width
+        guard horizontalRoom > 0.5 else {
             super.scrollWheel(with: event)
             return
         }
-        // 鼠标滚轮按行放大为 40pt；触控板精确像素增量直接使用，避免
-        // 亚像素手势被放大 40 倍而跳动。
-        // 直接更新 bounds（去掉逐事件 animator 动画）：快速滚动时旧动画会被
-        // 新事件打断并从未到位处重启动画，导致滚动永远追赶不上输入 → 卡顿
-        // 滚不动。直接定位每个刻度立即生效、线性累积，与输入同步。
-        let dx = HorizontalScrollGeometry.redirectedDelta(
-            verticalDelta: event.scrollingDeltaY,
-            isPrecise: event.hasPreciseScrollingDeltas
-        )
-        var origin = contentView.bounds.origin
-        origin.x = min(max(0, origin.x + dx), hRoom)
-        contentView.bounds.origin = origin
-        reflectScrolledClipView(contentView)
+
+        if event.hasPreciseScrollingDeltas {
+            cancelProgrammaticScroll()
+            var origin = contentView.bounds.origin
+            origin.x = min(max(0, origin.x - event.scrollingDeltaY), horizontalRoom)
+            contentView.bounds.origin = origin
+            reflectScrolledClipView(contentView)
+        } else if let step = HorizontalScrollGeometry.discreteStep(
+            verticalDelta: event.scrollingDeltaY
+        ) {
+            onDiscreteStep?(step)
+        }
     }
 
     /// 最小滚动以完整揭示目标卡片。返回 false 表示 SwiftUI document view
@@ -88,11 +102,71 @@ final class WheelRedirectScrollView: NSScrollView {
             spacing: DesignTokens.ClipboardLayout.cardSpacing,
             horizontalPadding: DesignTokens.ClipboardLayout.stripHorizontalPadding
         ) else { return false }
+        scroll(to: target)
+        return true
+    }
+
+    func cancelProgrammaticScroll() {
+        targetOriginX = nil
+        animationTimer?.invalidate()
+        animationTimer = nil
+        setAnimationActive(false)
+    }
+
+    private func scroll(to requestedTarget: CGFloat) {
+        let maximum = max(0, (documentView?.bounds.width ?? 0) - contentSize.width)
+        let target = min(max(0, requestedTarget), maximum)
+        if reduceMotion || abs(target - contentView.bounds.origin.x) <= HorizontalScrollGeometry.settleThreshold {
+            cancelProgrammaticScroll()
+            setOriginX(target)
+            return
+        }
+
+        targetOriginX = target
+        setAnimationActive(true)
+        guard animationTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 120.0,
+                          target: self,
+                          selector: #selector(advanceScrollAnimation),
+                          userInfo: nil,
+                          repeats: true)
+        animationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func advanceScrollAnimation() {
+        guard let requestedTarget = targetOriginX else {
+            cancelProgrammaticScroll()
+            return
+        }
+        let maximum = max(0, (documentView?.bounds.width ?? 0) - contentSize.width)
+        let target = min(max(0, requestedTarget), maximum)
+        if reduceMotion {
+            setOriginX(target)
+            cancelProgrammaticScroll()
+            return
+        }
+        let next = HorizontalScrollGeometry.smoothedOrigin(
+            current: contentView.bounds.origin.x,
+            target: target
+        )
+        setOriginX(next)
+        if next == target {
+            cancelProgrammaticScroll()
+        }
+    }
+
+    private func setOriginX(_ x: CGFloat) {
         var origin = contentView.bounds.origin
-        origin.x = target
+        origin.x = x
         contentView.bounds.origin = origin
         reflectScrolledClipView(contentView)
-        return true
+    }
+
+    private func setAnimationActive(_ active: Bool) {
+        guard animationActive != active else { return }
+        animationActive = active
+        onAnimationStateChange?(active)
     }
 }
 
@@ -100,8 +174,6 @@ final class WheelRedirectScrollView: NSScrollView {
 /// Swift 6.3 SIL optimizer crash on generic class deinit).
 final class HWSVCoordinator {
     var hostingController: Any?
-    /// 记录上次方向键索引，用于推导滚动方向（+1/-1），并对重复 body
-    /// 更新去重。
     var lastScrolledIndex: Int?
     private var pendingIndex: Int?
 
@@ -122,18 +194,23 @@ final class HWSVCoordinator {
 }
 
 /// 用 NSHostingController 承载 SwiftUI 内容的横向滚动视图。
-/// documentView 的宽度自动跟随 SwiftUI 内容的 intrinsic 大小，
-/// 高度锚定到 contentView 高度。
 struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
     let content: Content
-    /// 键盘方向键选中的卡片索引：变化时按方向步进滚动一张卡片（242pt），
-    /// 与滚轮手感一致。仅在键盘选择（而非 hover）时更新——hover 会在滚轮
-    /// 滚动时随鼠标掠过卡片而频繁变化，若也触发滚动会与滚轮互相打架。
     var scrollToIndex: Int?
+    var onDiscreteStep: (Int) -> Void
+    var reduceMotion: Bool
+    var onAnimationStateChange: (Bool) -> Void
 
-    init(@ViewBuilder content: () -> Content, scrollToIndex: Int? = nil) {
+    init(@ViewBuilder content: () -> Content,
+         scrollToIndex: Int? = nil,
+         onDiscreteStep: @escaping (Int) -> Void = { _ in },
+         reduceMotion: Bool = false,
+         onAnimationStateChange: @escaping (Bool) -> Void = { _ in }) {
         self.content = content()
         self.scrollToIndex = scrollToIndex
+        self.onDiscreteStep = onDiscreteStep
+        self.reduceMotion = reduceMotion
+        self.onAnimationStateChange = onAnimationStateChange
     }
 
     func makeCoordinator() -> HWSVCoordinator {
@@ -150,6 +227,7 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         scrollView.scrollerStyle = .overlay
+        configureCallbacks(on: scrollView)
 
         let hosting = NSHostingController(rootView: content)
         hosting.view.wantsLayer = true
@@ -158,7 +236,6 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
         scrollView.documentView = hosting.view
         context.coordinator.hostingController = hosting
 
-        // documentView 高度锚定到 contentView，宽度由 SwiftUI 内容撑开。
         NSLayoutConstraint.activate([
             hosting.view.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             hosting.view.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
@@ -175,9 +252,21 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
             return
         }
         hosting.rootView = content
-        // 仅在成功揭示后记录索引；布局未完成时 coordinator 会重试。
+        configureCallbacks(on: nsView)
         if let idx = scrollToIndex, idx != context.coordinator.lastScrolledIndex {
             context.coordinator.reveal(idx, in: nsView)
         }
+    }
+
+    static func dismantleNSView(_ nsView: WheelRedirectScrollView, coordinator: HWSVCoordinator) {
+        nsView.onDiscreteStep = nil
+        nsView.onAnimationStateChange = nil
+        nsView.cancelProgrammaticScroll()
+    }
+
+    private func configureCallbacks(on scrollView: WheelRedirectScrollView) {
+        scrollView.onDiscreteStep = onDiscreteStep
+        scrollView.reduceMotion = reduceMotion
+        scrollView.onAnimationStateChange = onAnimationStateChange
     }
 }

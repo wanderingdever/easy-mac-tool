@@ -2,6 +2,21 @@ import AppKit
 import Combine
 import SwiftUI
 
+nonisolated enum ClipboardPreviewGeometry {
+    static let heightRatio: CGFloat = 0.8
+    static let maximumHeight: CGFloat = 320
+    static let preferredMinimumHeight: CGFloat = 160
+    static let verticalShadowInset: CGFloat = 24
+
+    static func height(containerHeight: CGFloat) -> CGFloat {
+        let safeHeight = max(0, containerHeight - verticalShadowInset * 2)
+        guard safeHeight >= preferredMinimumHeight else { return safeHeight }
+        return min(max(containerHeight * heightRatio, preferredMinimumHeight),
+                   maximumHeight,
+                   safeHeight)
+    }
+}
+
 /// Bottom-of-screen clipboard history panel, Paste-style. A horizontal strip
 /// of preview cards. Click a card to copy/restore that clipboard entry.
 ///
@@ -44,12 +59,13 @@ struct ClipboardOverlayView: View {
     /// 视觉状态一致。nil 表示无选中（仅当列表为空时）。
     @State private var selectedIndex: Int = 0
 
-    /// 键盘方向键触发的滚动目标卡片索引（nil = 无需滚动）。
-    /// 仅在 handleArrow（键盘选择）中更新，hover 改变选中不更新——
-    /// hover 在滚轮滚动时会随鼠标掠过卡片频繁变化，若也触发滚动会与滚轮
-    /// 滚动互相打架（复现"滚不动"）。变化时由 HorizontalWheelScrollView
-    /// 的 updateNSView 推导方向并步进滚动一张卡片（242pt，与滚轮手感一致）。
+    /// 键盘方向键和离散鼠标滚轮触发的滚动目标（nil = 无需滚动）。
+    /// hover 改变选中时不更新；目标变化后由 HorizontalWheelScrollView
+    /// 以最小距离平滑揭示，避免 hover 与程序化滚动互相争抢。
     @State private var scrollToIndex: Int?
+    /// 程序化平滑揭示期间，鼠标可能停在旧卡片上。暂时阻止 hover 回写选择，
+    /// 避免它与键盘/滚轮的目标索引互相争抢。
+    @State private var isProgrammaticScroll = false
 
     /// 预览状态：previewItem 非 nil 时弹出放大卡片。previewVisible 驱动
     /// opacity/scale 弹入动画。不改变面板高度——内容过长时由 RTFTextView 内部
@@ -705,7 +721,9 @@ struct ClipboardOverlayView: View {
                                         hoverID = item.id
                                         // 鼠标 hover 同步键盘选中索引，使回车
                                         // 复制时与视觉选中卡片一致。
-                                        selectedIndex = index
+                                        if !isProgrammaticScroll {
+                                            selectedIndex = index
+                                        }
                                     } else {
                                         if hoverID == item.id { hoverID = nil }
                                     }
@@ -763,7 +781,14 @@ struct ClipboardOverlayView: View {
                     }
                     .padding(.horizontal, DesignTokens.ClipboardLayout.stripHorizontalPadding)
                     .padding(.vertical, 10)
-                }, scrollToIndex: scrollToIndex)
+                }, scrollToIndex: scrollToIndex,
+                   onDiscreteStep: { direction in
+                       moveSelection(direction: direction)
+                   },
+                   reduceMotion: reduceMotion,
+                   onAnimationStateChange: { active in
+                       isProgrammaticScroll = active
+                   })
             }
             // 卡片容器绑定 @FocusState：默认 focusTarget=.cards（在 onAppear 中设置）。
             // SwiftUI 的 .focusable + .focused 让卡片容器成为 firstResponder 候选，
@@ -785,16 +810,9 @@ struct ClipboardOverlayView: View {
     @ViewBuilder
     private func previewOverlay(item: ClipboardItem) -> some View {
         // 无全屏遮罩——预览直接悬浮在卡片上方。
-        // 垂直居中的放大卡片：高度自适应面板可用空间（不超过屏高 70%）。
+        // 垂直居中的放大卡片：约占面板高度 80%，并为阴影留出安全空间。
         GeometryReader { geo in
-            // 预览可用高度 = 面板高度 - 上下各 8pt。面板固定为屏高 1/4 且不随
-            // 预览拉高，因此必须把预览高度夹紧到面板内，否则顶部会越界。
-            let available = geo.size.height - 16
-            let screenH = controller.screen?.visibleFrame.height ?? NSScreen.main?.visibleFrame.height ?? 800
-            let maxH = min(available, screenH * 0.7)
-            // 期望高度 max(240, maxH)，但绝不能超过 available（短面板/低分屏
-            // 场景下强制 240 会导致预览顶部溢出面板）。
-            let height = min(max(240, maxH), available)
+            let height = ClipboardPreviewGeometry.height(containerHeight: geo.size.height)
             ClipboardPreviewCard(item: item,
                                 isExpanded: previewVisible,
                                 onClose: { closePreview() },
@@ -889,13 +907,17 @@ struct ClipboardOverlayView: View {
     private func handleArrow(direction: Int) {
         let editingText = controller.isEditingAnyText
         guard !editingText, !filtered.isEmpty else { return }
+        moveSelection(direction: direction)
+    }
+
+    /// 键盘和离散鼠标滚轮共用同一条逐卡选择路径。目标索引在首尾夹紧，
+    /// 只有实际变化时才请求最小距离揭示。
+    private func moveSelection(direction: Int) {
+        guard direction != 0, !filtered.isEmpty else { return }
         if previewIsOpen { closePreview() }
-        // 不循环：到达首/末张后按同方向键保持不变（与滚动翻页到头即停一致）。
-        let newIndex = selectedIndex + direction
-        guard newIndex >= 0, newIndex < filtered.count else { return }
+        let newIndex = min(max(0, selectedIndex + direction), filtered.count - 1)
+        guard newIndex != selectedIndex else { return }
         selectedIndex = newIndex
-        // 键盘选择 → 触发列表最小滚动到选中卡片可见（仅当卡片超出可视区）。
-        // 注意：hover 改变选中时不走这里，避免滚轮滚动时自动滚动与滚轮打架。
         scrollToIndex = selectedIndex
     }
 
@@ -1124,8 +1146,8 @@ private struct ClipboardPreviewCard: View {
                 .strokeBorder(DesignTokens.Aurora.brandGradient.opacity(0.6), lineWidth: 1.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.floatShadowColor, radius: 20, y: 6)
-        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.brandGlow.opacity(0.5), radius: 24, y: 0)
+        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.floatShadowColor, radius: 12, y: 4)
+        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.brandGlow.opacity(0.4), radius: 10, y: 0)
         .task {
             // 若为单图片文件，后台加载避免阻塞主线程。
             // NSImage(contentsOf:) 是同步磁盘 I/O，在 .task（@MainActor）中

@@ -4,9 +4,26 @@ import Testing
 
 @Suite("Clipboard horizontal scroll geometry")
 struct HorizontalScrollGeometryTests {
-    @Test func preservesPreciseDeltasAndScalesWheelLines() {
-        #expect(HorizontalScrollGeometry.redirectedDelta(verticalDelta: 2.5, isPrecise: true) == -2.5)
-        #expect(HorizontalScrollGeometry.redirectedDelta(verticalDelta: 2, isPrecise: false) == -80)
+    @Test func mapsDiscreteWheelDirectionToAdjacentCard() {
+        #expect(HorizontalScrollGeometry.discreteStep(verticalDelta: -2) == 1)
+        #expect(HorizontalScrollGeometry.discreteStep(verticalDelta: 2) == -1)
+        #expect(HorizontalScrollGeometry.discreteStep(verticalDelta: 0) == nil)
+    }
+
+    @Test func smoothStepConvergesWithoutOvershooting() {
+        var current: CGFloat = 0
+        let target: CGFloat = 246
+        for _ in 0..<120 {
+            let next = HorizontalScrollGeometry.smoothedOrigin(current: current, target: target)
+            #expect(next >= current)
+            #expect(next <= target)
+            current = next
+        }
+        #expect(current == target)
+
+        let reverse = HorizontalScrollGeometry.smoothedOrigin(current: 200, target: 100)
+        #expect(reverse < 200)
+        #expect(reverse >= 100)
     }
 
     private let width: CGFloat = 230
@@ -41,5 +58,22 @@ struct HorizontalScrollGeometryTests {
             cardWidth: width, spacing: spacing, horizontalPadding: padding
         )
         #expect(invalid == nil)
+    }
+}
+
+@Suite("Clipboard preview geometry")
+struct ClipboardPreviewGeometryTests {
+    @Test func preservesShadowSpaceOnSmallPanel() {
+        let height = ClipboardPreviewGeometry.height(containerHeight: 180)
+        #expect(height == 132)
+        #expect(height + ClipboardPreviewGeometry.verticalShadowInset * 2 <= 180)
+    }
+
+    @Test func usesEightyPercentOnRegularPanel() {
+        #expect(ClipboardPreviewGeometry.height(containerHeight: 260) == 208)
+    }
+
+    @Test func capsPreviewOnTallPanel() {
+        #expect(ClipboardPreviewGeometry.height(containerHeight: 500) == 320)
     }
 }

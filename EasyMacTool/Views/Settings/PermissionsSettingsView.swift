@@ -91,6 +91,7 @@ struct PermissionsSettingsView: View {
                 onRequest: requestScreenRecording,
                 settingsURL: "x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_ScreenCapture"
             )
+            keychainInformationRow
             // 输入监控（Input Monitoring）已移除：app 使用 .defaultTap 的
             // CGEventTap，运行时只需辅助功能权限（AX 是 IM 的超集，AX 授权
             // 后 IM 自动通过）。展示 IM 状态反而可能误导用户去追逐一个
@@ -130,6 +131,41 @@ struct PermissionsSettingsView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .auroraSettingsCard()
+    }
+
+    private var keychainInformationRow: some View {
+        let description = "用于保存本机生成的剪贴板历史 AES-GCM 加密密钥；不会读取其他应用、网站或账户密码；密钥仅限本设备使用且不通过 iCloud 同步。"
+        return HStack(alignment: .top, spacing: DesignTokens.Settings.permCardGap) {
+            AuroraIconChip(systemName: "key.fill", size: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("钥匙串")
+                        .scaledSystemFont(DesignTokens.SettingsTypography.permTitle, weight: .semibold)
+                        .foregroundStyle(.primary)
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("自动使用")
+                            .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(DesignTokens.Colors.success))
+                }
+                Text(description)
+                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .auroraSettingsCard()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("钥匙串，自动使用")
+        .accessibilityHint(description)
     }
 
     /// 状态胶囊：已授权 = 绿底白字 check；未授权 = 红底白字叹号；
