@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 
@@ -14,6 +15,7 @@ struct WindowSwitcherSettingsView: View {
     /// Tracks the proportional width of the left column. Default 0.2 (20%),
     /// so the shortcut list is narrow and the detail editor is wide (80%).
     @State private var splitFraction: CGFloat = 0.2
+    @State private var globalRecording = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
@@ -38,47 +40,19 @@ struct WindowSwitcherSettingsView: View {
         }
     }
 
-    // MARK: - Section header
-
-    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
-    private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: systemImage, size: 26)
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                .foregroundStyle(.primary)
-        }
-    }
-
     // MARK: - Global toggle
 
     /// 窗口切换功能全局开关：关闭后所有窗口切换快捷键恢复系统原生行为。
     private var globalToggleSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("通用", systemImage: "gear")
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("启用窗口切换")
-                            .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                            .foregroundStyle(.primary)
-                        Text("关闭后所有窗口切换快捷键将恢复系统默认行为（原生 Cmd+Tab）。")
-                            .font(.system(size: DesignTokens.SettingsTypography.caption))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                    Toggle("", isOn: $settings.windowSwitcherEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(DesignTokens.Aurora.controlOn)
-                        .controlSize(.small)
-                        .padding(.top, 2)
-                }
+            SettingsSectionHeader(title: "通用", systemImage: "gear")
+            SettingsCard(spacing: 10) {
+                SettingsToggleRow(
+                    title: "启用窗口切换",
+                    description: "关闭后所有窗口切换快捷键将恢复系统默认行为（原生 Cmd+Tab）。",
+                    isOn: $settings.windowSwitcherEnabled
+                )
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
         }
     }
 
@@ -86,8 +60,8 @@ struct WindowSwitcherSettingsView: View {
 
     private var displayTargetSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("多屏幕", systemImage: "display")
-            VStack(alignment: .leading, spacing: 10) {
+            SettingsSectionHeader(title: "多屏幕", systemImage: "display")
+            SettingsCard(spacing: 10) {
                 // 与「预览图大小」的 segmented Picker 一致：非空 label + .labelsHidden()，
                 // 不包 HStack，直接放在 VStack(.leading) 里顶格，避免前导空格。
                 Picker("显示于", selection: $displayTarget) {
@@ -99,12 +73,9 @@ struct WindowSwitcherSettingsView: View {
                 .labelsHidden()
                 .frame(maxWidth: 480, alignment: .leading)
                 Text("切换窗口面板在哪个屏幕弹出。当前：\(settings.displayTarget.displayName)")
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
         }
     }
 
@@ -112,7 +83,7 @@ struct WindowSwitcherSettingsView: View {
 
     private var shortcutSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("快捷键", systemImage: "keyboard")
+            SettingsSectionHeader(title: "快捷键", systemImage: "keyboard")
 
             // Custom split: left column at `splitFraction` of width, draggable
             // divider in the middle, right column fills the rest. Default 20/80.
@@ -160,19 +131,19 @@ struct WindowSwitcherSettingsView: View {
     private var shortcutListColumn: some View {
         VStack(spacing: 0) {
             shortcutList
-            Rectangle()
-                .fill(DesignTokens.Aurora.insetSeparator)
-                .frame(height: 1)
+            SettingsRowDivider()
             // Toolbar with + / − buttons at the bottom, like macOS settings.
             HStack(spacing: 4) {
-                ShortcutToolbarButton(icon: "plus") {
-                    let new = ShortcutConfig(name: "快捷键 \(settings.shortcuts.count + 1)",
+                ShortcutToolbarButton(icon: "plus", accessibilityLabel: "添加快捷键") {
+                    let new = ShortcutConfig(name: nextShortcutName(),
                                              keyCode: 0x30,
                                              modifiers: [.maskCommand, .maskAlternate])
                     settings.shortcuts.append(new)
                     selectedShortcutID = new.id
                 }
-                ShortcutToolbarButton(icon: "minus", disabled: !canDeleteSelected) {
+                ShortcutToolbarButton(icon: "minus",
+                                      accessibilityLabel: "删除快捷键",
+                                      disabled: !canDeleteSelected) {
                     deleteSelectedShortcut()
                 }
                 Spacer()
@@ -215,6 +186,13 @@ struct WindowSwitcherSettingsView: View {
             : settings.shortcuts.first?.id
     }
 
+    private func nextShortcutName() -> String {
+        let existing = Set(settings.shortcuts.map(\.name))
+        var suffix = 2
+        while existing.contains("快捷键 \(suffix)") { suffix += 1 }
+        return "快捷键 \(suffix)"
+    }
+
     @ViewBuilder
     private var shortcutDetail: some View {
         if let index = settings.shortcuts.firstIndex(where: { $0.id == selectedShortcutID }) {
@@ -225,7 +203,7 @@ struct WindowSwitcherSettingsView: View {
                         settings.shortcuts[index] = newValue
                     }
                 }
-            ))
+            ), isGlobalRecording: $globalRecording)
         } else {
             ContentUnavailableView("未选择快捷键",
                                    systemImage: "keyboard",
@@ -255,11 +233,11 @@ private struct ShortcutItemView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(shortcut.name)
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledSystemFont(13, weight: .medium)
                         .lineLimit(1)
                     if shortcut.isDefault {
                         Text("默认")
-                            .font(.system(size: 10, weight: .medium))
+                            .scaledSystemFont(10, weight: .medium, relativeTo: .caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
                             .background(Capsule().fill(badgeBg))
@@ -267,7 +245,7 @@ private struct ShortcutItemView: View {
                     }
                 }
                 Text(shortcut.displayString)
-                    .font(.system(size: 12, design: .monospaced))
+                    .scaledSystemFont(12, design: .monospaced, relativeTo: .caption)
                     .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,9 +262,7 @@ private struct ShortcutItemView: View {
         .focusEffectDisabled()
         .animation(DesignTokens.Aurora.standard, value: isSelected)
         .animation(DesignTokens.Aurora.standard, value: isHovered)
-        .onHover { hovering in
-            isHovered = hovering
-        }
+        .auroraHover($isHovered, animated: false)
     }
 
     private var backgroundFill: AnyShapeStyle {
@@ -311,6 +287,7 @@ private struct ShortcutItemView: View {
 /// A + / − toolbar button with hover highlight.
 private struct ShortcutToolbarButton: View {
     let icon: String
+    let accessibilityLabel: String
     var disabled: Bool = false
     let action: () -> Void
 
@@ -329,6 +306,7 @@ private struct ShortcutToolbarButton: View {
                 .opacity(disabled ? 0.4 : 1.0)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
         .focusEffectDisabled()
         .disabled(disabled)
         .onHover { hovering in
@@ -348,10 +326,10 @@ private struct ShortcutToolbarButton: View {
 struct ShortcutDetailView: View {
     @EnvironmentObject private var settings: AppSettings
     @Binding var shortcut: ShortcutConfig
+    @Binding var isGlobalRecording: Bool
     // 辅助功能权限状态：2s 定时刷新。显示最小化/隐藏窗口依赖 AX 枚举，
     // 未授权时两个开关无效却无任何反馈，需显式提示用户。
     @State private var axGranted = AccessibilityChecker.isTrusted
-    private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {
@@ -366,7 +344,7 @@ struct ShortcutDetailView: View {
                                 .textFieldStyle(.plain)
                         }
                     }
-                    divider
+                    SettingsRowDivider()
                     row("快捷键") {
                         KeyRecorderView(keyCode: $shortcut.keyCode,
                                         modifiers: Binding(
@@ -379,7 +357,8 @@ struct ShortcutDetailView: View {
                                                 modifiers: modifiers,
                                                 excludingWindowShortcutID: shortcut.id
                                             )
-                                        })
+                                        },
+                                        isGlobalRecording: $isGlobalRecording)
                     }
                 }
                 groupCard("预览图大小", systemImage: "photo") {
@@ -391,7 +370,7 @@ struct ShortcutDetailView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     Text("此快捷键切换窗口时的缩略图大小。当前：\(shortcut.previewSize.displayName)")
-                        .font(.system(size: DesignTokens.SettingsTypography.caption))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
                 }
@@ -402,16 +381,16 @@ struct ShortcutDetailView: View {
                         .controlSize(.small)
                         .help("仅显示当前桌面上的窗口")
                     Text("关闭后切换器会显示其他桌面上的窗口（跨桌面切换）。默认开启，仅显示当前桌面可见窗口。")
-                        .font(.system(size: DesignTokens.SettingsTypography.caption))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
-                    divider
+                    SettingsRowDivider()
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
                         .help("在切换器中显示最小化到 Dock 的窗口（显示应用图标）")
-                    divider
+                    SettingsRowDivider()
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)
@@ -420,12 +399,12 @@ struct ShortcutDetailView: View {
                     if !axGranted {
                         Label("显示最小化/隐藏窗口需要『辅助功能』权限，当前未授予，开关暂不生效。",
                               systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
+                            .scaledSystemFont(11, relativeTo: .caption)
                             .foregroundStyle(.orange)
                             .padding(.top, 2)
                     }
                     Text("最小化和隐藏的窗口无法实时捕获预览，将显示应用图标和窗口标题")
-                        .font(.system(size: DesignTokens.SettingsTypography.caption))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
                 }
@@ -441,8 +420,9 @@ struct ShortcutDetailView: View {
             }
             .padding(10)
         }
-        .onReceive(permissionTimer) { _ in
-            axGranted = AccessibilityChecker.isTrusted
+        .onAppear { refreshAccessibilityStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshAccessibilityStatus()
         }
     }
 
@@ -452,7 +432,7 @@ struct ShortcutDetailView: View {
             HStack(spacing: 6) {
                 AuroraIconChip(systemName: systemImage, size: 20)
                 Text(title)
-                    .font(.system(size: DesignTokens.SettingsTypography.groupHeader, weight: .semibold))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.groupHeader, weight: .semibold)
                     .foregroundStyle(.primary)
             }
             .padding(.horizontal, 4)
@@ -466,21 +446,19 @@ struct ShortcutDetailView: View {
         }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(DesignTokens.Aurora.insetSeparator)
-            .frame(height: 1)
-    }
-
     private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: DesignTokens.Settings.formRowGap) {
             Text(label)
-                .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
+                .scaledSystemFont(DesignTokens.SettingsTypography.rowLabel)
                 .foregroundStyle(.primary)
                 .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
             content()
             Spacer(minLength: 0)
         }
+    }
+
+    private func refreshAccessibilityStatus() {
+        axGranted = AccessibilityChecker.isTrusted
     }
 }
 

@@ -2,14 +2,14 @@ import Darwin
 import Foundation
 import IOKit.ps
 
-struct BatteryInfo {
+nonisolated struct BatteryInfo: Sendable {
     let percent: Int
     let isCharging: Bool
     let isOnBattery: Bool
 }
 
 /// Point-in-time system facts that need no special permissions.
-enum SystemInfo {
+nonisolated enum SystemInfo {
     static func batterySnapshot() -> BatteryInfo? {
         guard PowerSampler.hasInternalBattery else { return nil }
         guard let blobRef = IOPSCopyPowerSourcesInfo() else { return nil }
@@ -43,7 +43,9 @@ enum SystemInfo {
         }
         guard kr == KERN_SUCCESS else { return nil }
         let total = ProcessInfo.processInfo.physicalMemory
-        let pageSize = UInt64(vm_kernel_page_size)
+        var kernelPageSize: vm_size_t = 0
+        guard host_page_size(host, &kernelPageSize) == KERN_SUCCESS else { return nil }
+        let pageSize = UInt64(kernelPageSize)
         let used = MetricFormat.memoryUsed(totalBytes: total,
                                            pageSize: pageSize,
                                            freePages: UInt64(stats.free_count),

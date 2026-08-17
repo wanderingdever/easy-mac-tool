@@ -2,7 +2,14 @@ import Darwin
 import Foundation
 import IOKit
 
-final class DiskSampler {
+nonisolated final class DiskSampler: @unchecked Sendable {
+    private struct RateSample {
+        var readBytesPerSec: Double?
+        var writeBytesPerSec: Double?
+        var totalRead: UInt64?
+        var totalWritten: UInt64?
+    }
+
     private struct DiskMetadata {
         var bsdName: String?
         var wholeDisk: String?
@@ -21,16 +28,38 @@ final class DiskSampler {
     private var metadataCache: [String: (metadata: DiskMetadata, updatedAt: TimeInterval)] = [:]
     private static let metadataRefreshInterval: TimeInterval = 30
     private static let maxGap: TimeInterval = 15
+    private static let diskutilTimeout: DispatchTimeInterval = .seconds(2)
+    private static let diskutilTerminationGrace: DispatchTimeInterval = .milliseconds(250)
 
     func sample(now: TimeInterval, refreshMetadata: Bool = true) -> DiskReading {
         let counters = Self.readCounters()
-        let devices = Self.mountedVolumes().map { volume -> DiskDeviceReading in
+        let volumes = Self.mountedVolumes()
+        // APFS volumes commonly share one physical counter. Calculate a disk's
+        // delta once per tick and reuse it for every volume backed by that disk.
+        var ratesByDiskID: [String: RateSample] = [:]
+        let devices = volumes.map { volume -> DiskDeviceReading in
             let metadata = metadata(for: volume, now: now, refresh: refreshMetadata)
             let wholeDisk = metadata.wholeDisk
             let counter = Self.bestCounter(from: metadata.ioCounterIDs, counters: counters)
-            let ioCounters = counter?.counters ?? DiskIOCounters()
             let diskID = counter?.id ?? wholeDisk ?? metadata.bsdName ?? volume.mountPath
-            let rates = ratesAndTotals(for: diskID, counters: ioCounters, now: now)
+            let rates: RateSample
+            if let counter {
+                if let cached = ratesByDiskID[diskID] {
+                    rates = cached
+                } else {
+                    let measured = ratesAndTotals(for: diskID, counters: counter.counters, now: now)
+                    let sample = RateSample(readBytesPerSec: measured.readBytesPerSec,
+                                            writeBytesPerSec: measured.writeBytesPerSec,
+                                            totalRead: measured.totalRead,
+                                            totalWritten: measured.totalWritten)
+                    ratesByDiskID[diskID] = sample
+                    rates = sample
+                }
+            } else {
+                // Missing registry statistics means unknown, not zero IO.
+                rates = RateSample(readBytesPerSec: nil, writeBytesPerSec: nil,
+                                   totalRead: nil, totalWritten: nil)
+            }
             let isInternal = metadata.isInternal ?? volume.isInternal
             let isRemovable = metadata.isRemovable ?? volume.isRemovable
             let isEjectable = (metadata.isEjectable ?? volume.isEjectable) || (!isInternal && isRemovable)
@@ -53,7 +82,17 @@ final class DiskSampler {
                                      totalReadBytes: rates.totalRead,
                                      totalWrittenBytes: rates.totalWritten)
         }
+        pruneCaches(activeMountPaths: Set(volumes.map(\.mountPath)), devices: devices)
         return DiskReading(devices: devices.sorted(by: sortVolumes))
+    }
+
+    private func pruneCaches(activeMountPaths: Set<String>, devices: [DiskDeviceReading]) {
+        metadataCache = metadataCache.filter { activeMountPaths.contains($0.key) }
+        let activeDiskIDs = Set(devices.map {
+            $0.ioCounterID ?? $0.wholeDisk ?? $0.bsdName ?? $0.mountPath
+        })
+        previous = previous.filter { activeDiskIDs.contains($0.key) }
+        sessionTotals = sessionTotals.filter { activeDiskIDs.contains($0.key) }
     }
 
     private static func bestCounter(from ids: [String], counters: [String: DiskIOCounters])
@@ -102,9 +141,10 @@ final class DiskSampler {
     }
 
     private func metadata(for volume: MountedVolume, now: TimeInterval, refresh: Bool) -> DiskMetadata {
-        if let cached = metadataCache[volume.mountPath],
-           now - cached.updatedAt < Self.metadataRefreshInterval {
-            return cached.metadata
+        if let cached = metadataCache[volume.mountPath] {
+            if !refresh || now - cached.updatedAt < Self.metadataRefreshInterval {
+                return cached.metadata
+            }
         }
         let metadata = Self.diskutilInfo(for: volume.mountPath)
         metadataCache[volume.mountPath] = (metadata, now)
@@ -286,13 +326,24 @@ final class DiskSampler {
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
         do {
             try process.run()
         } catch {
             return nil
         }
+        guard finished.wait(timeout: .now() + diskutilTimeout) == .success else {
+            process.terminate()
+            if finished.wait(timeout: .now() + diskutilTerminationGrace) == .timedOut {
+                if process.isRunning {
+                    Darwin.kill(process.processIdentifier, SIGKILL)
+                }
+                _ = finished.wait(timeout: .now() + diskutilTerminationGrace)
+            }
+            return nil
+        }
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
         var format = PropertyListSerialization.PropertyListFormat.xml
         guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: &format),
@@ -320,8 +371,13 @@ final class DiskSampler {
         while service != 0 {
             if let bsdName = wholeDiskBSDName(descendingFrom: service),
                let stats = property("Statistics", from: service) as? [String: Any] {
-                result[bsdName] = DiskIOCounters(read: uint(stats["Bytes (Read)"]) ?? 0,
-                                                 written: uint(stats["Bytes (Write)"]) ?? 0)
+                guard let read = uint(stats["Bytes (Read)"]),
+                      let written = uint(stats["Bytes (Write)"]) else {
+                    IOObjectRelease(service)
+                    service = IOIteratorNext(iterator)
+                    continue
+                }
+                result[bsdName] = DiskIOCounters(read: read, written: written)
             }
             IOObjectRelease(service)
             service = IOIteratorNext(iterator)
@@ -357,8 +413,8 @@ final class DiskSampler {
         let written = uint(stats["Bytes (Write)"])
             ?? uint(stats["Bytes written to block device"])
             ?? uint(stats["Bytes written by user"])
-        guard read != nil || written != nil else { return nil }
-        return DiskIOCounters(read: read ?? 0, written: written ?? 0)
+        guard let read, let written else { return nil }
+        return DiskIOCounters(read: read, written: written)
     }
 
     private static func wholeDiskBSDName(descendingFrom entry: io_registry_entry_t) -> String? {

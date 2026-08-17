@@ -79,16 +79,12 @@ final class ClipboardPanelController: ObservableObject {
     /// 面板关闭 → 1.5s 低频（后台捕获，降低 CPU 唤醒）。
     private weak var clipboardManager: ClipboardManager?
 
-    deinit {
-        if let global = globalMonitor { NSEvent.removeMonitor(global) }
-    }
-
     /// Set by AppCoordinator; called when the user picks an item. AppCoordinator
     /// is responsible for re-applying the payload and (optionally) pasting.
-    var onReapply: ((ClipboardItem) -> Void)?
+    var onReapply: ((ClipboardItem, String?) -> Void)?
     /// Set by AppCoordinator; called when the user picks a batch of items
     /// (multi-select → 复制全部).
-    var onReapplyBatch: (([ClipboardItem]) -> Void)?
+    var onReapplyBatch: (([ClipboardItem], String?) -> Void)?
 
     func present(manager: ClipboardManager) {
         // 等数据就绪再弹面板：历史尚未从磁盘加载完时，先订阅 manager.$isLoaded，
@@ -292,13 +288,10 @@ final class ClipboardPanelController: ObservableObject {
         // dismiss 仅 orderOut + 移除 monitor 即可。切换器需要 AppCoordinator
         // 完整清理 capture/activeShortcut/openTask，故走 onDismiss 回调。
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self else { return }
             let mouseLocation = NSEvent.mouseLocation
-            let panelFrame = self.panel.frame
-            let isVisible = self.panel.isVisible
             Task { @MainActor [weak self] in
-                guard let self, isVisible else { return }
-                if panelFrame.contains(mouseLocation) { return }
+                guard let self, self.panel.isVisible else { return }
+                if self.panel.frame.contains(mouseLocation) { return }
                 self.dismiss()
             }
         }

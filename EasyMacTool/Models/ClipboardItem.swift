@@ -277,7 +277,7 @@ final class ClipboardItem: Identifiable, Codable {
         guard case .image(let data, let thumbnail) = kind,
               data == nil || thumbnail == nil,
               let url = imageFileURL else { return }
-        guard let fileData = try? Data(contentsOf: url) else { return }
+        guard let fileData = ClipboardStorageCrypto.openFileOrLegacy(at: url) else { return }
         let thumb = thumbnail ?? Self.makeThumbnail(from: fileData, max: 256)
         kind = .image(fileData, thumbnail: thumb)
         // kind 变化后 footerText 改变，失效搜索缓存
@@ -296,27 +296,49 @@ final class ClipboardItem: Identifiable, Codable {
               data == nil || thumbnail == nil,
               let url = imageFileURL else { return }
         // 后台读取文件数据，避免阻塞主线程
-        let fileData = await Task.detached { try? Data(contentsOf: url) }.value
-        guard let fileData else { return }
+        let prepared: (data: Data, thumbnail: CGImage?, pixelSize: (width: Int, height: Int)?)? = await Task.detached {
+            guard let fileData = ClipboardStorageCrypto.openFileOrLegacy(at: url) else { return nil }
+            return (
+                data: fileData,
+                thumbnail: Self.makeThumbnailCGImage(from: fileData, max: 256),
+                pixelSize: Self.readPixelSize(from: fileData)
+            )
+        }.value
+        guard let prepared else { return }
         // 回主线程更新 kind（ClipboardItem 是 @MainActor 隔离）
         await MainActor.run {
             // 重新检查：可能在 await 期间已被其他路径 warmUp
             guard case .image(let curData, let curThumb) = self.kind,
                   curData == nil || curThumb == nil else { return }
-            let thumb = curThumb ?? Self.makeThumbnail(from: fileData, max: 256)
-            self.kind = .image(fileData, thumbnail: thumb)
+            let thumb = curThumb ?? prepared.thumbnail.map(Self.makeNSImage(from:))
+            self.kind = .image(prepared.data, thumbnail: thumb)
             // kind 变化后 footerText 改变，失效搜索缓存
             self._cachedSearchableText = nil
             // 同步填充像素尺寸缓存，footerText 不再重复解析 TIFF 元数据
             if self.imagePixelSize == nil {
-                self.imagePixelSize = Self.readPixelSize(from: fileData)
+                self.imagePixelSize = prepared.pixelSize
             }
         }
     }
 
+    /// Produces a bounded decoded image for the expanded preview. ImageIO does
+    /// the expensive decode/downsample work off the main actor; the returned
+    /// NSImage is already backed by the target-sized CGImage.
+    func previewImage(maxPixelSize: CGFloat) async -> NSImage? {
+        if case .image(let data, _) = kind, data == nil, imageFileURL != nil {
+            await warmUpAsync()
+        }
+        guard case .image(let data, _) = kind, let data else { return nil }
+        let image = await Task.detached {
+            Self.makeThumbnailCGImage(from: data, max: maxPixelSize)
+        }.value
+        guard !Task.isCancelled, let image else { return nil }
+        return Self.makeNSImage(from: image)
+    }
+
     /// 用 ImageIO 仅读取图片元数据中的像素尺寸（不解码像素）。
     /// 供 snapshot / warmUp 填充 imagePixelSize 缓存。
-    static func readPixelSize(from imageData: Data) -> (width: Int, height: Int)? {
+    nonisolated static func readPixelSize(from imageData: Data) -> (width: Int, height: Int)? {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = props[kCGImagePropertyPixelWidth] as? Int,
@@ -329,15 +351,24 @@ final class ClipboardItem: Identifiable, Codable {
     /// 注意：NSImage 的 size 必须设为 CGImage 的实际像素尺寸，不能用 .zero。
     /// 之前用 .zero 导致 estimatedMemoryBytes 估算为 0，150MB 上限失效。
     static func makeThumbnail(from imageData: Data, max maxSize: CGFloat) -> NSImage? {
+        makeThumbnailCGImage(from: imageData, max: maxSize).map(makeNSImage(from:))
+    }
+
+    nonisolated private static func makeThumbnailCGImage(
+        from imageData: Data,
+        max maxSize: CGFloat
+    ) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil) else { return nil }
         let options: CFDictionary = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: Int(maxSize)
         ] as CFDictionary
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
-        // 用 CGImage 的实际像素尺寸设置 NSImage.size，使 estimatedMemoryBytes
-        // 能正确估算（width * height * 4 bytes）。
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options)
+    }
+
+    private static func makeNSImage(from image: CGImage) -> NSImage {
+        // Use actual pixel dimensions so memory-cost estimates remain correct.
         let size = NSSize(width: image.width, height: image.height)
         return NSImage(cgImage: image, size: size)
     }
@@ -348,18 +379,26 @@ final class ClipboardItem: Identifiable, Codable {
     /// 用 NSCache 而非实例变量：ClipboardItem 是常驻对象，滚动出去后视图销毁了，
     /// 实例变量 _cachedFullImage 仍持有 NSImage（每张 4-8MB），100 张图滚一遍
     /// 可累积 400-800MB。NSCache 在系统内存压力时自动淘汰，无需依赖 coolDown()。
-    /// totalCostLimit = 100MB，按 TIFF data 字节数计入成本，超出自动 LRU 淘汰。
+    /// 缓存按解码后的近似 RGBA 像素成本计费，超出预算后自动 LRU 淘汰。
     private static let fullImageCache: NSCache<NSUUID, NSImage> = {
         let c = NSCache<NSUUID, NSImage>()
-        c.totalCostLimit = 100 * 1024 * 1024
+        c.totalCostLimit = ImageMemoryBudget.clipboardFullImageBytes
         return c
     }()
     var fullImage: NSImage? {
+        Self.fullImageCache.totalCostLimit = ImageMemoryBudget.adjusted(
+            ImageMemoryBudget.clipboardFullImageBytes
+        )
         if let cached = Self.fullImageCache.object(forKey: id as NSUUID) { return cached }
         guard case .image(let data, _) = kind, let data else { return nil }
         guard let img = NSImage(data: data) else { return nil }
-        // cost = TIFF data 字节数，让 NSCache 按总成本淘汰大图。
-        Self.fullImageCache.setObject(img, forKey: id as NSUUID, cost: data.count)
+        let pixelSize = imagePixelSize ?? Self.readPixelSize(from: data)
+        let decodedCost = pixelSize.flatMap {
+            ImageMemoryBudget.decodedRGBABytes(width: $0.width, height: $0.height)
+        }
+        Self.fullImageCache.setObject(
+            img, forKey: id as NSUUID, cost: max(data.count, decodedCost ?? 0)
+        )
         return img
     }
 
@@ -404,6 +443,19 @@ final class ClipboardItem: Identifiable, Codable {
         let text = (title + "\n" + footerText).lowercased()
         _cachedSearchableText = text
         return text
+    }
+
+    /// Avoid retaining a second lowercased copy for unusually large text
+    /// entries. Small entries keep the hot-path cache; large entries use
+    /// Foundation's case-insensitive search against the original storage.
+    func matchesSearch(_ lowercasedQuery: String) -> Bool {
+        let cacheThreshold = 16 * 1024
+        if title.utf8.count <= cacheThreshold {
+            return searchableText.contains(lowercasedQuery)
+        }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return title.range(of: lowercasedQuery, options: options) != nil
+            || footerText.range(of: lowercasedQuery, options: options) != nil
     }
 
     /// 释放懒加载缓存（fullImage / _cachedAttributedString / _cachedHeaderForeground）。
@@ -510,8 +562,10 @@ final class ClipboardItem: Identifiable, Codable {
             }
             pasteboard.setString(s, forType: .string)
         case .url(let url, _):
-            pasteboard.setString(url.absoluteString, forType: .string)
-            pasteboard.setPropertyList([url.absoluteString], forType: .URL)
+            let item = NSPasteboardItem()
+            item.setString(url.absoluteString, forType: .URL)
+            item.setString(url.absoluteString, forType: .string)
+            pasteboard.writeObjects([item])
         case .image(let data, _):
             // 冷数据 data 为 nil 时跳过：reapply() 在调用 write(to:) 前已通过
             // warmUpAsync() 加载冷数据，不应在此同步 fallback（阻塞主线程）。

@@ -49,7 +49,7 @@ struct WindowThumbnailCell: View {
                         .frame(width: 18, height: 18)
                 }
                 Text(item.title)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystemFont(13, weight: .medium)
                     .lineLimit(1)
                     .foregroundStyle(.primary)
             }
@@ -107,6 +107,22 @@ struct WindowThumbnailCell: View {
         )
         // Disable animation so selection changes feel instant.
         .transaction { $0.animation = nil }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.title)
+        .accessibilityValue(accessibilityValue)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private var accessibilityValue: String {
+        var values: [String] = []
+        switch item.windowState {
+        case .visible: values.append("可见窗口")
+        case .minimized: values.append("已最小化")
+        case .hidden: values.append("已隐藏")
+        }
+        if item.isActiveWindow { values.append("当前窗口") }
+        if isSelected { values.append("已选择") }
+        return values.joined(separator: "，")
     }
 
     /// The thumbnail content, sized exactly to the window's aspect ratio.

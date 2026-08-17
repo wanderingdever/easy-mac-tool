@@ -77,11 +77,10 @@
 
 ## 系统权限
 
-应用需以下三项系统权限方能正常工作。权限请求**按顺序**触发，避免系统弹窗冲突：
+应用需以下两项系统权限方能正常工作。权限请求**按顺序**触发，避免系统弹窗冲突：
 
 1. **辅助功能（Accessibility）**：`CGEventTap` 拦截全局快捷键必需
 2. **屏幕录制（Screen Recording）**：`SCShareableContent` 抓取窗口缩略图必需（macOS 15+ 静默失败，首次调用即便抛错也会注册 app 到 TCC 列表）
-3. **输入监控（Input Monitoring）**：`CGEventTap` 创建后系统会自动提示
 
 > 注意：App Sandbox 已禁用，否则无法使用 `CGEventTap` 与 Accessibility API。
 
@@ -92,7 +91,7 @@
 1. 从 [Releases](https://github.com/wanderingdever/easy-mac-tool/releases) 下载 `EasyMacTool.zip`
 2. 解压后将 `EasyMacTool.app` 拖入 `/Applications/` 目录
 3. 首次启动因未签名，需在「系统设置 → 隐私与安全性」中允许打开
-4. 启动后按提示依次授权：辅助功能 → 屏幕录制 → 输入监控
+4. 启动后按提示依次授权：辅助功能 → 屏幕录制
 5. 菜单栏出现「E」图标即表示运行中
 
 ### 从源码构建

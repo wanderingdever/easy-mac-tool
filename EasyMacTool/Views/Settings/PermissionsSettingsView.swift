@@ -9,17 +9,13 @@ import os
 /// 权限卡片带状态胶囊（已授权 = 绿渐变 / 未授权 = 红），
 /// 「请求权限」为品牌渐变主按钮，与全应用 Aurora 语言一致。
 struct PermissionsSettingsView: View {
-    private static let logger = Logger(subsystem: "com.easymactool", category: "PermissionsSettings")
+    nonisolated private static let logger = Logger(subsystem: "com.easymactool", category: "PermissionsSettings")
     @State private var launchAtLogin = false
     // 权限状态本地缓存：每 2 秒定时刷新，让用户授权后回到设置窗口能看到
     // 状态图标变绿。直接读 AccessibilityChecker 的静态计算属性不会触发
     // SwiftUI 重绘，所以用 @State 显式持有并定时更新。
     @State private var accessibilityGranted = AccessibilityChecker.isTrusted
     @State private var screenRecordingGranted = AccessibilityChecker.isScreenRecordingTrusted
-
-    // 2 秒定时器，刷新权限状态。系统对话框关闭后用户回到设置窗口，
-    // 状态应自动变绿。
-    private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {
@@ -31,11 +27,14 @@ struct PermissionsSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(DesignTokens.Aurora.pageBackground)
-        .onAppear { loadLaunchAtLoginStatus() }
-        .onReceive(permissionTimer) { _ in
-            // 定时刷新权限状态，让用户授权后回到设置窗口看到变绿。
-            accessibilityGranted = AccessibilityChecker.isTrusted
-            screenRecordingGranted = AccessibilityChecker.isScreenRecordingTrusted
+        .onAppear {
+            loadLaunchAtLoginStatus()
+            refreshPermissionStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Returning from System Settings is the meaningful refresh point;
+            // avoid a permanent two-second polling wakeup.
+            refreshPermissionStatus()
         }
     }
 
@@ -43,15 +42,16 @@ struct PermissionsSettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("通用", systemImage: "gear")
-            VStack(spacing: 0) {
+            SettingsSectionHeader(title: "通用", systemImage: "gear")
+            SettingsCard(spacing: 0) {
                 HStack {
                     Text("开机时自动启动")
-                        .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.rowLabel)
                         .foregroundStyle(.primary)
                     Spacer(minLength: 0)
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
+                        .accessibilityLabel("开机时自动启动")
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
@@ -60,19 +60,6 @@ struct PermissionsSettingsView: View {
                         }
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
-        }
-    }
-
-    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
-    private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: systemImage, size: 26)
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                .foregroundStyle(.primary)
         }
     }
 
@@ -80,9 +67,9 @@ struct PermissionsSettingsView: View {
 
     private var permissionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("权限", systemImage: "checkmark.shield")
+            SettingsSectionHeader(title: "权限", systemImage: "checkmark.shield")
             Text("需要以下权限才能正常运行，点击「请求权限」后会同时调用系统 API 并打开系统设置，让应用出现在列表中，再开启开关。授权后约 2 秒状态自动刷新。")
-                .font(.system(size: DesignTokens.SettingsTypography.caption))
+                .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 560, alignment: .leading)
@@ -118,12 +105,12 @@ struct PermissionsSettingsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(.system(size: DesignTokens.SettingsTypography.permTitle, weight: .semibold))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.permTitle, weight: .semibold)
                         .foregroundStyle(.primary)
                     statusPill(granted)
                 }
                 Text(description)
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: DesignTokens.Settings.permActionsGap + 2) {
                     // 「请求权限」：品牌渐变主按钮，同时调请求 API + 跳转系统设置。
@@ -163,7 +150,7 @@ struct PermissionsSettingsView: View {
             Image(systemName: icon)
                 .font(.system(size: 8, weight: .bold))
             Text(text)
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 7)
@@ -179,7 +166,7 @@ struct PermissionsSettingsView: View {
                 Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 12, weight: .regular))
             }
-            .font(.system(size: DesignTokens.SettingsTypography.buttonSmall, weight: .medium))
+            .scaledSystemFont(DesignTokens.SettingsTypography.buttonSmall, weight: .medium)
             .foregroundStyle(DesignTokens.Aurora.tint)
             .padding(.vertical, 6)
             .padding(.horizontal, 8)
@@ -208,9 +195,14 @@ struct PermissionsSettingsView: View {
 
     // MARK: - Permission requests
 
+    private func refreshPermissionStatus() {
+        accessibilityGranted = AccessibilityChecker.isTrusted
+        screenRecordingGranted = AccessibilityChecker.isScreenRecordingTrusted
+    }
+
     private func requestAccessibility() {
         let options: CFDictionary = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue(): kCFBooleanTrue
+            "AXTrustedCheckOptionPrompt" as CFString: kCFBooleanTrue
         ] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
     }

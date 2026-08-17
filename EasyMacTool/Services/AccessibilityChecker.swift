@@ -8,7 +8,7 @@ import os
 /// Wraps the TCC permission checks/prompts required for the event tap and AX APIs.
 @MainActor
 enum AccessibilityChecker {
-    private static let logger = Logger(subsystem: "com.easymactool", category: "AccessibilityChecker")
+    nonisolated private static let logger = Logger(subsystem: "com.easymactool", category: "AccessibilityChecker")
     /// True iff the app has been granted Accessibility (required for CGEventTap `.defaultTap`
     /// and for cross-process AXUIElement use).
     static var isTrusted: Bool { AXIsProcessTrusted() }
@@ -70,7 +70,7 @@ enum AccessibilityChecker {
                 triggerScreenCaptureRegistration()
             case .accessibility:
                 let options: CFDictionary = [
-                    kAXTrustedCheckOptionPrompt.takeUnretainedValue(): kCFBooleanTrue
+                    "AXTrustedCheckOptionPrompt" as CFString: kCFBooleanTrue
                 ] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(options)
             }
@@ -161,4 +161,3 @@ extension Notification.Name {
     /// the user immediately sees the permissions' status icons.
     static let focusPermissionSection = Notification.Name("EasyMacToolFocusPermissionSection")
 }
-

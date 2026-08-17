@@ -1,19 +1,19 @@
 import Foundation
 
 /// Cumulative interface byte counters (since boot), read from the kernel.
-struct NetworkCounters: Equatable {
+nonisolated struct NetworkCounters: Equatable, Sendable {
     var received: UInt64 = 0
     var sent: UInt64 = 0
 }
 
-struct DiskIOCounters: Equatable {
+nonisolated struct DiskIOCounters: Equatable, Sendable {
     var read: UInt64 = 0
     var written: UInt64 = 0
 }
 
 /// Pure, deterministic helpers for the system monitor: number formatting, the
 /// fixed-size history buffer, network speed math and interface filtering.
-enum MetricFormat {
+nonisolated enum MetricFormat {
     // MARK: Memory
 
     static func memoryUsed(totalBytes: UInt64,
@@ -200,24 +200,32 @@ enum MetricFormat {
     }
 }
 
-enum TemperatureUnit: String {
+nonisolated enum TemperatureUnit: String, Sendable {
     case celsius
     case fahrenheit
 }
 
 /// Fixed-size ring of recent samples (oldest → newest) for the history graphs.
-struct MetricHistory {
+nonisolated struct MetricHistory: Sendable {
     let capacity: Int
-    private(set) var values: [Double] = []
+    private var storage: [Double] = []
+    private var startIndex = 0
+
+    var values: [Double] {
+        guard storage.count == capacity, startIndex != 0 else { return storage }
+        return Array(storage[startIndex...]) + Array(storage[..<startIndex])
+    }
 
     init(capacity: Int) {
         self.capacity = max(1, capacity)
     }
 
     mutating func push(_ value: Double) {
-        values.append(value)
-        if values.count > capacity {
-            values.removeFirst(values.count - capacity)
+        if storage.count < capacity {
+            storage.append(value)
+        } else {
+            storage[startIndex] = value
+            startIndex = (startIndex + 1) % capacity
         }
     }
 }

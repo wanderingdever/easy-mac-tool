@@ -82,10 +82,6 @@ final class AppUsageTracker {
         reaperTimer = t
     }
 
-    deinit {
-        reaperTimer?.invalidate()
-    }
-
     /// 清理已退出但 observer 仍残留的 PID。force-kill (SIGKILL)、
     /// Activity Monitor 强制退出、内核 EXC_BAD_ACCESS 崩溃等场景
     /// 不触发 NSWorkspace.didTerminateApplicationNotification，
@@ -211,7 +207,7 @@ final class AppUsageTracker {
             let tracker = Unmanaged<AppUsageTracker>
                 .fromOpaque(refcon)
                 .takeUnretainedValue()
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 tracker.handleFocusedWindowChange(pid: extractedPid, notification: notif)
             }
         }, &observer)

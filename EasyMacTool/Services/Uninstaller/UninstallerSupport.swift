@@ -1,13 +1,35 @@
+import Darwin
 import Foundation
 
 /// Foundational ownership rules for the Uninstaller. Every deeper location is
 /// derived from a verified bundle identifier; display names never become paths.
-enum UninstallerSupport {
-    enum Kind: Equatable {
+nonisolated enum UninstallerSupport {
+    struct FileIdentity: Equatable, Sendable {
+        let device: UInt64
+        let inode: UInt64
+        let fileType: UInt16
+    }
+
+    static func fileIdentity(at url: URL) -> FileIdentity? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        let type = info.st_mode & S_IFMT
+        guard type != S_IFLNK else { return nil }
+        return FileIdentity(device: UInt64(info.st_dev),
+                            inode: UInt64(info.st_ino),
+                            fileType: UInt16(type))
+    }
+
+    static func isDescendant(_ url: URL, of root: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        return path.hasPrefix(rootPath + "/")
+    }
+    nonisolated enum Kind: Equatable, Sendable {
         case support, caches
     }
 
-    struct Candidate: Equatable {
+    nonisolated struct Candidate: Equatable, Sendable {
         let url: URL
         let kind: Kind
     }
@@ -24,9 +46,7 @@ enum UninstallerSupport {
 
     static func isNestedBundle(_ candidateURL: URL?, in appURL: URL) -> Bool {
         guard let candidateURL else { return false }
-        let appPath = appURL.standardizedFileURL.path
-        let candidatePath = candidateURL.standardizedFileURL.path
-        return candidatePath.hasPrefix(appPath + "/")
+        return isDescendant(candidateURL, of: appURL)
     }
 
     static func exactDeepCandidates(home: URL,
@@ -72,7 +92,7 @@ enum UninstallerSupport {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
         guard trimmed.unicodeScalars.allSatisfy(allowed.contains) else { return false }
         guard !trimmed.hasPrefix("."), !trimmed.hasSuffix(".") else { return false }
-        let segments = trimmed.split(separator: ".")
+        let segments = trimmed.split(separator: ".", omittingEmptySubsequences: false)
         guard segments.count >= 2 else { return false }
         return segments.allSatisfy { !$0.isEmpty }
     }

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum CPUTemperaturePlatform: Equatable {
+nonisolated enum CPUTemperaturePlatform: Equatable, Sendable {
     case appleM1Family
     case appleM2Family
     case appleM3Family
@@ -10,13 +10,13 @@ enum CPUTemperaturePlatform: Equatable {
     case generic
 }
 
-struct CachedSensorReading {
+nonisolated struct CachedSensorReading: Sendable {
     var value: Double
     var updatedAt: TimeInterval
     var missedSamples: Int
 }
 
-enum TemperatureSensorSelector {
+nonisolated enum TemperatureSensorSelector {
     static let minimumChipTemperature = 10.0
 
     private static let appleM1CPUCoreKeys: Set<String> = [
@@ -73,7 +73,8 @@ enum TemperatureSensorSelector {
         guard sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0) == 0 else {
             return .generic
         }
-        return platform(brandString: String(cString: buffer))
+        let brand = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return platform(brandString: brand)
     }
 
     static func displayedCPUTemperature(readings: [(key: String, value: Double)],

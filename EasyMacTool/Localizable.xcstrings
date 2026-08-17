@@ -1,0 +1,28 @@
+{
+  "sourceLanguage" : "zh-Hans",
+  "strings" : {
+    "EasyMacTool" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "EasyMacTool"
+          }
+        }
+      }
+    },
+    "让您轻松使用 Mac" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "让您轻松使用 Mac"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

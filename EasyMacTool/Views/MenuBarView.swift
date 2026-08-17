@@ -7,6 +7,7 @@ import SwiftUI
 /// 「设置」「退出」纯图标按钮。
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var settings: AppSettings
     @ObservedObject private var monitor = SystemMonitor.shared
 
@@ -26,6 +27,10 @@ struct MenuBarView: View {
         }
         .padding(8)
         .frame(width: settings.systemMonitorEnabled ? 300 : 200)
+        .animation(reduceMotion ? nil : DesignTokens.Aurora.standard,
+                   value: settings.systemMonitorEnabled)
+        .onAppear { monitor.panelDidAppear() }
+        .onDisappear { monitor.panelDidDisappear() }
     }
 
     // MARK: - 渐变发丝分隔线
@@ -84,9 +89,7 @@ private struct IconButton: View {
         .accessibilityLabel(label)
         .shadow(color: isHovered ? DesignTokens.Aurora.brandGlow : .clear,
                 radius: 6, y: 2)
-        .onHover { hovering in
-            withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
-        }
+        .auroraHover($isHovered)
     }
 }
 
@@ -95,6 +98,7 @@ private struct IconButton: View {
 private struct SystemMonitorPanel: View {
     @ObservedObject var monitor: SystemMonitor
     let unit: TemperatureUnit
+    @State private var pendingTermination: ActiveAppMemoryInfo?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -117,13 +121,15 @@ private struct SystemMonitorPanel: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(DesignTokens.Aurora.brandGradient)
                     Text("活动应用内存")
-                        .font(.system(size: 10, weight: .semibold))
+                        .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
                         .foregroundStyle(.secondary)
                 }
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(monitor.topMemoryApps) { app in
-                            ActiveAppRow(app: app)
+                            ActiveAppRow(app: app) {
+                                pendingTermination = app
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -164,6 +170,20 @@ private struct SystemMonitorPanel: View {
                 }
             }
         }
+        .alert("退出应用？", isPresented: Binding(
+            get: { pendingTermination != nil },
+            set: { if !$0 { pendingTermination = nil } }
+        )) {
+            Button("取消", role: .cancel) { pendingTermination = nil }
+            Button("退出", role: .destructive) {
+                if let app = pendingTermination {
+                    NSRunningApplication(processIdentifier: app.pid)?.terminate()
+                }
+                pendingTermination = nil
+            }
+        } message: {
+            Text("将请求 \(pendingTermination?.name ?? "该应用") 退出，请先确认未保存的内容。")
+        }
         .padding(.horizontal, 8)
     }
 
@@ -174,11 +194,12 @@ private struct SystemMonitorPanel: View {
                 .foregroundStyle(DesignTokens.Aurora.brandGradient)
                 .frame(width: 16)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .scaledSystemFont(11, weight: .medium, relativeTo: .caption)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
             Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .scaledSystemFont(11, weight: .semibold, design: .monospaced,
+                                  relativeTo: .caption)
                 .monospacedDigit()
                 .foregroundStyle(.primary)
         }
@@ -236,7 +257,8 @@ private struct MetricCard<Icon: View>: View {
             VStack(spacing: 4) {
                 icon
                 Text(value)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .scaledSystemFont(11, weight: .semibold, design: .rounded,
+                                      relativeTo: .caption)
                     .monospacedDigit()
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -254,7 +276,7 @@ private struct MetricCard<Icon: View>: View {
                     )
             )
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .scaledSystemFont(9, weight: .medium, relativeTo: .caption2)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -265,6 +287,7 @@ private struct MetricCard<Icon: View>: View {
 /// 活动应用内存行：图标 + 名称 + 内存大小；hover 时行尾出现关闭按钮，点击退出该应用。
 private struct ActiveAppRow: View {
     let app: ActiveAppMemoryInfo
+    let onRequestTermination: () -> Void
 
     @State private var isHovered = false
 
@@ -281,18 +304,19 @@ private struct ActiveAppRow: View {
                     .foregroundStyle(.secondary)
             }
             Text(app.name)
-                .font(.system(size: 11, weight: .medium))
+                .scaledSystemFont(11, weight: .medium, relativeTo: .caption)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
             Text(MetricFormat.bytes(app.memoryBytes))
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .scaledSystemFont(11, weight: .semibold, design: .monospaced,
+                                  relativeTo: .caption)
                 .monospacedDigit()
                 .foregroundStyle(isHovered ? .primary : .secondary)
             if isHovered {
                 Button {
-                    NSRunningApplication(processIdentifier: app.pid)?.terminate()
+                    onRequestTermination()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
@@ -310,9 +334,7 @@ private struct ActiveAppRow: View {
                       ? AnyShapeStyle(DesignTokens.Aurora.brandGradient.opacity(0.10))
                       : AnyShapeStyle(.clear))
         )
-        .onHover { hovering in
-            withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
-        }
+        .auroraHover($isHovered)
         .accessibilityLabel(app.name)
     }
 }

@@ -8,6 +8,10 @@ import Darwin
 /// an unrecoverable delete.
 final class AppUninstaller: ObservableObject {
     static let shared = AppUninstaller()
+    nonisolated private static let finderQueue = DispatchQueue(
+        label: "com.easymactool.uninstaller.finder-apple-event",
+        qos: .userInitiated
+    )
 
     enum Phase: Equatable {
         case empty
@@ -26,17 +30,18 @@ final class AppUninstaller: ObservableObject {
         static func == (lhs: Target, rhs: Target) -> Bool { lhs.url == rhs.url }
     }
 
-    enum Category: Int, CaseIterable {
+    nonisolated enum Category: Int, CaseIterable, Sendable {
         case app, support, caches, preferences, containers, logs, state, other
 
         var sortRank: Int { rawValue }
     }
 
-    struct Leftover: Identifiable, Equatable {
+    nonisolated struct Leftover: Identifiable, Equatable, Sendable {
         let id = UUID()
         let url: URL
         let category: Category
         let size: Int64
+        let identity: UninstallerSupport.FileIdentity
         var include: Bool = true
 
         var name: String { url.lastPathComponent }
@@ -46,9 +51,16 @@ final class AppUninstaller: ObservableObject {
         }
     }
 
+    nonisolated struct RemovalFailure: Identifiable, Sendable {
+        let id = UUID()
+        let url: URL
+        let reason: String
+    }
+
     @Published private(set) var phase: Phase = .empty
     @Published private(set) var target: Target?
     @Published var items: [Leftover] = []
+    @Published private(set) var removalFailures: [RemovalFailure] = []
     private var allowedRemovalPaths = Set<String>()
 
     private init() {}
@@ -72,6 +84,7 @@ final class AppUninstaller: ObservableObject {
 
         target = Target(name: name, bundleID: bundleID, url: selectedURL, icon: icon)
         items = []
+        removalFailures = []
         allowedRemovalPaths = []
         phase = .scanning
 
@@ -94,6 +107,7 @@ final class AppUninstaller: ObservableObject {
     func reset() {
         target = nil
         items = []
+        removalFailures = []
         allowedRemovalPaths = []
         phase = .empty
     }
@@ -104,28 +118,74 @@ final class AppUninstaller: ObservableObject {
         let chosen = items.filter(\.include)
         guard !chosen.isEmpty else { return }
         phase = .removing
+        let allowedPaths = allowedRemovalPaths
+        let targetURL = target?.url
 
-        if let bundleID = target?.bundleID, let targetURL = target?.url {
+        let initiallySafe = chosen.filter {
+            Self.removalIsStillSafe($0, allowedPaths: allowedPaths, targetURL: targetURL)
+        }
+        let initiallySafeIDs = Set(initiallySafe.map(\.id))
+        let initialFailures = chosen.filter { candidate in
+            !initiallySafeIDs.contains(candidate.id)
+        }.map {
+            RemovalFailure(url: $0.url, reason: "文件身份或路径在确认后发生变化")
+        }
+
+        guard !initiallySafe.isEmpty else {
+            removalFailures = initialFailures
+            phase = .done(freed: 0, failed: initialFailures.count)
+            return
+        }
+
+        var terminatingPIDs = Set<pid_t>()
+        if let bundleID = target?.bundleID, let targetURL {
             for app in NSWorkspace.shared.runningApplications where
                 app.bundleIdentifier == bundleID
                 || UninstallerSupport.isNestedBundle(app.bundleURL, in: targetURL) {
+                terminatingPIDs.insert(app.processIdentifier)
                 app.terminate()
             }
         }
 
-        let allowedPaths = allowedRemovalPaths
-        let targetURL = target?.url
+        Task { @MainActor [weak self] in
+            await Self.waitForApplicationsToExit(terminatingPIDs, timeout: 3)
+            guard let self, self.phase == .removing else { return }
+            self.performRemoval(initiallySafe,
+                                initialFailures: initialFailures,
+                                allowedPaths: allowedPaths,
+                                targetURL: targetURL)
+        }
+    }
 
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { [weak self] in
+    private static func waitForApplicationsToExit(_ pids: Set<pid_t>, timeout: TimeInterval) async {
+        guard !pids.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let runningPIDs = Set(NSWorkspace.shared.runningApplications.map(\.processIdentifier))
+            if pids.isDisjoint(with: runningPIDs) { return }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func performRemoval(_ initiallySafe: [Leftover],
+                                initialFailures: [RemovalFailure],
+                                allowedPaths: Set<String>,
+                                targetURL: URL?) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let fm = FileManager.default
             var freed: Int64 = 0
             var stubborn: [Leftover] = []
-            var failed = 0
-            for item in chosen {
-                guard Self.removalIsStillSafe(item.url,
+            var failures = initialFailures
+            for item in initiallySafe {
+                guard Self.removalIsStillSafe(item,
                                               allowedPaths: allowedPaths,
                                               targetURL: targetURL) else {
-                    failed += 1
+                    failures.append(RemovalFailure(url: item.url,
+                                                   reason: "删除前文件身份或路径发生变化"))
                     continue
                 }
                 do {
@@ -138,11 +198,24 @@ final class AppUninstaller: ObservableObject {
 
             // Items we lack rights for go through Finder, which shows the
             // administrator prompt and moves them to the Trash like a drag.
-            if !stubborn.isEmpty {
-                Self.trashViaFinder(stubborn.map(\.url))
-                for item in stubborn {
+            let finderCandidates = stubborn.filter {
+                Self.removalIsStillSafe($0, allowedPaths: allowedPaths, targetURL: targetURL)
+            }
+            let finderCandidateIDs = Set(finderCandidates.map(\.id))
+            for item in stubborn where !finderCandidateIDs.contains(item.id) {
+                failures.append(RemovalFailure(url: item.url,
+                                               reason: "请求 Finder 前文件身份或路径发生变化"))
+            }
+            if !finderCandidates.isEmpty {
+                let finderError = Self.finderQueue.sync {
+                    Self.trashViaFinder(finderCandidates.map(\.url))
+                }
+                for item in finderCandidates {
                     if fm.fileExists(atPath: item.url.path) {
-                        failed += 1
+                        failures.append(RemovalFailure(
+                            url: item.url,
+                            reason: finderError ?? "Finder 未移动该项目，可能已取消授权"
+                        ))
                     } else {
                         freed += item.size
                     }
@@ -152,7 +225,8 @@ final class AppUninstaller: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.phase == .removing else { return }
                 self.items = []
-                self.phase = .done(freed: freed, failed: failed)
+                self.removalFailures = failures
+                self.phase = .done(freed: freed, failed: failures.count)
             }
         }
     }
@@ -160,8 +234,8 @@ final class AppUninstaller: ObservableObject {
     /// Asks Finder to trash `urls` in one batch via in-process Apple Events.
     /// Finder owns the privilege elevation (the administrator prompt); a cancel
     /// simply leaves the items in place.
-    private static func trashViaFinder(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
+    nonisolated private static func trashViaFinder(_ urls: [URL]) -> String? {
+        guard !urls.isEmpty else { return nil }
         let targets = urls
             .map { "set end of targets to POSIX file \(literal($0.path))" }
             .joined(separator: "\n")
@@ -170,10 +244,17 @@ final class AppUninstaller: ObservableObject {
         \(targets)
         tell application "Finder" to delete targets
         """
-        _ = NSAppleScript(source: source)?.executeAndReturnError(nil)
+        guard let script = NSAppleScript(source: source) else { return "无法创建 Finder 删除请求" }
+        var errorInfo: NSDictionary?
+        _ = script.executeAndReturnError(&errorInfo)
+        guard let errorInfo else { return nil }
+        let message = errorInfo[NSAppleScript.errorMessage] as? String
+        let number = errorInfo[NSAppleScript.errorNumber] as? Int
+        if let message, let number { return "Finder 错误 \(number)：\(message)" }
+        return message ?? "Finder 拒绝了删除请求"
     }
 
-    private static func literal(_ s: String) -> String {
+    nonisolated private static func literal(_ s: String) -> String {
         let escaped = s.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
@@ -181,12 +262,15 @@ final class AppUninstaller: ObservableObject {
 
     // MARK: - Scanning
 
-    private static func collect(bundleID: String, appURL: URL) -> [Leftover] {
+    nonisolated private static func collect(bundleID: String, appURL: URL) -> [Leftover] {
         let fm = FileManager.default
         let home = NSHomeDirectory()
         let lib = home + "/Library"
         var paths: [(URL, Category)] = [(appURL, .app)]
-        let bundleIDs = ownedBundleIDs(in: appURL, primary: bundleID, fm: fm)
+        // One traversal collects nested bundle IDs and allocated size. Large
+        // application bundles (Xcode, games) previously walked every file twice.
+        let appScan = scanAppBundle(appURL, primaryBundleID: bundleID, fm: fm)
+        let bundleIDs = appScan.bundleIDs
 
         func add(_ path: String, _ category: Category) {
             let url = URL(fileURLWithPath: path)
@@ -248,15 +332,32 @@ final class AppUninstaller: ObservableObject {
             return !hasSymbolicLinkInParents(of: url, through: root)
         }
         return safe
-            .map { Leftover(url: $0.0, category: $0.1, size: directorySize(of: $0.0, fm: fm)) }
-            .sorted { ($0.category.sortRank, -$0.size) < ($1.category.sortRank, -$1.size) }
+            .compactMap { url, category in
+                guard let identity = UninstallerSupport.fileIdentity(at: url) else { return nil }
+                let size = url.standardizedFileURL.path == appPath
+                    ? appScan.allocatedSize
+                    : directorySize(of: url, fm: fm)
+                return Leftover(url: url,
+                                category: category,
+                                size: size,
+                                identity: identity)
+            }
+            .sorted {
+                if $0.category.sortRank != $1.category.sortRank {
+                    return $0.category.sortRank < $1.category.sortRank
+                }
+                return $0.size > $1.size
+            }
     }
 
-    private static func removalIsStillSafe(_ url: URL,
+    nonisolated private static func removalIsStillSafe(_ item: Leftover,
                                            allowedPaths: Set<String>,
                                            targetURL: URL?) -> Bool {
+        let url = item.url
         let path = url.standardizedFileURL.path
-        guard allowedPaths.contains(path), let targetURL else { return false }
+        guard allowedPaths.contains(path),
+              let targetURL,
+              UninstallerSupport.fileIdentity(at: url) == item.identity else { return false }
         if path == targetURL.standardizedFileURL.path { return !isSymbolicLink(url) }
         guard let root = scanRoots(home: NSHomeDirectory()).first(where: {
             path.hasPrefix($0.path + "/")
@@ -264,31 +365,42 @@ final class AppUninstaller: ObservableObject {
         return !hasSymbolicLinkInParents(of: url, through: root)
     }
 
-    private static func ownedBundleIDs(in appURL: URL,
-                                       primary: String,
-                                       fm: FileManager) -> Set<String> {
-        var result: Set<String> = [primary]
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
+    private struct AppBundleScan {
+        var bundleIDs: Set<String>
+        var allocatedSize: Int64
+    }
+
+    nonisolated private static func scanAppBundle(_ appURL: URL,
+                                                  primaryBundleID: String,
+                                                  fm: FileManager) -> AppBundleScan {
+        var result = AppBundleScan(bundleIDs: [primaryBundleID], allocatedSize: 0)
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey, .isSymbolicLinkKey,
+            .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
+        ]
         guard let enumerator = fm.enumerator(at: appURL,
-                                             includingPropertiesForKeys: keys,
-                                             options: [.skipsHiddenFiles],
+                                             includingPropertiesForKeys: Array(keys),
+                                             options: [],
                                              errorHandler: nil) else { return result }
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: Set(keys))
+            let values = try? url.resourceValues(forKeys: keys)
             if values?.isSymbolicLink == true {
                 enumerator.skipDescendants()
                 continue
             }
+            result.allocatedSize += Int64(
+                values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0
+            )
             guard values?.isDirectory == true,
                   ["app", "appex", "xpc", "plugin", "bundle"].contains(url.pathExtension.lowercased()),
                   let id = UninstallerSupport.verifiedBundleID(Bundle(url: url)?.bundleIdentifier),
-                  id.hasPrefix(primary + ".") else { continue }
-            result.insert(id)
+                  id.hasPrefix(primaryBundleID + ".") else { continue }
+            result.bundleIDs.insert(id)
         }
         return result
     }
 
-    private static func scanRoots(home: String) -> [URL] {
+    nonisolated private static func scanRoots(home: String) -> [URL] {
         var roots = [
             URL(fileURLWithPath: home + "/Library", isDirectory: true),
             URL(fileURLWithPath: "/Library", isDirectory: true),
@@ -301,15 +413,16 @@ final class AppUninstaller: ObservableObject {
         return roots.map(\.standardizedFileURL)
     }
 
-    private static func darwinUserDirectory(_ name: Int32) -> URL? {
+    nonisolated private static func darwinUserDirectory(_ name: Int32) -> URL? {
         let length = confstr(name, nil, 0)
         guard length > 0 else { return nil }
         var buffer = [CChar](repeating: 0, count: length)
         guard confstr(name, &buffer, length) > 0 else { return nil }
-        return URL(fileURLWithPath: String(cString: buffer), isDirectory: true).standardizedFileURL
+        let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
     }
 
-    private static func hasSymbolicLinkInParents(of url: URL, through root: URL) -> Bool {
+    nonisolated private static func hasSymbolicLinkInParents(of url: URL, through root: URL) -> Bool {
         var current = url.deletingLastPathComponent().standardizedFileURL
         let root = root.standardizedFileURL
         while current.path.count >= root.path.count {
@@ -322,11 +435,11 @@ final class AppUninstaller: ObservableObject {
         return true
     }
 
-    private static func isSymbolicLink(_ url: URL) -> Bool {
+    nonisolated private static func isSymbolicLink(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
     }
 
-    private static func dedupe(_ paths: [(URL, Category)]) -> [(URL, Category)] {
+    nonisolated private static func dedupe(_ paths: [(URL, Category)]) -> [(URL, Category)] {
         var seen = Set<String>()
         var roots: [String] = []
         var out: [(URL, Category)] = []
@@ -341,7 +454,7 @@ final class AppUninstaller: ObservableObject {
         return out
     }
 
-    private static func directorySize(of url: URL, fm: FileManager) -> Int64 {
+    nonisolated private static func directorySize(of url: URL, fm: FileManager) -> Int64 {
         if isSymbolicLink(url) { return fileSize(url) }
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
@@ -359,7 +472,7 @@ final class AppUninstaller: ObservableObject {
         return total
     }
 
-    private static func fileSize(_ url: URL) -> Int64 {
+    nonisolated private static func fileSize(_ url: URL) -> Int64 {
         let values = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
         return Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0)
     }

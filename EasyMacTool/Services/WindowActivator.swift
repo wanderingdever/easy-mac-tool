@@ -5,6 +5,8 @@ import ApplicationServices
 /// API, and supports closing / minimizing a window via its AX toolbar buttons.
 @MainActor
 final class WindowActivator {
+    private var pendingHiddenActivation: Task<Void, Never>?
+
     /// Activates the owning app and raises the exact window matching `item.frame`.
     /// For placeholder items (no open windows), uses `NSWorkspace.openApplication`
     /// to reopen the app — this triggers `applicationShouldHandleReopen` which
@@ -19,6 +21,8 @@ final class WindowActivator {
     ///   false 表示窗口未找到或激活失败，调用方可据此保留 item 或提示用户。
     @discardableResult
     func activate(_ item: WindowItem) -> Bool {
+        pendingHiddenActivation?.cancel()
+        pendingHiddenActivation = nil
         let app = NSRunningApplication(processIdentifier: item.pid)
         // 缓存第一次 findAXWindow 找到的窗口引用，app.activate 后窗口列表可能变化，
         // 第二次查找可能失败。复用引用避免 deminimize 后未正确 focus。
@@ -36,26 +40,33 @@ final class WindowActivator {
                 resolvedWindow = window
             }
         case .hidden:
-            // 先 unhide app（Cmd+H 隐藏的 app 需要 unhide 才能显示窗口）
             app?.unhide()
-            // unhide 是异步的：app.unhide() 返回后 AX 窗口树可能尚未更新，
-            // 立即查询 findAXWindow 可能返回 nil。短暂等待（100ms）让
-            // WindowServer 完成 unhide 的窗口映射，再查询 AX。
-            // 100ms 是经验值：unhide 通常 <50ms，100ms 提供足够余量且用户无感。
-            Thread.sleep(forTimeInterval: 0.1)
-            // 边界情况：app hidden + 窗口 minimized
-            // unhide 后该窗口可能仍然是 minimized 的，需要同时 deminimize
-            let axApp = AXUIElementCreateApplication(item.pid)
-            if let window = findAXWindow(axApp, matching: item) {
-                var isMinimizedRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &isMinimizedRef)
-                if (isMinimizedRef as? NSNumber)?.boolValue == true {
-                    AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            pendingHiddenActivation = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled, let self else { return }
+                let axApp = AXUIElementCreateApplication(item.pid)
+                let resolvedWindow = self.findAXWindow(axApp, matching: item)
+                if let window = resolvedWindow {
+                    var isMinimizedRef: CFTypeRef?
+                    AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &isMinimizedRef)
+                    if (isMinimizedRef as? NSNumber)?.boolValue == true {
+                        AXUIElementSetAttributeValue(
+                            window, kAXMinimizedAttribute as CFString, kCFBooleanFalse
+                        )
+                    }
                 }
-                resolvedWindow = window
+                _ = self.finishActivation(item, app: app, resolvedWindow: resolvedWindow)
+                self.pendingHiddenActivation = nil
             }
+            return true
         }
 
+        return finishActivation(item, app: app, resolvedWindow: resolvedWindow)
+    }
+
+    private func finishActivation(_ item: WindowItem,
+                                  app: NSRunningApplication?,
+                                  resolvedWindow: AXUIElement?) -> Bool {
         // 激活 app 并通过 AX 提升目标窗口到前台。
         // 复用第一次 findAXWindow 的结果，避免 app.activate 后窗口列表变化导致第二次查找失败。
         app?.activate(options: [.activateAllWindows])

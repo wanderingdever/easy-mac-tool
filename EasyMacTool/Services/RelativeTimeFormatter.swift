@@ -59,7 +59,7 @@ enum AppTintExtractor {
     /// Thread-safe cache: bundleIdentifier → tint color.
     /// 设置 countLimit=200 限制缓存上限，避免菜单栏 app 长期运行累积所有
     /// 启动过的 app 色调导致内存无限增长。NSCache 在内存压力时也会自动淘汰。
-    private static let cache: NSCache<NSString, NSColor> = {
+    nonisolated(unsafe) private static let cache: NSCache<NSString, NSColor> = {
         let c = NSCache<NSString, NSColor>()
         c.countLimit = 200
         return c
@@ -68,7 +68,7 @@ enum AppTintExtractor {
     /// Returns the cached tint for the given bundle ID, or extracts it
     /// synchronously if not cached. The extraction is fast (~1ms) but
     /// happens at most once per app thanks to the cache.
-    static func tint(from icon: NSImage, bundleIdentifier: String? = nil) -> NSColor {
+    nonisolated static func tint(from icon: NSImage, bundleIdentifier: String? = nil) -> NSColor {
         if let bid = bundleIdentifier, let cached = cache.object(forKey: bid as NSString) {
             return cached
         }
@@ -79,7 +79,7 @@ enum AppTintExtractor {
         return result
     }
 
-    private static func extract(from icon: NSImage) -> NSColor {
+    nonisolated private static func extract(from icon: NSImage) -> NSColor {
         // Work at a small size — we only need an approximate hue.
         let sampleSize = 32
         let target = NSSize(width: sampleSize, height: sampleSize)
@@ -133,7 +133,7 @@ enum AppTintExtractor {
 
     /// A safe sRGB fallback — never a catalog color so component accessors
     /// (redComponent etc.) always work.
-    private static let fallbackTint = NSColor(red: 0x0A/255.0,
+    nonisolated private static let fallbackTint = NSColor(red: 0x0A/255.0,
                                              green: 0x84/255.0,
                                              blue: 0xFF/255.0,
                                              alpha: 1.0)
@@ -144,7 +144,7 @@ enum AppTintExtractor {
 /// - #RGB, #RRGGBB, #RRGGBBAA
 /// - rgb(255, 0, 0), rgba(255, 0, 0, 0.5)
 /// - hsl(0, 100%, 50%)
-enum ColorStringParser {
+nonisolated enum ColorStringParser {
     /// Returns (color, hex) if the string parses as a recognizable color,
     /// otherwise nil.
     static func parse(_ text: String) -> (NSColor, String)? {
@@ -215,20 +215,25 @@ enum ColorStringParser {
     private static func parseRGB(_ s: String) -> (NSColor, String)? {
         let inner = extractParenContent(s)
         let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard parts.count >= 3,
+        guard (3...4).contains(parts.count),
               let r = Double(parts[0]),
               let g = Double(parts[1]),
-              let b = Double(parts[2]) else { return nil }
-        let a: Double = parts.count >= 4 ? (Double(parts[3]) ?? 1.0) : 1.0
-        // Normalize 0-255 ranges.
-        let norm: (Double) -> CGFloat = { v in
-            v <= 1 ? CGFloat(v) : CGFloat(v / 255)
+              let b = Double(parts[2]),
+              [r, g, b].allSatisfy({ $0.isFinite && (0...255).contains($0) }) else { return nil }
+        let a: Double
+        if parts.count == 4 {
+            guard let parsedAlpha = Double(parts[3]), parsedAlpha.isFinite,
+                  (0...1).contains(parsedAlpha) else { return nil }
+            a = parsedAlpha
+        } else {
+            a = 1
         }
-        let color = NSColor(red: norm(r), green: norm(g), blue: norm(b), alpha: CGFloat(a))
+        // CSS rgb() numeric channels are always 0...255; rgb(1, 0, 0) is not
+        // the normalized equivalent of rgb(255, 0, 0).
+        let color = NSColor(red: CGFloat(r / 255), green: CGFloat(g / 255),
+                            blue: CGFloat(b / 255), alpha: CGFloat(a))
         let displayHex = String(format: "#%02X%02X%02X",
-                                Int(round(Double(r) > 1 ? r : r * 255)),
-                                Int(round(Double(g) > 1 ? g : g * 255)),
-                                Int(round(Double(b) > 1 ? b : b * 255)))
+                                Int(round(r)), Int(round(g)), Int(round(b)))
         return (color, displayHex)
     }
 

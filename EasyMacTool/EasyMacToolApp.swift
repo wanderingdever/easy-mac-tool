@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: AppCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SystemMonitor.prewarmHardwareCapabilities()
         // 直接用 AppSettings.shared 创建 coordinator，无需等用户交互。
         coordinator = AppCoordinator(settings: AppSettings.shared)
         // 替代 macOS 15+ 的 .defaultLaunchBehavior(.suppressed)：
@@ -184,7 +185,6 @@ final class AppCoordinator {
             .store(in: &cancellables)
         // 窗口布局：总开关 + 径向开关/触发键联动 RadialLayoutController，
         // 布局快捷键由 HotkeyManager 的 RouteMirror 同步（见其 bindSettings）。
-        WindowLayoutManager.shared  // 预热（无副作用，单例常驻）
         syncRadialController()
         settings.$windowLayoutEnabled
             .dropFirst()
@@ -198,8 +198,8 @@ final class AppCoordinator {
             .dropFirst()
             .sink { [weak self] _ in self?.syncRadialController() }
             .store(in: &cancellables)
-        // 后台预热窗口缩略图缓存，让切换器冷窗口首次呼出即有图。
-        captureManager.startWarming()
+        // Window previews are captured on demand when the switcher opens. Do
+        // not keep an app-activation observer alive during idle menu-bar use.
         // CGEventTap 健康监控定时器：
         // 1. 首次启动时用户可能尚未授权辅助功能，定时器检测到 isTrusted=true
         //    后调用 start() 重建 tap。
@@ -217,6 +217,7 @@ final class AppCoordinator {
         let t = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                HotkeyManager.shared.syncRouteMirror()
                 // 辅助功能权限被撤销：CGEventTap 会被系统禁用，快捷键全部失效。
                 // 累计计数，超阈值后重新提示一次，避免静默失效且无反馈。
                 // 未授权时不做 stop/start 抖动（tap 本就建不起来或已失效）。
@@ -265,6 +266,7 @@ final class AppCoordinator {
         // Start clipboard history tracking.
         clipboardManager.historyLimit = settings.clipboardHistoryLimit
         clipboardManager.setCapturing(settings.clipboardCapturingEnabled)
+        clipboardManager.setPersistentHistoryEnabled(settings.clipboardPersistentHistoryEnabled)
         clipboardManager.start()
         // 订阅设置变更实时同步到运行中的 manager：之前在设置页拖动
         // "最大保留"滑块只写 AppSettings，manager 的上限重启后才生效，
@@ -275,23 +277,17 @@ final class AppCoordinator {
                 self?.clipboardManager.historyLimit = limit
             }
             .store(in: &cancellables)
-        clipboardPanelController.onReapply = { [weak self] item in
-            self?.reapplyClipboard(item)
+        settings.$clipboardPersistentHistoryEnabled
+            .dropFirst()
+            .sink { [weak self] enabled in
+                self?.clipboardManager.setPersistentHistoryEnabled(enabled)
+            }
+            .store(in: &cancellables)
+        clipboardPanelController.onReapply = { [weak self] item, expectedAppBundleID in
+            self?.reapplyClipboard(item, expectedAppBundleID: expectedAppBundleID)
         }
-        clipboardPanelController.onReapplyBatch = { [weak self] items in
-            self?.reapplyClipboardBatch(items)
-        }
-    }
-
-    deinit {
-        // deinit 是 nonisolated，可能在任意线程执行。Timer 必须在创建它的
-        // 线程（主线程）invalidate，否则可能崩溃。AppCoordinator 由
-        // AppDelegate 持有整个生命周期，deinit 通常在 app 退出时触发，
-        // 但仍需防御性处理：派回主线程 invalidate。
-        // 不捕获 self（self 已在析构中），只捕获 timer 引用。
-        let timer = hotkeyRetryTimer
-        DispatchQueue.main.async {
-            timer?.invalidate()
+        clipboardPanelController.onReapplyBatch = { [weak self] items, expectedAppBundleID in
+            self?.reapplyClipboardBatch(items, expectedAppBundleID: expectedAppBundleID)
         }
     }
 
@@ -300,6 +296,9 @@ final class AppCoordinator {
     /// 变更和未完成的 IO 在进程终止前落盘。
     /// 同时显式停止 SCStream，避免依赖进程死亡清理（更合规的资源管理）。
     func flushClipboardForTermination() {
+        hotkeyRetryTimer?.invalidate()
+        hotkeyRetryTimer = nil
+        captureManager.stopWarming()
         captureManager.stopAll()
         clipboardManager.stop()
     }
@@ -607,21 +606,21 @@ final class AppCoordinator {
     /// Re-applies the selected clipboard item. The panel is already dismissed
     /// by the time this runs (see ClipboardPanelController.onReapply), so the
     /// previously frontmost app regains focus before we (optionally) paste.
-    private func reapplyClipboard(_ item: ClipboardItem) {
+    private func reapplyClipboard(_ item: ClipboardItem, expectedAppBundleID: String?) {
         if settings.clipboardPlainPaste {
             clipboardManager.reapplyPlain(item,
                                            autoPaste: settings.clipboardAutoPaste,
-                                           expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
+                                           expectedAppBundleID: expectedAppBundleID)
         } else {
             clipboardManager.reapply(item,
                                       autoPaste: settings.clipboardAutoPaste,
-                                      expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
+                                      expectedAppBundleID: expectedAppBundleID)
         }
     }
 
     /// 批量复制/粘贴（多选 → 复制全部）。
-    private func reapplyClipboardBatch(_ items: [ClipboardItem]) {
+    private func reapplyClipboardBatch(_ items: [ClipboardItem], expectedAppBundleID: String?) {
         clipboardManager.reapplyBatch(autoPaste: settings.clipboardAutoPaste,
-                                       expectedAppBundleID: clipboardPanelController.pasteTargetBundleID)
+                                       expectedAppBundleID: expectedAppBundleID)
     }
 }

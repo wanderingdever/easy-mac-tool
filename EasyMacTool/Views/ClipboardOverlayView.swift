@@ -16,6 +16,8 @@ import SwiftUI
 struct ClipboardOverlayView: View {
     @ObservedObject var manager: ClipboardManager
     @ObservedObject var controller: ClipboardPanelController
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @State private var query: String = ""
     @State private var hoverID: UUID?
@@ -71,6 +73,8 @@ struct ClipboardOverlayView: View {
     /// （滚动时 dataStamp 变化 → cache miss → 逐帧写 state）。box 只用 @State
     /// 保证视图重绘间存续，写 `/读` 对象属性不触发 @State 变更。
     @State private var filterCacheBox = FilterCacheBox()
+    /// Invalidates deferred UI work from an earlier panel presentation.
+    @State private var presentationGeneration = 0
 
     /// 过滤后的卡片列表（计算属性）。
     private var filtered: [ClipboardItem] {
@@ -84,10 +88,14 @@ struct ClipboardOverlayView: View {
             if let f = activeFilter, item.contentKind != f { return false }
             guard !q.isEmpty else { return true }
             // searchableText 已预计算并缓存小写的 title + footerText。
-            return item.searchableText.contains(q)
+            return item.matchesSearch(q)
         }
-        filterCacheBox.value = FilterCache(query: q, filter: activeFilter, groupID: activeGroupID,
-                                          stamp: manager.dataStamp, result: result)
+        // Do not pin a near-history-limit result set while the panel remains
+        // open. Large, unfiltered lists are cheap to derive and expensive to retain.
+        filterCacheBox.value = result.count <= 300
+            ? FilterCache(query: q, filter: activeFilter, groupID: activeGroupID,
+                          stamp: manager.dataStamp, result: result)
+            : nil
         return result
     }
 
@@ -130,10 +138,14 @@ struct ClipboardOverlayView: View {
                 // 顶部玻璃反光高光线。阴影由 NSPanel.hasShadow 依内容 alpha 渲染。
                 ZStack(alignment: .top) {
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(.ultraThinMaterial.opacity(0.85))
+                        .fill(reduceTransparency
+                              ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
+                              : AnyShapeStyle(.ultraThinMaterial.opacity(0.85)))
                         .overlay(
                             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .fill(DesignTokens.Aurora.glassSheen)
+                                .fill(reduceTransparency
+                                      ? AnyShapeStyle(.clear)
+                                      : AnyShapeStyle(DesignTokens.Aurora.glassSheen))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -167,8 +179,9 @@ struct ClipboardOverlayView: View {
             .animation(nil, value: manager.items.count)
             // 面板出现动画：opacity + 轻微上移，spring 更流畅。
             .opacity(panelAppeared ? 1 : 0)
-            .offset(y: panelAppeared ? 0 : 24)
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: panelAppeared)
+            .offset(y: panelAppeared || reduceMotion ? 0 : 24)
+            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85),
+                       value: panelAppeared)
 
             // 预览浮层：在所有内容之上，垂直居中弹入。
             if let item = previewItem {
@@ -204,6 +217,7 @@ struct ClipboardOverlayView: View {
                     controller.dismiss()
                 }
             },
+            isModalPresentation: { controller.hasModalPresentation },
             isEditingText: { controller.isEditingAnyText || controller.hasModalPresentation },
             isPreviewingTextView: { previewIsOpen && controller.firstResponderIsTextView }
         ).frame(width: 0, height: 0))
@@ -216,6 +230,11 @@ struct ClipboardOverlayView: View {
             selectedIndex = 0
             hoverID = nil
             // 切筛选后列表重置为第一张（最左），滚动回起点。
+            scrollToIndex = 0
+        }
+        .onChange(of: activeGroupID) { _, _ in
+            selectedIndex = 0
+            hoverID = nil
             scrollToIndex = 0
         }
         // 删除卡片后 manager.items.count 变化，selectedIndex 可能越界——clamp 回有效范围。
@@ -232,7 +251,10 @@ struct ClipboardOverlayView: View {
         .onAppear {
             // 触发面板出现动画：下一 render pass 切换 panelAppeared=true，
             // 让 .animation(.spring...) 观察 opacity/offset 的变化并播放。
+            presentationGeneration &+= 1
+            let generation = presentationGeneration
             DispatchQueue.main.async {
+                guard controller.isPresented, presentationGeneration == generation else { return }
                 panelAppeared = true
                 focusTarget = .cards
             }
@@ -244,6 +266,8 @@ struct ClipboardOverlayView: View {
         // filtered 是计算属性，自动反映 manager.items 最新状态，无需手动刷新。
         .onChange(of: controller.isPresented) { _, isPresented in
             if isPresented {
+                presentationGeneration &+= 1
+                let generation = presentationGeneration
                 selectedIndex = 0
                 hoverID = nil
                 query = ""
@@ -264,9 +288,12 @@ struct ClipboardOverlayView: View {
                 // 用 DispatchQueue.main.async 延后一拍，让 opacity/offset 先回到
                 // 初值再触发 spring 动画重放（与 onAppear 写法一致）。
                 DispatchQueue.main.async {
+                    guard controller.isPresented,
+                          presentationGeneration == generation else { return }
                     panelAppeared = true
                 }
             } else {
+                presentationGeneration &+= 1
                 // dismiss 后重置 panelAppeared，使下次 present 时入场动画
                 // （spring 滑入）能正常播放。之前不重置导致第二次打开
                 // 面板时直接显示而无动画。
@@ -274,6 +301,7 @@ struct ClipboardOverlayView: View {
                 // 面板关闭时一并关闭清空确认框：否则确认框会以独立窗口
                 // 残留悬浮在屏幕上，重开面板时又重新出现。
                 showClearAlert = false
+                filterCacheBox.value = nil
             }
         }
         // 新建分组 alert（分组按钮或卡片右键「新建分组」触发）。
@@ -323,7 +351,7 @@ struct ClipboardOverlayView: View {
             HStack(spacing: 8) {
                 AuroraIconChip(systemName: "list.clipboard", size: 26)
                 Text("\(filtered.count) 条")
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystemFont(13, weight: .medium)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -369,7 +397,7 @@ struct ClipboardOverlayView: View {
             // 控制展开/折叠，聚焦始终有目标对象。
             TextField("搜索…", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14))
+                .scaledSystemFont(14)
                 .frame(width: isSearchActive ? 170 : 0)
                 .opacity(isSearchActive ? 1 : 0)
                 .lineLimit(1)
@@ -427,6 +455,8 @@ struct ClipboardOverlayView: View {
         }
         .buttonStyle(.borderless)
         .help("筛选类型")
+        .accessibilityLabel("筛选类型")
+        .accessibilityValue(activeFilter?.label ?? "全部")
     }
 
     private var filterMenu: some View {
@@ -502,6 +532,7 @@ struct ClipboardOverlayView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("新建分组")
+                .accessibilityLabel("新建分组")
             }
             .padding(.vertical, 2)
         }
@@ -521,7 +552,8 @@ struct ClipboardOverlayView: View {
                         .font(.system(size: 9, weight: .medium))
                 }
                 Text(label)
-                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .scaledSystemFont(12, weight: isActive ? .semibold : .regular,
+                                      relativeTo: .caption)
                     .lineLimit(1)
             }
             .foregroundStyle(isActive
@@ -556,7 +588,7 @@ struct ClipboardOverlayView: View {
                     .shadow(color: dotColor.opacity(isActive ? 0.45 : 0), radius: 3)
 
                 Text(label)
-                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
+                    .scaledSystemFont(13, weight: isActive ? .semibold : .regular)
                     .foregroundStyle(isActive ? .primary : .secondary)
 
                 Spacer()
@@ -618,7 +650,7 @@ struct ClipboardOverlayView: View {
                     }
                     .frame(width: 56, height: 56)
                     Text("正在加载剪切板历史…")
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledSystemFont(13, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -638,11 +670,11 @@ struct ClipboardOverlayView: View {
                     }
                     .frame(width: 56, height: 56)
                     Text(query.isEmpty ? "剪切板为空" : "无匹配项")
-                        .font(.system(size: 13, weight: .medium))
+                        .scaledSystemFont(13, weight: .medium)
                         .foregroundStyle(.secondary)
                     if query.isEmpty {
                         Text("复制的内容会自动出现在这里")
-                            .font(.system(size: 11))
+                            .scaledSystemFont(11, relativeTo: .caption)
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -655,12 +687,12 @@ struct ClipboardOverlayView: View {
             // cardHeight = 可用高度 - vertical padding(20) - 2pt 余量；
             // 同时卡死上限 220pt，避免面板在预览模式下被拉高时卡片跟着变大。
             GeometryReader { geo in
-                HorizontalWheelScrollView(scrollToIndex: scrollToIndex) {
+                HorizontalWheelScrollView(content: {
                     // LazyHStack 仅渲染可见卡片 + 缓冲区，避免 100 条卡片
                     // 同时渲染导致的内存浪费与滚动卡顿。HStack 会一次性构建
                     // 所有子视图，每张卡片的 RTF 解析/图片解码都立即执行，
                     // 100 条历史时滚动明显掉帧。
-                    LazyHStack(spacing: 12) {
+                    LazyHStack(spacing: DesignTokens.ClipboardLayout.cardSpacing) {
                         ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
                             // 卡片高亮 = 鼠标 hover OR 键盘选中 OR 多选中的任一项。
                             let isHighlighted = hoverID == item.id || index == selectedIndex || manager.isBatchSelected(item)
@@ -729,9 +761,9 @@ struct ClipboardOverlayView: View {
                                 }
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, DesignTokens.ClipboardLayout.stripHorizontalPadding)
                     .padding(.vertical, 10)
-                }
+                }, scrollToIndex: scrollToIndex)
             }
             // 卡片容器绑定 @FocusState：默认 focusTarget=.cards（在 onAppear 中设置）。
             // SwiftUI 的 .focusable + .focused 让卡片容器成为 firstResponder 候选，
@@ -767,12 +799,13 @@ struct ClipboardOverlayView: View {
                                 isExpanded: previewVisible,
                                 onClose: { closePreview() },
                                 onApply: { reapply(item); closePreview() })
-                .frame(width: 560, height: height)
+                .frame(width: min(560, max(280, geo.size.width - 32)), height: height)
                 .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }
         .opacity(previewVisible ? 1 : 0)
-        .scaleEffect(previewVisible ? 1.0 : 0.92, anchor: .center)
-        .animation(.spring(response: 0.42, dampingFraction: 0.6), value: previewVisible)
+        .scaleEffect(reduceMotion || previewVisible ? 1.0 : 0.92, anchor: .center)
+        .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.6),
+                   value: previewVisible)
         .zIndex(1000)
     }
 
@@ -781,7 +814,7 @@ struct ClipboardOverlayView: View {
         // 两阶段渲染：先设 previewVisible=false（初始 scale 0.92/opacity 0），
         // 下一 render pass 切换为 true，让 SwiftUI 观察到值变化播放 spring 动画。
         DispatchQueue.main.async {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.6)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.6)) {
                 previewVisible = true
             }
         }
@@ -804,8 +837,9 @@ struct ClipboardOverlayView: View {
 
     /// 触发复制/重应用：通过 controller 路由，避免在视图内捕获大量闭包。
     private func reapply(_ item: ClipboardItem) {
+        let expectedAppBundleID = controller.pasteTargetBundleID
         controller.dismiss()
-        controller.onReapply?(item)
+        controller.onReapply?(item, expectedAppBundleID)
     }
 
     /// 多选底部操作条：非空时显示「已选 N 项 + 复制全部/清除」。
@@ -814,7 +848,7 @@ struct ClipboardOverlayView: View {
         if !manager.batchSelectionIDs.isEmpty {
             HStack(spacing: 12) {
                 Text("已选 \(manager.batchSelectionIDs.count) 项")
-                    .font(.system(size: 12, weight: .medium))
+                    .scaledSystemFont(12, weight: .medium, relativeTo: .caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button("清除") { manager.clearBatchSelection() }
@@ -830,8 +864,9 @@ struct ClipboardOverlayView: View {
         let items = manager.selectedBatchItems()
         guard !items.isEmpty else { return }
         manager.clearBatchSelection()
+        let expectedAppBundleID = controller.pasteTargetBundleID
         controller.dismiss()
-        controller.onReapplyBatch?(items)
+        controller.onReapplyBatch?(items, expectedAppBundleID)
     }
 
     /// 空格键触发：若预览已开则关闭；否则预览当前选中卡片。
@@ -894,6 +929,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         var onSpace: () -> Void = {}
         var onCmdF: () -> Void = {}
         var onEsc: () -> Void = {}
+        var isModalPresentation: () -> Bool = { false }
         /// 由父视图传入的焦点判断闭包。用 focusTarget == .search 替代
         /// NSApp.keyWindow?.firstResponder is NSTextView——后者在 nonactivatingPanel
         /// 场景下可能取错 key window 导致误判，且会被预览态的 selectable NSTextView 干扰。
@@ -918,6 +954,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
 
         private func handle(_ event: NSEvent) -> NSEvent? {
             if event.keyCode == 53 {  // Esc
+                if isModalPresentation() { return event }
                 onEsc()
                 return nil
             }
@@ -967,6 +1004,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
     var onSpace: () -> Void
     var onCmdF: () -> Void
     var onEsc: () -> Void
+    var isModalPresentation: () -> Bool
     var isEditingText: () -> Bool
     var isPreviewingTextView: () -> Bool
 
@@ -984,6 +1022,7 @@ private struct ClipboardKeyObserver: NSViewRepresentable {
         coordinator.onSpace = onSpace
         coordinator.onCmdF = onCmdF
         coordinator.onEsc = onEsc
+        coordinator.isModalPresentation = isModalPresentation
         coordinator.isEditingText = isEditingText
         coordinator.isPreviewingTextView = isPreviewingTextView
         coordinator.updateMonitoring(isActive: isActive)
@@ -1015,9 +1054,8 @@ private struct ClearHistoryButton: View {
         }
         .buttonStyle(.borderless)
         .help("清空历史")
-        .onHover { hovering in
-            withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
-        }
+        .accessibilityLabel("清空历史")
+        .auroraHover($isHovered)
     }
 }
 
@@ -1056,8 +1094,15 @@ private struct ClipboardPreviewCard: View {
 
     /// 异步加载的图片文件预览（仅 .file kind 且为图片文件时）。
     @State private var loadedFileImage: NSImage?
+    /// Expanded clipboard images are downsampled off-main to the largest size
+    /// this panel can use instead of lazily decoding the full source bitmap.
+    @State private var loadedClipboardImage: NSImage?
     /// 链接元数据（网页标题 + 站点图标），仅 .url kind 后台预加载。
     @State private var linkMeta: LinkMetadataCache.Metadata?
+    @State private var isLoadingLinkMetadata = false
+    @ObservedObject private var settings = AppSettings.shared
+    @ScaledMetric(relativeTo: .body) private var previewTextSize: CGFloat = 12
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     // 直接复用 ClipboardItem 缓存的 headerForeground，避免每次 body 重算 luminance。
     private var headerForeground: Color { item.headerForeground }
@@ -1079,8 +1124,8 @@ private struct ClipboardPreviewCard: View {
                 .strokeBorder(DesignTokens.Aurora.brandGradient.opacity(0.6), lineWidth: 1.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: DesignTokens.Aurora.floatShadowColor, radius: 20, y: 6)
-        .shadow(color: DesignTokens.Aurora.brandGlow.opacity(0.5), radius: 24, y: 0)
+        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.floatShadowColor, radius: 20, y: 6)
+        .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.brandGlow.opacity(0.5), radius: 24, y: 0)
         .task {
             // 若为单图片文件，后台加载避免阻塞主线程。
             // NSImage(contentsOf:) 是同步磁盘 I/O，在 .task（@MainActor）中
@@ -1100,8 +1145,11 @@ private struct ClipboardPreviewCard: View {
             if case .image(let data, _) = item.kind, data == nil, item.imageFileURL != nil {
                 await item.warmUpAsync()
             }
+            if case .image = item.kind {
+                loadedClipboardImage = await item.previewImage(maxPixelSize: 1600)
+            }
             // 链接条目：后台预加载网页标题 + 站点图标（类 Paste 链接预览）。
-            if case .url(let url, _) = item.kind {
+            if case .url(let url, _) = item.kind, settings.clipboardLinkPreviewMode == .automatic {
                 linkMeta = await LinkMetadataCache.shared.metadata(for: url.absoluteString)
             }
         }
@@ -1117,17 +1165,19 @@ private struct ClipboardPreviewCard: View {
                     .frame(width: 22, height: 22)
             }
             Text(item.sourceAppName ?? "未知")
-                .font(.system(size: 13, weight: .semibold))
+                .scaledSystemFont(13, weight: .semibold)
                 .lineLimit(1)
             Text(item.typeLabel)
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(headerForeground.opacity(0.22)))
             Spacer(minLength: 0)
-            Text(RelativeTimeFormatter.string(from: item.createdAt, now: Date()))
-                .font(.system(size: 11))
-                .foregroundStyle(headerForeground.opacity(0.9))
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Text(RelativeTimeFormatter.string(from: item.createdAt, now: context.date))
+                    .scaledSystemFont(11, relativeTo: .caption)
+                    .foregroundStyle(headerForeground.opacity(0.9))
+            }
             // 设计稿：close-btn 22×22，bg rgba(255,255,255,0.2)，白色 X 图标
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -1141,6 +1191,7 @@ private struct ClipboardPreviewCard: View {
             }
             .buttonStyle(.borderless)
             .help("关闭")
+            .accessibilityLabel("关闭预览")
         }
         .foregroundStyle(headerForeground)
         .padding(.horizontal, 14)
@@ -1160,14 +1211,15 @@ private struct ClipboardPreviewCard: View {
         switch item.kind {
         case .text(let s):
             // RTFTextView 支持富文本（保留代码颜色）+ 滚动，可显示完整长文本。
-            RTFTextView(rtfData: item.rtfData,
+            RTFTextView(contentID: item.id,
+                       rtfData: item.rtfData,
                        plainText: s,
-                       font: .monospacedSystemFont(ofSize: 12, weight: .regular))
+                       font: .monospacedSystemFont(ofSize: previewTextSize, weight: .regular))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .image:
-            Image(nsImage: item.imageThumbnail ?? NSImage())
+            Image(nsImage: loadedClipboardImage ?? item.imageThumbnail ?? NSImage())
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .padding(12)
@@ -1190,33 +1242,49 @@ private struct ClipboardPreviewCard: View {
                 // 网页标题（预加载到则作为主标题显示）。
                 if let title = linkMeta?.title {
                     Text(title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledSystemFont(15, weight: .semibold, relativeTo: .headline)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 16)
                 }
                 VStack(spacing: 4) {
                     Text(url.host ?? "")
-                        .font(.system(size: linkMeta?.title != nil ? 12 : 15, weight: .semibold))
+                        .scaledSystemFont(linkMeta?.title != nil ? 12 : 15,
+                                          weight: .semibold,
+                                          relativeTo: linkMeta?.title != nil ? .caption : .headline)
                         .foregroundStyle(linkMeta?.title != nil ? .secondary : .primary)
                         .lineLimit(1)
                     if !url.path.isEmpty, url.path != "/" {
                         Text(url.path)
-                            .font(.system(size: 12))
+                            .scaledSystemFont(12, relativeTo: .caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
                     }
                 }
                 Text(url.absoluteString)
-                    .font(.system(size: 11, design: .monospaced))
+                    .scaledSystemFont(11, design: .monospaced, relativeTo: .caption)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
                     .padding(.horizontal, 16)
                 if isExpanded {
-                    Button("在浏览器中打开") {
-                        NSWorkspace.shared.open(url)
+                    HStack {
+                        if settings.clipboardLinkPreviewMode == .manual, linkMeta == nil {
+                            Button {
+                                loadLinkMetadata(url)
+                            } label: {
+                                if isLoadingLinkMetadata {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Label("获取预览", systemImage: "arrow.down.circle")
+                                }
+                            }
+                            .disabled(isLoadingLinkMetadata)
+                        }
+                        Button("在浏览器中打开") {
+                            NSWorkspace.shared.open(url)
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -1239,7 +1307,7 @@ private struct ClipboardPreviewCard: View {
                         .foregroundStyle(.secondary)
                     if let first = urls.first {
                         Text(first.lastPathComponent)
-                            .font(.system(size: 12))
+                            .scaledSystemFont(12, relativeTo: .caption)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 16)
@@ -1254,17 +1322,28 @@ private struct ClipboardPreviewCard: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(12)
                 Text(hex.uppercased())
-                    .font(.system(size: 13, design: .monospaced))
+                    .scaledSystemFont(13, design: .monospaced)
                     .foregroundStyle(.secondary)
                     .padding(.bottom, 8)
             }
         }
     }
 
+    private func loadLinkMetadata(_ url: URL) {
+        guard !isLoadingLinkMetadata else { return }
+        isLoadingLinkMetadata = true
+        Task {
+            let metadata = await LinkMetadataCache.shared.metadata(for: url.absoluteString,
+                                                                   userInitiated: true)
+            linkMeta = metadata.title == nil && metadata.favicon == nil ? nil : metadata
+            isLoadingLinkMetadata = false
+        }
+    }
+
     private var actionBar: some View {
         HStack {
             Text(item.footerText)
-                .font(.system(size: 11))
+                .scaledSystemFont(11, relativeTo: .caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
@@ -1299,9 +1378,13 @@ private struct ClipboardCard: View {
     @State private var loadedFileImage: NSImage?
     /// 链接元数据（网页标题 + 站点图标），仅 .url kind 后台预加载。
     @State private var linkMeta: LinkMetadataCache.Metadata?
+    @State private var isLoadingLinkMetadata = false
+    @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     /// Card width stays modest so many cards fit horizontally.
-    private let cardWidth: CGFloat = 230
+    private let cardWidth = DesignTokens.ClipboardLayout.cardWidth
 
     /// Decide whether the header text should be light or dark based on the
     /// tint's luminance — keeps the type/time legible on any app color.
@@ -1340,10 +1423,10 @@ private struct ClipboardCard: View {
         }
         // 性能：非 hover 卡片不渲染阴影（radius 0 不触发离屏模糊）。
         // hover 态用品牌色外发光 + 轻微上浮，突出当前操作目标。
-        .shadow(color: isHover ? DesignTokens.Aurora.brandGlow : .clear,
+        .shadow(color: isHover && !reduceTransparency ? DesignTokens.Aurora.brandGlow : .clear,
                 radius: isHover ? 10 : 0, y: isHover ? 4 : 0)
-        .scaleEffect(isHover ? 1.03 : 1.0)
-        .offset(y: isHover ? -2 : 0)
+        .scaleEffect(isHover && !reduceMotion ? 1.03 : 1.0)
+        .offset(y: isHover && !reduceMotion ? -2 : 0)
         .opacity(isDimmed ? 0.4 : 1.0)
         // hover 视觉即时切换（不加动画）：快速滚动时鼠标掠过会连续触发
         // hover 变化，若带动画则品牌外发光（离屏模糊）会每帧重渲染，
@@ -1372,10 +1455,13 @@ private struct ClipboardCard: View {
             }
             // 链接条目：后台预加载网页标题 + 站点图标（类 Paste 链接预览）。
             // LinkMetadataCache 内部去重 + 缓存，网络失败静默降级。
-            if case .url(let url, _) = item.kind {
+            if case .url(let url, _) = item.kind, settings.clipboardLinkPreviewMode == .automatic {
                 linkMeta = await LinkMetadataCache.shared.metadata(for: url.absoluteString)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(item.typeLabel)，\(item.title)，来源 \(item.sourceAppName ?? "未知应用")")
+        .accessibilityValue(item.footerText)
     }
 
     // MARK: - Top header
@@ -1391,17 +1477,19 @@ private struct ClipboardCard: View {
                     .frame(width: 18, height: 18)
             }
             Text(item.sourceAppName ?? "未知")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledSystemFont(12, weight: .semibold, relativeTo: .caption)
                 .lineLimit(1)
             Text(item.typeLabel)
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(headerForeground.opacity(0.22)))
             Spacer(minLength: 0)
-            Text(RelativeTimeFormatter.string(from: item.createdAt, now: Date()))
-                .font(.system(size: 10))
-                .foregroundStyle(headerForeground.opacity(0.85))
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Text(RelativeTimeFormatter.string(from: item.createdAt, now: context.date))
+                    .scaledSystemFont(10, relativeTo: .caption2)
+                    .foregroundStyle(headerForeground.opacity(0.85))
+            }
         }
         .foregroundStyle(headerForeground)
         .padding(.horizontal, 10)
@@ -1435,14 +1523,14 @@ private struct ClipboardCard: View {
             // 现在从 ClipboardItem.cachedAttributedString 取缓存结果。
             if let attr = item.cachedAttributedString {
                 Text(attr)
-                    .font(.system(size: 12, design: .monospaced))
+                    .scaledSystemFont(12, design: .monospaced, relativeTo: .caption)
                     .lineLimit(12)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(8)
             } else {
                 Text(s.trimmingCharacters(in: .whitespacesAndNewlines))
-                    .font(.system(size: 12, design: .monospaced))
+                    .scaledSystemFont(12, design: .monospaced, relativeTo: .caption)
                     .lineLimit(12)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1467,21 +1555,36 @@ private struct ClipboardCard: View {
                 // 网页标题（预加载到则显示），下方仍保留 host 便于辨认来源。
                 if let title = linkMeta?.title {
                     Text(title)
-                        .font(.system(size: 11, weight: .medium))
+                        .scaledSystemFont(11, weight: .medium, relativeTo: .caption)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 8)
                 }
                 Text(url.host ?? url.absoluteString)
-                    .font(.system(size: 11))
+                    .scaledSystemFont(11, relativeTo: .caption)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
+                if settings.clipboardLinkPreviewMode == .manual, linkMeta == nil {
+                    Button {
+                        loadLinkMetadata(url)
+                    } label: {
+                        if isLoadingLinkMetadata {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.down.circle")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoadingLinkMetadata)
+                    .help("获取链接预览")
+                    .accessibilityLabel("获取链接预览")
+                }
             }
         case .image:
-            Image(nsImage: item.fullImage ?? NSImage())
+            Image(nsImage: item.imageThumbnail ?? NSImage())
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .padding(8)
@@ -1499,7 +1602,7 @@ private struct ClipboardCard: View {
                         .foregroundStyle(.secondary)
                     if let first = urls.first {
                         Text(first.lastPathComponent)
-                            .font(.system(size: 11))
+                            .scaledSystemFont(11, relativeTo: .caption)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
@@ -1514,9 +1617,20 @@ private struct ClipboardCard: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(8)
                 Text(hex.uppercased())
-                    .font(.system(size: 11, design: .monospaced))
+                    .scaledSystemFont(11, design: .monospaced, relativeTo: .caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func loadLinkMetadata(_ url: URL) {
+        guard !isLoadingLinkMetadata else { return }
+        isLoadingLinkMetadata = true
+        Task {
+            let metadata = await LinkMetadataCache.shared.metadata(for: url.absoluteString,
+                                                                   userInitiated: true)
+            linkMeta = metadata.title == nil && metadata.favicon == nil ? nil : metadata
+            isLoadingLinkMetadata = false
         }
     }
 
@@ -1541,11 +1655,11 @@ private struct ClipboardCard: View {
                 .fill(kindDotColor)
                 .frame(width: 6, height: 6)
             Text(item.typeLabel)
-                .font(.system(size: 10, weight: .semibold))
+                .scaledSystemFont(10, weight: .semibold, relativeTo: .caption2)
                 .foregroundStyle(kindDotColor)
             Spacer(minLength: 0)
             Text(item.footerText)
-                .font(.system(size: 10))
+                .scaledSystemFont(10, relativeTo: .caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }

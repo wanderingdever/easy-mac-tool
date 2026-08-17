@@ -28,9 +28,11 @@ struct SystemMonitorSettingsView: View {
 
     private var masterSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("系统监控", systemImage: "gauge")
-            sectionCard {
-                toggleRow(
+            SettingsSectionHeader(title: "系统监控", systemImage: "gauge")
+            SettingsCard {
+                SettingsToggleRow(
+                    title: "启用系统监控",
+                    description: "关闭时不采样、不监控、不占用任何资源。开启后在菜单栏显示实时指标。",
                     isOn: Binding(
                         get: { settings.systemMonitorEnabled },
                         set: { newValue in
@@ -39,9 +41,7 @@ struct SystemMonitorSettingsView: View {
                                 SystemMonitor.shared.setEnabled(newValue, interval: settings.monitorInterval)
                             }
                         }
-                    ),
-                    title: "启用系统监控",
-                    desc: "关闭时不采样、不监控、不占用任何资源。开启后在菜单栏显示实时指标。"
+                    )
                 )
             }
         }
@@ -51,14 +51,14 @@ struct SystemMonitorSettingsView: View {
 
     private var samplingSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("采样", systemImage: "timer")
-            sectionCard {
+            SettingsSectionHeader(title: "采样", systemImage: "timer")
+            SettingsCard {
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("刷新间隔")
-                        .font(.system(size: DesignTokens.SettingsTypography.formLabel))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.formLabel)
                         .foregroundStyle(.primary)
                         .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
-                    Picker("", selection: intervalBinding) {
+                    Picker("刷新间隔", selection: intervalBinding) {
                         Text("1 秒").tag(1)
                         Text("2 秒").tag(2)
                         Text("5 秒").tag(5)
@@ -68,15 +68,13 @@ struct SystemMonitorSettingsView: View {
                     .frame(maxWidth: 260)
                     Spacer(minLength: 0)
                 }
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
+                SettingsRowDivider()
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("温度单位")
-                        .font(.system(size: DesignTokens.SettingsTypography.formLabel))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.formLabel)
                         .foregroundStyle(.primary)
                         .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
-                    Picker("", selection: $settings.temperatureUnit) {
+                    Picker("温度单位", selection: $settings.temperatureUnit) {
                         Text("°C").tag(TemperatureUnit.celsius.rawValue)
                         Text("°F").tag(TemperatureUnit.fahrenheit.rawValue)
                     }
@@ -105,17 +103,15 @@ struct SystemMonitorSettingsView: View {
 
     private var menuBarMetricsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("菜单栏指标", systemImage: "menubar.rectangle")
-            sectionCard {
+            SettingsSectionHeader(title: "菜单栏指标", systemImage: "menubar.rectangle")
+            SettingsCard {
                 Text("选择要在菜单栏显示的指标，可按住拖拽排序。")
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                     .foregroundStyle(.secondary)
                 ForEach(orderedMetrics) { metric in
                     metricRow(metric: metric)
                     if metric != orderedMetrics.last {
-                        Rectangle()
-                            .fill(DesignTokens.Aurora.insetSeparator)
-                            .frame(height: 1)
+                        SettingsRowDivider()
                     }
                 }
             }
@@ -141,11 +137,12 @@ struct SystemMonitorSettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
             Text(metric.title)
-                .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
+                .scaledSystemFont(DesignTokens.SettingsTypography.toggleTitle, weight: .medium)
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
             Toggle("", isOn: metricIsOn(metric))
                 .labelsHidden()
+                .accessibilityLabel("在菜单栏显示\(metric.title)")
                 .toggleStyle(.switch)
                 .tint(DesignTokens.Aurora.controlOn)
                 .controlSize(.small)
@@ -170,89 +167,38 @@ struct SystemMonitorSettingsView: View {
 
     private var showSectionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("监控内容", systemImage: "chart.bar")
-            sectionCard {
-                toggleRow(
-                    isOn: $settings.monitorShowCPU,
+            SettingsSectionHeader(title: "监控内容", systemImage: "chart.bar")
+            SettingsCard {
+                SettingsToggleRow(
                     title: "CPU 使用率与温度",
-                    desc: "显示 CPU 使用率、CPU 温度。")
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.monitorShowGPU,
+                    description: "显示 CPU 使用率、CPU 温度。",
+                    isOn: $settings.monitorShowCPU)
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "GPU 使用率与温度",
-                    desc: "显示 GPU 使用率、GPU 温度。")
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.monitorShowMemory,
+                    description: "显示 GPU 使用率、GPU 温度。",
+                    isOn: $settings.monitorShowGPU)
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "内存",
-                    desc: "显示内存占用与压力状态。")
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.monitorShowNetwork,
+                    description: "显示内存占用与压力状态。",
+                    isOn: $settings.monitorShowMemory)
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "网络",
-                    desc: "显示上行/下行速率。")
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.monitorShowDisk,
+                    description: "显示上行/下行速率。",
+                    isOn: $settings.monitorShowNetwork)
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "磁盘",
-                    desc: "显示磁盘 IO 与占用。")
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.monitorShowPower,
+                    description: "显示磁盘 IO 与占用。",
+                    isOn: $settings.monitorShowDisk)
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "功耗",
-                    desc: "显示整机功耗。")
+                    description: "显示整机功耗。",
+                    isOn: $settings.monitorShowPower)
             }
-        }
-    }
-
-    // MARK: - Shared helpers (mirror ClipboardSettingsView)
-
-    private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: systemImage, size: 26)
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                .foregroundStyle(.primary)
-        }
-    }
-
-    private func sectionCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .auroraSettingsCard()
-    }
-
-    private func toggleRow(isOn: Binding<Bool>, title: String, desc: String) -> some View {
-        HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                    .foregroundStyle(.primary)
-                Text(desc)
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(DesignTokens.Aurora.controlOn)
-                .controlSize(.small)
-                .padding(.top, 2)
         }
     }
 }

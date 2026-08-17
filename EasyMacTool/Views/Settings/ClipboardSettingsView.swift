@@ -12,6 +12,8 @@ struct ClipboardSettingsView: View {
     @State private var showClearAlert = false
     /// Triggers the "delete 7-day-old" confirmation alert.
     @State private var showOldCleanupAlert = false
+    @State private var globalRecording = false
+    @State private var ignoredAppDisplayNames: [String: String] = [:]
 
     var body: some View {
         ScrollView {
@@ -24,6 +26,10 @@ struct ClipboardSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(DesignTokens.Aurora.pageBackground)
+        .onAppear(perform: refreshIgnoredAppDisplayNames)
+        .onChange(of: settings.ignoredClipboardApps) { _, _ in
+            refreshIgnoredAppDisplayNames()
+        }
         .alert("清空全部剪切板历史？", isPresented: $showClearAlert) {
             Button("取消", role: .cancel) {}
             Button("清空", role: .destructive) {
@@ -42,54 +48,30 @@ struct ClipboardSettingsView: View {
         }
     }
 
-    // MARK: - Section helpers
-
-    /// Section header（Aurora v2）：渐变图标 chip + 15pt semibold 标题。
-    private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: systemImage, size: 26)
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                .foregroundStyle(.primary)
-        }
-    }
-
-    /// 卡片容器：section 内容包一层浮起卡片。
-    private func sectionCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .auroraSettingsCard()
-    }
-
     // MARK: - Hotkey
 
     private var hotkeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("通用", systemImage: "gear")
-            sectionCard {
-                toggleRow(
-                      isOn: Binding(
-                          get: { settings.clipboardCapturingEnabled },
-                          set: { newValue in
-                              if settings.clipboardCapturingEnabled != newValue {
-                                  settings.clipboardCapturingEnabled = newValue
-                                  ClipboardManager.shared.setCapturing(newValue)
-                              }
-                          }
-                      ),
-                      title: "启用剪切板",
-                      desc: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。"
-                  )
-                  Rectangle()
-                      .fill(DesignTokens.Aurora.insetSeparator)
-                      .frame(height: 1)
+            SettingsSectionHeader(title: "通用", systemImage: "gear")
+            SettingsCard {
+                SettingsToggleRow(
+                    title: "启用剪切板",
+                    description: "关闭后不再记录剪切板内容，剪切板快捷键也将失效。密码管理器始终自动排除。",
+                    isOn: Binding(
+                        get: { settings.clipboardCapturingEnabled },
+                        set: { newValue in
+                            if settings.clipboardCapturingEnabled != newValue {
+                                settings.clipboardCapturingEnabled = newValue
+                                ClipboardManager.shared.setCapturing(newValue)
+                            }
+                        }
+                    )
+                )
+                SettingsRowDivider()
                 
                 HStack(spacing: DesignTokens.Settings.formRowGap) {
                     Text("快捷键")
-                        .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.toggleTitle, weight: .medium)
                         .foregroundStyle(.primary)
                     KeyRecorderView(
                         keyCode: $settings.clipboardShortcut.keyCode,
@@ -100,12 +82,13 @@ struct ClipboardSettingsView: View {
                                 modifiers: modifiers,
                                 includeClipboardShortcut: false
                             )
-                        }
+                        },
+                        isGlobalRecording: $globalRecording
                     )
                     Spacer(minLength: 0)
                 }
                 Text("按下此组合键可在屏幕底部呼出剪切板历史。再次按下或按 Esc 关闭。")
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -115,32 +98,34 @@ struct ClipboardSettingsView: View {
 
     private var behaviorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("行为", systemImage: "switch.2")
-            sectionCard {
-                toggleRow(
-                    isOn: $settings.clipboardAutoPaste,
+            SettingsSectionHeader(title: "行为", systemImage: "switch.2")
+            SettingsCard {
+                SettingsToggleRow(
                     title: "自动粘贴",
-                    desc: "选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。"
-                ) 
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.clipboardPlainPaste,
+                    description: "选中条目后自动将其粘贴到当前应用。关闭则只写回剪切板。",
+                    isOn: $settings.clipboardAutoPaste
+                )
+                SettingsRowDivider()
+                SettingsToggleRow(
                     title: "纯文本粘贴",
-                    desc: "重新选中文本/链接/颜色时只写回纯文本（剥掉字体、颜色等格式）。图片与文件不受影响。"
+                    description: "重新选中文本/链接/颜色时只写回纯文本（剥掉字体、颜色等格式）。图片与文件不受影响。",
+                    isOn: $settings.clipboardPlainPaste
                 )
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
-                toggleRow(
-                    isOn: $settings.clipboardLinkPreviewEnabled,
-                    title: "链接预览",
-                    desc: "开启后对复制的网页链接后台获取标题与站点图标。"
-                )
-                Rectangle()
-                    .fill(DesignTokens.Aurora.insetSeparator)
-                    .frame(height: 1)
+                SettingsRowDivider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("链接预览")
+                        .font(.headline)
+                    Text("仅访问公网 http/https 地址；手动模式只在你点击卡片时联网。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("链接预览请求方式", selection: $settings.clipboardLinkPreviewMode) {
+                        ForEach(AppSettings.LinkPreviewMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                SettingsRowDivider()
                 ignoredAppsEditor
             }
         }
@@ -150,10 +135,10 @@ struct ClipboardSettingsView: View {
     private var ignoredAppsEditor: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("忽略来源 app")
-                .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
+                .scaledSystemFont(DesignTokens.SettingsTypography.toggleTitle, weight: .medium)
                 .foregroundStyle(.primary)
             Text("这些应用复制的剪贴板内容将不被记录。")
-                .font(.system(size: DesignTokens.SettingsTypography.caption))
+                .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                 .foregroundStyle(.secondary)
             Button {
                 presentIgnoreAppPicker()
@@ -164,8 +149,8 @@ struct ClipboardSettingsView: View {
                 ForEach(settings.ignoredClipboardApps, id: \.self) { bundleID in
                     HStack(spacing: 8) {
                         AppIconView(bundleID: bundleID)
-                        Text(appDisplayName(for: bundleID))
-                            .font(.system(size: 12))
+                        Text(ignoredAppDisplayNames[bundleID] ?? bundleID)
+                            .scaledSystemFont(12, relativeTo: .caption)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: 0)
@@ -176,6 +161,7 @@ struct ClipboardSettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("移除忽略应用")
                     }
                 }
             }
@@ -216,57 +202,55 @@ struct ClipboardSettingsView: View {
         }
     }
 
-    /// 从 bundle ID 解析应用显示名（找不到回退到 bundle ID）。
-    private func appDisplayName(for bundleID: String) -> String {
-        if let app = NSWorkspace.shared.runningApplications
-            .first(where: { $0.bundleIdentifier == bundleID }) {
-            return app.localizedName ?? bundleID
-        }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return url.deletingPathExtension().lastPathComponent
-        }
-        return bundleID
-    }
-
-    /// Toggle row：标题 toggleTitle(15pt) medium + 描述 caption(12pt) secondary，
-    /// 品牌 tint 的 switch 锚定右上。
-    private func toggleRow(isOn: Binding<Bool>, title: String, desc: String) -> some View {
-        HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                    .foregroundStyle(.primary)
-                Text(desc)
-                    .font(.system(size: DesignTokens.SettingsTypography.caption))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+    /// Resolve LaunchServices names only when the ignored-app list changes.
+    private func refreshIgnoredAppDisplayNames() {
+        let running = Dictionary(
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                app.bundleIdentifier.map { ($0, app.localizedName) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var names: [String: String] = [:]
+        for bundleID in settings.ignoredClipboardApps {
+            if let name = running[bundleID] ?? nil {
+                names[bundleID] = name
+            } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                names[bundleID] = url.deletingPathExtension().lastPathComponent
+            } else {
+                names[bundleID] = bundleID
             }
-            Spacer(minLength: 0)
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(DesignTokens.Aurora.controlOn)
-                .controlSize(.small)
-                .padding(.top, 2)
         }
+        ignoredAppDisplayNames = names
     }
 
     // MARK: - History
 
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("历史", systemImage: "tray")
-            sectionCard {
+            SettingsSectionHeader(title: "历史", systemImage: "tray")
+            SettingsCard {
+                SettingsToggleRow(
+                    title: "跨会话保留历史",
+                    description: "关闭后历史仅保留在本次运行中，并立即删除磁盘上的剪切板数据。",
+                    isOn: Binding(
+                        get: { settings.clipboardPersistentHistoryEnabled },
+                        set: { newValue in
+                            settings.clipboardPersistentHistoryEnabled = newValue
+                            ClipboardManager.shared.setPersistentHistoryEnabled(newValue)
+                        }
+                    )
+                )
+                SettingsRowDivider()
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: DesignTokens.Settings.formRowGap) {
                         Text("最大保留")
-                            .font(.system(size: DesignTokens.SettingsTypography.formLabel))
+                            .scaledSystemFont(DesignTokens.SettingsTypography.formLabel)
                             .foregroundStyle(.primary)
                             .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                         Slider(value: historyLimitBinding, in: 50...1000, step: 50)
                             .tint(DesignTokens.Aurora.controlOn)
                         Text("\(settings.clipboardHistoryLimit)")
-                            .font(.system(size: DesignTokens.SettingsTypography.sliderValue, design: .monospaced))
+                            .scaledSystemFont(DesignTokens.SettingsTypography.sliderValue, design: .monospaced)
                             .frame(width: 48, alignment: .trailing)
                     }
                     // Range labels aligned under the slider track (clearing
@@ -279,7 +263,7 @@ struct ClipboardSettingsView: View {
                         Text("1000")
                             .frame(width: 48, alignment: .trailing)
                     }
-                    .font(.system(size: DesignTokens.SettingsTypography.sliderRange))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.sliderRange)
                     .foregroundStyle(.secondary)
                 }
                 HStack(spacing: DesignTokens.Spacing.sm) {
@@ -325,7 +309,7 @@ private struct DestructiveOutlineButton<Label: View>: View {
     var body: some View {
         Button(action: action) { label() }
             .buttonStyle(HoverStyle(isHovering: isHovering))
-            .onHover { isHovering = $0 }
+            .auroraHover($isHovering, animated: false)
     }
 
     private struct HoverStyle: ButtonStyle {

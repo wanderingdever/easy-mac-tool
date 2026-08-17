@@ -2,16 +2,23 @@ import AppKit
 
 /// Lookups for resolving installed applications — used by the uninstaller's
 /// app picker.
-enum InstalledApps {
+nonisolated enum InstalledApps {
     /// 缓存的非系统应用列表（含 sizeBytes 计算），避免每次进入都重新扫描。
-    private static var cachedInstalledApplications: [InstalledApp]?
+    private nonisolated(unsafe) static var cachedInstalledApplications: [InstalledApp]?
+    private static let cacheLock = NSLock()
+    @MainActor private static let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 300
+        return cache
+    }()
 
     /// 清空缓存，强制下次调用重新扫描。
     static func invalidateInstalledApplicationsCache() {
-        cachedInstalledApplications = nil
+        cacheLock.withLock { cachedInstalledApplications = nil }
+        Task { @MainActor in iconCache.removeAllObjects() }
     }
 
-    struct InstalledApp: Identifiable, Equatable {
+    struct InstalledApp: Identifiable, Equatable, Sendable {
         let id: String
         let name: String
         let bundleID: String?
@@ -19,8 +26,12 @@ enum InstalledApps {
         let isSystem: Bool
         let sizeBytes: Int64
 
-        var icon: NSImage {
-            NSWorkspace.shared.icon(forFile: url.path)
+        @MainActor var icon: NSImage {
+            let key = id as NSString
+            if let cached = InstalledApps.iconCache.object(forKey: key) { return cached }
+            let image = NSWorkspace.shared.icon(forFile: url.path)
+            InstalledApps.iconCache.setObject(image, forKey: key)
+            return image
         }
     }
 
@@ -38,7 +49,8 @@ enum InstalledApps {
     }
 
     static func installedApplications(includeSystemApplications: Bool = false) -> [InstalledApp] {
-        if !includeSystemApplications, let cached = cachedInstalledApplications {
+        if !includeSystemApplications,
+           let cached = cacheLock.withLock({ cachedInstalledApplications }) {
             return cached
         }
         let fm = FileManager.default
@@ -73,7 +85,7 @@ enum InstalledApps {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         if !includeSystemApplications {
-            cachedInstalledApplications = result
+            cacheLock.withLock { cachedInstalledApplications = result }
         }
         return result
     }

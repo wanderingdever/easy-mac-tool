@@ -21,12 +21,11 @@ struct AboutView: View {
             .padding(.bottom, 18)
 
             Text("EasyMacTool")
-                .font(.system(size: 22, weight: .bold))
-                .tracking(-0.01)
+                .scaledSystemFont(22, weight: .bold, relativeTo: .title2)
 
             // 版本胶囊：品牌渐变淡底 + 渐变文字。
             Text("版本 \(appVersion)")
-                .font(.system(size: 11, weight: .medium))
+                .scaledSystemFont(11, weight: .medium, relativeTo: .caption)
                 .monospacedDigit()
                 .foregroundStyle(DesignTokens.Aurora.brandGradient)
                 .padding(.horizontal, 10)
@@ -38,7 +37,7 @@ struct AboutView: View {
                 .padding(.top, 8)
 
             Text("让您轻松使用 Mac")
-                .font(.system(size: 14))
+                .scaledSystemFont(14)
                 .foregroundStyle(.secondary)
                 .padding(.top, 14)
 
@@ -63,7 +62,7 @@ struct AboutView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(DesignTokens.Aurora.brandGradient)
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .scaledSystemFont(12, weight: .medium, relativeTo: .caption)
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, 12)

@@ -1,6 +1,31 @@
 import AppKit
 import Darwin
 
+/// Matches a process executable path to the nearest enclosing app bundle in
+/// O(path depth), instead of scanning every running app for every process.
+nonisolated struct ProcessPathOwnerIndex {
+    private let ownersByPrefix: [String: pid_t]
+
+    init(_ entries: [(prefix: String, pid: pid_t)]) {
+        ownersByPrefix = Dictionary(entries.map { ($0.prefix, $0.pid) },
+                                    uniquingKeysWith: { first, _ in first })
+    }
+
+    func ownerPID(for executablePath: String) -> pid_t? {
+        guard executablePath.first == "/" else { return nil }
+        var end = executablePath.endIndex
+        while end > executablePath.startIndex {
+            guard let slash = executablePath[..<end].lastIndex(of: "/") else { return nil }
+            let prefixEnd = executablePath.index(after: slash)
+            if let owner = ownersByPrefix[String(executablePath[..<prefixEnd])] {
+                return owner
+            }
+            end = slash
+        }
+        return nil
+    }
+}
+
 /// 运行中应用的内存用量快照（主进程 PID + 聚合内存），用于菜单栏下拉的「活动应用内存」区块。
 struct ActiveAppMemoryInfo: Identifiable {
     let pid: pid_t
@@ -14,7 +39,23 @@ struct ActiveAppMemoryInfo: Identifiable {
 
 /// 枚举运行中的用户应用，聚合其全部进程（含 Helper）的物理内存，排除系统服务，
 /// 返回占用最高的前 N 个。参考 Vorssaint 的进程表聚合方式。
-enum AppMemorySampler {
+nonisolated enum AppMemorySampler {
+    struct Candidate: Sendable {
+        let pid: pid_t
+        let name: String
+        let bundleID: String
+        let executablePrefix: String
+        let isRegular: Bool
+        let isFrontmost: Bool
+    }
+
+    struct Sample: Sendable {
+        let pid: pid_t
+        let name: String
+        let bundleID: String?
+        let memoryBytes: UInt64
+    }
+
     /// 单个进程的内存采样。
     private struct ProcessSample {
         let pid: pid_t
@@ -22,13 +63,16 @@ enum AppMemorySampler {
         let memoryBytes: UInt64
     }
 
-    /// 逐进程物理内存（RSS，字节）。`proc_pidinfo` 读取基本进程信息无需特殊权限。
-    private static func residentBytes(for pid: pid_t) -> UInt64? {
-        var info = proc_taskinfo()
-        let size = MemoryLayout<proc_taskinfo>.size
-        let ret = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, Int32(size))
-        guard ret == size else { return nil }
-        return info.pti_resident_size
+    /// 逐进程物理占用（phys_footprint，字节）。相比 RSS，footprint 会扣除
+    /// 大部分可回收/共享页，更接近活动监视器的“内存”口径，聚合 Helper 时
+    /// 也不容易重复放大共享映射。
+    private static func footprintBytes(for pid: pid_t) -> UInt64? {
+        var info = rusage_info_v2()
+        return withUnsafeMutablePointer(to: &info) { pointer in
+            var raw: rusage_info_t? = UnsafeMutableRawPointer(pointer)
+            guard proc_pid_rusage(pid, RUSAGE_INFO_V2, &raw) == 0 else { return nil }
+            return pointer.pointee.ri_phys_footprint
+        }
     }
 
     /// `PROC_PIDPATHINFO_MAXSIZE`（4 * MAXPATHLEN）在 Swift 中不可用作宏，手动定义同值。
@@ -44,11 +88,14 @@ enum AppMemorySampler {
         guard written > 0 else { return [] }
         let validCount = min(pids.count, Int(written) / MemoryLayout<pid_t>.size)
         var result: [ProcessSample] = []
+        result.reserveCapacity(validCount)
+        var pathBuffer = [CChar](repeating: 0, count: pathBufferSize)
         for pid in pids.prefix(validCount) {
-            var pathBuf = [CChar](repeating: 0, count: pathBufferSize)
-            let len = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
-            let path = len > 0 ? String(cString: pathBuf) : ""
-            result.append(ProcessSample(pid: pid, path: path, memoryBytes: residentBytes(for: pid) ?? 0))
+            let len = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
+            let path = len > 0
+                ? String(decoding: pathBuffer.prefix(Int(len)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                : ""
+            result.append(ProcessSample(pid: pid, path: path, memoryBytes: footprintBytes(for: pid) ?? 0))
         }
         return result
     }
@@ -120,55 +167,55 @@ enum AppMemorySampler {
     ///   纯后台无 UI 的代理被剔除（对齐用户对 macOS「强制退出」列表的认知）。
     /// - 家族归并：同一产品体系（如微信 + 小程序）合并为一行，内存求和。
     /// - 排序：按聚合内存降序；`limit` 为 nil 时返回全部（列表可滚动）。
-    static func sample(limit: Int? = nil) -> [ActiveAppMemoryInfo] {
+    @MainActor
+    static func captureCandidates() -> [Candidate] {
         let own = Bundle.main.bundleIdentifier
-        let presencePIDs = Self.uiPresencePIDs()
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-
-        // 1) 候选应用：非 prohibited、非自身、非系统 bundleID、路径非系统服务，
-        //    且「用户可见」——普通应用/前台/拥有窗口或菜单栏状态项。
-        let apps = NSWorkspace.shared.runningApplications.filter { app in
-            guard app.activationPolicy != .prohibited else { return false }
-            guard let bundleID = app.bundleIdentifier, !bundleID.isEmpty else { return false }
-            guard bundleID != own, !isSystemBundleID(bundleID) else { return false }
-            guard let url = app.bundleURL else { return false }
-            let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-            guard !isSystemServicePath(path) else { return false }
-            if app.activationPolicy == .regular { return true }
-            if app.processIdentifier == frontmostPID { return true }
-            return presencePIDs.contains(app.processIdentifier)
-        }
-
-        // 2) 计算每个应用的 bundle 根路径前缀。
-        let attributed: [(app: NSRunningApplication, prefix: String)] = apps.compactMap { app in
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard app.activationPolicy != .prohibited else { return nil }
+            guard let bundleID = app.bundleIdentifier, !bundleID.isEmpty else { return nil }
+            guard bundleID != own, !isSystemBundleID(bundleID) else { return nil }
             guard let url = app.bundleURL else { return nil }
-            return (app, url.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+            let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard !isSystemServicePath(path) else { return nil }
+            return Candidate(pid: app.processIdentifier,
+                             name: app.localizedName ?? bundleID,
+                             bundleID: bundleID,
+                             executablePrefix: path + "/",
+                             isRegular: app.activationPolicy == .regular,
+                             isFrontmost: app.processIdentifier == frontmostPID)
+        }
+    }
+
+    static func sample(candidates: [Candidate], limit: Int? = nil) -> [Sample] {
+        let presencePIDs = Self.uiPresencePIDs()
+        let attributed = candidates.filter {
+            $0.isRegular || $0.isFrontmost || presencePIDs.contains($0.pid)
         }
 
         // 3) 先计入各应用主进程 RSS（兜底，即使路径匹配失败也保证有数据），
         //    再按路径前缀把子进程内存归并到对应应用（主进程已在兜底计入，跳过避免重复）。
-        let mainPIDs = Set(attributed.map { $0.app.processIdentifier })
+        let mainPIDs = Set(attributed.map(\.pid))
+        let ownerIndex = ProcessPathOwnerIndex(
+            attributed.map { (prefix: $0.executablePrefix, pid: $0.pid) }
+        )
         var totals: [pid_t: UInt64] = [:]
         for item in attributed {
-            totals[item.app.processIdentifier, default: 0] += Self.residentBytes(for: item.app.processIdentifier) ?? 0
+            totals[item.pid, default: 0] += Self.footprintBytes(for: item.pid) ?? 0
         }
         for proc in allProcesses() where !proc.path.isEmpty {
             guard !mainPIDs.contains(proc.pid) else { continue }
-            guard let owner = attributed.first(where: { proc.path.hasPrefix($0.prefix) }) else { continue }
-            totals[owner.app.processIdentifier, default: 0] += proc.memoryBytes
+            guard let ownerPID = ownerIndex.ownerPID(for: proc.path) else { continue }
+            totals[ownerPID, default: 0] += proc.memoryBytes
         }
 
         // 4) 家族归并：同一 family 的多个应用合并为一行（内存求和、取内存最大者作代表）。
-        var grouped: [String: (total: UInt64, rep: ActiveAppMemoryInfo)] = [:]
+        var grouped: [String: (total: UInt64, rep: Sample)] = [:]
         for item in attributed {
-            guard let mem = totals[item.app.processIdentifier], mem > 0 else { continue }
-            let info = ActiveAppMemoryInfo(pid: item.app.processIdentifier,
-                                           name: item.app.localizedName ?? item.app.bundleIdentifier ?? "?",
-                                           bundleID: item.app.bundleIdentifier,
-                                           icon: item.app.icon,
-                                           memoryBytes: mem)
-            let key = Self.familyName(bundleID: item.app.bundleIdentifier,
-                                      name: item.app.localizedName) ?? info.name
+            guard let mem = totals[item.pid], mem > 0 else { continue }
+            let info = Sample(pid: item.pid, name: item.name,
+                              bundleID: item.bundleID, memoryBytes: mem)
+            let key = Self.familyName(bundleID: item.bundleID, name: item.name) ?? info.name
             if let existing = grouped[key] {
                 grouped[key] = (existing.total + mem,
                                 existing.rep.memoryBytes >= mem ? existing.rep : info)
@@ -179,14 +226,26 @@ enum AppMemorySampler {
 
         // 5) 组装、按内存降序、可选截断。
         let merged = grouped.map { key, entry in
-            ActiveAppMemoryInfo(pid: entry.rep.pid,
-                                name: key,
-                                bundleID: entry.rep.bundleID,
-                                icon: entry.rep.icon,
-                                memoryBytes: entry.total)
+            Sample(pid: entry.rep.pid, name: key,
+                   bundleID: entry.rep.bundleID, memoryBytes: entry.total)
         }
         let sorted = merged.sorted { $0.memoryBytes > $1.memoryBytes }
         guard let limit else { return sorted }
         return Array(sorted.prefix(limit))
+    }
+
+    @MainActor
+    static func displayInfo(from samples: [Sample]) -> [ActiveAppMemoryInfo] {
+        let appsByPID = Dictionary(
+            NSWorkspace.shared.runningApplications.map { ($0.processIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return samples.map { sample in
+            ActiveAppMemoryInfo(pid: sample.pid,
+                                name: sample.name,
+                                bundleID: sample.bundleID,
+                                icon: appsByPID[sample.pid]?.icon,
+                                memoryBytes: sample.memoryBytes)
+        }
     }
 }

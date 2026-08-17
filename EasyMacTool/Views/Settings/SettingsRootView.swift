@@ -56,7 +56,7 @@ struct SettingsRootView: View {
                 AuroraIconChip(systemName: "bolt.fill", size: 28, solid: true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("EasyMacTool")
-                        .font(.system(size: DesignTokens.SettingsTypography.sidebarTitle, weight: .semibold))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.sidebarTitle, weight: .semibold)
                         .foregroundStyle(.primary)
                 }
                 Spacer(minLength: 0)
@@ -82,7 +82,7 @@ struct SettingsRootView: View {
 
             // 侧栏底部提示（弱化）。
             Text("让 Mac 更轻松")
-                .font(.system(size: 11))
+                .scaledSystemFont(11, relativeTo: .caption)
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
@@ -160,6 +160,9 @@ private struct SidebarNavItem: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         Button {
@@ -171,8 +174,8 @@ private struct SidebarNavItem: View {
                     .frame(width: DesignTokens.Settings.navItemIconSize,
                            height: DesignTokens.Settings.navItemIconSize)
                 Text(section.rawValue)
-                    .font(.system(size: DesignTokens.SettingsTypography.navItem,
-                                  weight: isSelected ? .semibold : .regular))
+                    .scaledSystemFont(DesignTokens.SettingsTypography.navItem,
+                                      weight: isSelected ? .semibold : .regular)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -184,14 +187,12 @@ private struct SidebarNavItem: View {
                 RoundedRectangle(cornerRadius: DesignTokens.Settings.navItemRadius + 2, style: .continuous)
                     .fill(backgroundFill)
             )
-            .shadow(color: isSelected ? DesignTokens.Aurora.brandGlow : .clear,
+            .shadow(color: isSelected && !reduceTransparency ? DesignTokens.Aurora.brandGlow : .clear,
                     radius: 6, y: 2)
             .contentShape(Rectangle())
-            .animation(DesignTokens.Aurora.standard, value: isSelected)
-            .animation(DesignTokens.Aurora.standard, value: isHovered)
-            .onHover { hovering in
-                isHovered = hovering
-            }
+            .animation(reduceMotion ? nil : DesignTokens.Aurora.standard, value: isSelected)
+            .animation(reduceMotion ? nil : DesignTokens.Aurora.standard, value: isHovered)
+            .auroraHover($isHovered, animated: false)
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
@@ -201,7 +202,9 @@ private struct SidebarNavItem: View {
 
     private var backgroundFill: AnyShapeStyle {
         if isSelected {
-            return AnyShapeStyle(DesignTokens.Aurora.brandGradient)
+            return contrast == .increased
+                ? AnyShapeStyle(DesignTokens.Aurora.controlOn)
+                : AnyShapeStyle(DesignTokens.Aurora.brandGradient)
         } else if isHovered {
             return AnyShapeStyle(Color.primary.opacity(0.06))
         } else {

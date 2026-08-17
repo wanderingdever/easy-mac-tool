@@ -32,6 +32,7 @@ private struct RadialDial: View {
     private let outerRadius: CGFloat = 56
     private let innerRadius: CGFloat = 20
     private let wedgeHalfSpan: Double = 22.5
+    private static let appIcon = NSImage(named: "AppIcon")
 
     /// 拨盘直径（外圈直径）。
     private var dialDiameter: CGFloat { outerRadius * 2 }
@@ -54,44 +55,36 @@ private struct RadialDial: View {
         let isActive = activeAction == action
         let centerAngle = Self.swiftUIAngle(for: sector)
         let c = dialCenter
+        let path = wedgePath(center: c, centerAngle: centerAngle)
         return ZStack {
-            Path { path in
-                path.addArc(center: c,
-                            radius: outerRadius,
-                            startAngle: .degrees(centerAngle - wedgeHalfSpan),
-                            endAngle: .degrees(centerAngle + wedgeHalfSpan),
-                            clockwise: false)
-                path.addLine(to: CGPoint(x: c.x + innerRadius * cos(radians(centerAngle + wedgeHalfSpan)),
-                                         y: c.y + innerRadius * sin(radians(centerAngle + wedgeHalfSpan))))
-                path.addArc(center: c,
-                            radius: innerRadius,
-                            startAngle: .degrees(centerAngle + wedgeHalfSpan),
-                            endAngle: .degrees(centerAngle - wedgeHalfSpan),
-                            clockwise: true)
-                path.closeSubpath()
-            }
+            path
             .fill(isActive ? AnyShapeStyle(DesignTokens.Aurora.brandGradient)
                            : AnyShapeStyle(Color.primary.opacity(0.10)))
             .overlay(
-                Path { path in
-                    path.addArc(center: c,
-                                radius: outerRadius,
-                                startAngle: .degrees(centerAngle - wedgeHalfSpan),
-                                endAngle: .degrees(centerAngle + wedgeHalfSpan),
-                                clockwise: false)
-                    path.addLine(to: CGPoint(x: c.x + innerRadius * cos(radians(centerAngle + wedgeHalfSpan)),
-                                             y: c.y + innerRadius * sin(radians(centerAngle + wedgeHalfSpan))))
-                    path.addArc(center: c,
-                                radius: innerRadius,
-                                startAngle: .degrees(centerAngle + wedgeHalfSpan),
-                                endAngle: .degrees(centerAngle - wedgeHalfSpan),
-                                clockwise: true)
-                    path.closeSubpath()
-                }
-                .stroke(DesignTokens.Aurora.cardBorder, lineWidth: 1)
+                path.stroke(DesignTokens.Aurora.cardBorder, lineWidth: 1)
             )
             .shadow(color: isActive ? DesignTokens.Aurora.brandGlow : .clear, radius: 8)
             .animation(DesignTokens.Aurora.standard, value: isActive)
+        }
+    }
+
+    private func wedgePath(center: CGPoint, centerAngle: Double) -> Path {
+        Path { path in
+            path.addArc(center: center,
+                        radius: outerRadius,
+                        startAngle: .degrees(centerAngle - wedgeHalfSpan),
+                        endAngle: .degrees(centerAngle + wedgeHalfSpan),
+                        clockwise: false)
+            path.addLine(to: CGPoint(
+                x: center.x + innerRadius * cos(radians(centerAngle + wedgeHalfSpan)),
+                y: center.y + innerRadius * sin(radians(centerAngle + wedgeHalfSpan))
+            ))
+            path.addArc(center: center,
+                        radius: innerRadius,
+                        startAngle: .degrees(centerAngle + wedgeHalfSpan),
+                        endAngle: .degrees(centerAngle - wedgeHalfSpan),
+                        clockwise: true)
+            path.closeSubpath()
         }
     }
 
@@ -107,7 +100,7 @@ private struct RadialDial: View {
                 .frame(width: innerRadius * 2, height: innerRadius * 2)
                 .shadow(color: isActive ? DesignTokens.Aurora.brandGlow : .clear, radius: 8)
                 .animation(DesignTokens.Aurora.standard, value: isActive)
-            if let logo = NSImage(named: "AppIcon") {
+            if let logo = Self.appIcon {
                 Image(nsImage: logo)
                     .resizable()
                     .scaledToFit()

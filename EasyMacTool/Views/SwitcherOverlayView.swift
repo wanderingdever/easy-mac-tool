@@ -18,8 +18,6 @@ import SwiftUI
 /// OverlayPanelController.positionPanel 的 headerBlock/footerBlock 一致。
 struct SwitcherOverlayView: View {
     @ObservedObject var controller: OverlayPanelController
-    /// Called on mouse hover to set the visual aim index (lighter border).
-    var onHoverChange: (Int?) -> Void
     /// Called on click to select + activate the clicked window.
     var onActivate: (Int) -> Void
 
@@ -36,23 +34,12 @@ struct SwitcherOverlayView: View {
         VStack(spacing: 0) {
             FlowLayout(spacing: DesignTokens.Spacing.md) {
                 ForEach(Array(controller.items.enumerated()), id: \.element.id) { index, item in
-                    WindowThumbnailCell(
+                    SwitcherThumbnailEntry(
                         item: item,
                         isSelected: index == controller.selectedIndex,
-                        isHover: index == controller.hoverIndex,
-                        size: controller.previewSize
-                    )
-                    .contentShape(Rectangle())
-                    .onHover { hovering in
-                        // Hover only sets the visual aim — does NOT change
-                        // selectedIndex or trigger the live stream. Click is
-                        // required to commit the selection.
-                        onHoverChange(hovering ? index : nil)
-                    }
-                    .onTapGesture {
-                        // Click promotes hover→selection AND activates the window.
-                        onActivate(index)
-                    }
+                        selectionIndex: controller.selectedIndex,
+                        size: controller.previewSize,
+                        onActivate: { onActivate(index) })
                 }
             }
             footer
@@ -93,7 +80,6 @@ struct SwitcherOverlayView: View {
         .transaction { $0.animation = nil }
         .animation(nil, value: controller.items.count)
         .animation(nil, value: controller.selectedIndex)
-        .animation(nil, value: controller.hoverIndex)
     }
 
 
@@ -115,8 +101,28 @@ struct SwitcherOverlayView: View {
         HStack(spacing: 5) {
             AuroraKbd(text: keys)
             Text(action)
-                .font(.system(size: 11))
+                .scaledSystemFont(11, relativeTo: .caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Keeps hover state inside one thumbnail so pointer movement does not publish
+/// through the controller and diff the entire switcher tree.
+private struct SwitcherThumbnailEntry: View {
+    let item: WindowItem
+    let isSelected: Bool
+    let selectionIndex: Int
+    let size: AppSettings.PreviewSize
+    let onActivate: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        WindowThumbnailCell(item: item, isSelected: isSelected,
+                            isHover: isHovered, size: size)
+            .contentShape(Rectangle())
+            .auroraHover($isHovered, animated: false)
+            .onTapGesture(perform: onActivate)
+            .onChange(of: selectionIndex) { _, _ in isHovered = false }
     }
 }

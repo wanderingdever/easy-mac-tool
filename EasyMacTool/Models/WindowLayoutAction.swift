@@ -85,7 +85,7 @@ enum RadialSector: Int, CaseIterable {
 
     /// Maps a mouse displacement angle (in degrees, 0 = pointing right,
     /// counter-clockwise positive) to the nearest of the 8 radial sectors.
-    static func sector(forAngleDegrees degrees: CGFloat) -> RadialSector {
+    nonisolated static func sector(forAngleDegrees degrees: CGFloat) -> RadialSector {
         let normalized = degrees.truncatingRemainder(dividingBy: 360)
         let positive = normalized < 0 ? normalized + 360 : normalized
         let step: CGFloat = 45

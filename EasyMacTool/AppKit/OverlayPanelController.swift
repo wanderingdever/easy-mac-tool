@@ -12,12 +12,6 @@ final class OverlayPanelController: ObservableObject {
     @Published var selectedIndex: Int = 0 {
         didSet { notifySelectionChanged() }
     }
-    /// Mouse-hover "aim" index — a lighter preview border, NOT the actual
-    /// selection. Keyboard navigation (Tab/Shift+Tab) changes `selectedIndex`
-    /// which has higher priority. Clicking a hovered cell promotes it to
-    /// `selectedIndex` and activates the window. Mirrors Windows Alt+Tab:
-    /// hover is a visual aim, click is the commit.
-    @Published var hoverIndex: Int? = nil
     @Published var previewSize: AppSettings.PreviewSize = .small
     /// Which screen the panel appears on (set per presentation from
     /// AppSettings.displayTarget).
@@ -36,11 +30,6 @@ final class OverlayPanelController: ObservableObject {
         // 注册 panel 到 HotkeyManager，使 isSwitcherOpen 计算属性能直接
         // 反映 panel.isVisible，消除手动同步导致的状态不一致。
         HotkeyManager.shared.setSwitcherPanel(panel)
-    }
-
-    deinit {
-        if let global = globalMonitor { NSEvent.removeMonitor(global) }
-        axWatchTimer?.invalidate()
     }
 
     /// Set by `AppCoordinator` so clicks can activate the target window.
@@ -66,7 +55,6 @@ final class OverlayPanelController: ObservableObject {
         self.previewSize = previewSize
         self.displayTarget = displayTarget
         self.selectedIndex = 0
-        self.hoverIndex = nil
         // isSwitcherOpen 现在是计算属性，直接反映 panel.isVisible，
         // 无需手动设置。orderFrontRegardless 后自动变为 true。
 
@@ -77,7 +65,6 @@ final class OverlayPanelController: ObservableObject {
         if hostingController == nil {
             let view = SwitcherOverlayView(
                 controller: self,
-                onHoverChange: { [weak self] index in self?.setHover(index) },
                 onActivate: { [weak self] index in self?.activate(at: index) }
             )
             let hosting = NSHostingController(rootView: view)
@@ -99,7 +86,7 @@ final class OverlayPanelController: ObservableObject {
         positionPanel()
         panel.orderFrontRegardless()
         // 同步 event tap 路由镜像：面板已可见，tap 线程需将该会话路由到主线程。
-        HotkeyManager.shared.setSwitcherOpen(true)
+        HotkeyManager.shared.syncSwitcherVisibility()
         // Make the panel key so it accepts mouse clicks immediately (first click
         // works without needing to click twice).
         // 注意：不能用 NSApp.activate()——它会把 EasyMacTool 变成前台 app，
@@ -120,11 +107,10 @@ final class OverlayPanelController: ObservableObject {
         axWatchTimer = nil
         panel.orderOut(nil)
         // isSwitcherOpen 现在是计算属性，orderOut 后自动变为 false。
-        HotkeyManager.shared.setSwitcherOpen(false)
+        HotkeyManager.shared.syncSwitcherVisibility()
         HotkeyManager.shared.resetActiveShortcut()
         items = []
         selectedIndex = 0
-        hoverIndex = nil
         // 不释放 hostingController —— 复用，下次 present 时不再重建视图树
     }
 
@@ -176,28 +162,12 @@ final class OverlayPanelController: ObservableObject {
     func next() {
         guard !items.isEmpty else { return }
         selectedIndex = (selectedIndex + 1) % items.count
-        // Keyboard navigation takes priority over mouse hover — clear the
-        // visual aim so it doesn't linger on a different cell than selected.
-        hoverIndex = nil
         // selectedIndex 的 didSet 已触发 notifySelectionChanged，无需显式调用。
     }
 
     func prev() {
         guard !items.isEmpty else { return }
         selectedIndex = (selectedIndex - 1 + items.count) % items.count
-        hoverIndex = nil
-    }
-
-    /// Sets the mouse-hover "aim" index — a lighter preview border only.
-    /// Does NOT change `selectedIndex` and does NOT trigger the live stream
-    /// switch. Pass `nil` to clear the aim when the mouse leaves a cell.
-    func setHover(_ index: Int?) {
-        guard let index else {
-            hoverIndex = nil
-            return
-        }
-        guard items.indices.contains(index) else { return }
-        hoverIndex = index
     }
 
     /// 从 items 列表移除已关闭/最小化的窗口并调整选中索引。
@@ -222,7 +192,6 @@ final class OverlayPanelController: ObservableObject {
                 selectedIndex = items.count - 1
             }
         }
-        hoverIndex = nil
     }
 
     /// Mouse-click activation: select then commit (activate the window).
@@ -406,11 +375,5 @@ final class OverlayPanelController: ObservableObject {
         } else {
             return CGSize(width: maxHeight * aspect, height: maxHeight)
         }
-    }
-}
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
     }
 }

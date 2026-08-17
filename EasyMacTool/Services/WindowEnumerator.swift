@@ -42,7 +42,7 @@ final class WindowEnumerator {
 
     /// static：AX 辅助方法改为 static 后可在 Task.detached 后台线程批量
     /// 调用，无需捕获 @MainActor 隔离的 self（Sendable 安全）。
-    private static let logger = Logger(subsystem: "com.easymactool", category: "WindowEnumerator")
+    nonisolated private static let logger = Logger(subsystem: "com.easymactool", category: "WindowEnumerator")
 
     /// AX 获取的窗口信息。windowID 可为 nil（某些 app 不支持 AXWindowID 属性）。
     struct AXWindowInfo: Sendable {

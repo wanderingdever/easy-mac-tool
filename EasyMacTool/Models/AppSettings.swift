@@ -25,13 +25,14 @@ final class AppSettings: ObservableObject {
     @Published var clipboardPlainPaste: Bool = false { didSet { debouncePersist() } }
     /// Lets users suspend clipboard observation without quitting the app.
     @Published var clipboardCapturingEnabled: Bool = true { didSet { debouncePersist() } }
+    /// Whether clipboard history is retained across launches. Disabling this
+    /// keeps the current in-memory session but removes on-disk history.
+    @Published var clipboardPersistentHistoryEnabled: Bool = true { didSet { debouncePersist() } }
     /// 用户可配置的「忽略来源 app」bundleID 列表：这些 app 复制的剪贴板内容
     /// 不被记录（如 IM、特定工具）。在硬编码密码黑名单之上叠加。
     @Published var ignoredClipboardApps: [String] = [] { didSet { debouncePersist() } }
-    /// 链接预览：开启后对复制的 http/https URL 后台抓取网页标题与站点图标
-    /// （类 Paste 链接卡片）。默认关闭——复制私有/带 token 的链接时 app 主动
-    /// 访问可能触发服务端副作用或泄露信息，需用户明确知情开启。
-    @Published var clipboardLinkPreviewEnabled: Bool = false { didSet { debouncePersist() } }
+    /// 链接预览网络请求策略。默认关闭；手动模式仅在用户点击卡片按钮后请求。
+    @Published var clipboardLinkPreviewMode: LinkPreviewMode = .disabled { didSet { debouncePersist() } }
     /// 窗口切换功能全局开关。关闭后所有窗口切换快捷键透传至系统，
     /// 恢复 macOS 原生 Cmd+Tab 行为。
     @Published var windowSwitcherEnabled: Bool = true { didSet { debouncePersist() } }
@@ -40,7 +41,16 @@ final class AppSettings: ObservableObject {
     /// 系统监控总开关。关闭时不采样、不启动定时器、菜单栏不渲染指标块（零开销）。
     @Published var systemMonitorEnabled: Bool = false { didSet { debouncePersist() } }
     /// 采样间隔（秒）。
-    @Published var monitorInterval: Int = 2 { didSet { debouncePersist() } }
+    @Published var monitorInterval: Int = 2 {
+        didSet {
+            let normalized = Self.normalizedMonitorInterval(monitorInterval)
+            if monitorInterval != normalized {
+                monitorInterval = normalized
+                return
+            }
+            debouncePersist()
+        }
+    }
     /// 温度单位（TemperatureUnit.rawValue）。
     @Published var temperatureUnit: String = TemperatureUnit.celsius.rawValue { didSet { debouncePersist() } }
     /// 各菜单栏指标是否启用（key: MenuBarMetric.settingsKey → enabled）。
@@ -70,8 +80,14 @@ final class AppSettings: ObservableObject {
     /// 防抖 persist：0.5 秒内多次变更只执行最后一次，避免在视图更新周期中
     /// 同步 IO 以及频繁 persist 的性能开销。
     private var persistWorkItem: DispatchWorkItem?
+    /// Suppresses observer-triggered persistence while applying one decoded snapshot.
+    private var isLoading = false
 
-    init() { load() }
+    init() {
+        isLoading = true
+        load()
+        isLoading = false
+    }
 
     /// Shared 单例：供 AppDelegate 在 applicationDidFinishLaunching 中
     /// 直接创建 AppCoordinator 使用，与 SwiftUI @StateObject 持有的
@@ -85,6 +101,10 @@ final class AppSettings: ObservableObject {
         modifiers: [.maskCommand, .maskShift],
         isDefault: true
     )
+
+    nonisolated static func normalizedMonitorInterval(_ value: Int) -> Int {
+        max(1, value)
+    }
 
     /// Reject duplicate global shortcut combinations before they reach the
     /// event tap, where one action would otherwise silently shadow another.
@@ -142,7 +162,7 @@ final class AppSettings: ObservableObject {
     /// 系统关键组合：不允许录制为全局快捷键。
     /// CGEventTap 匹配成功后会吞掉事件（return nil），录制这些组合会导致
     /// 所有 app 的退出/关窗/隐藏/Spotlight/强制退出/截图快捷键全局失效。
-    private static let reservedSystemCombos: [(keyCode: CGKeyCode, modifiers: CGEventFlags)] = [
+    nonisolated private static let reservedSystemCombos: [(keyCode: CGKeyCode, modifiers: CGEventFlags)] = [
         (0x0C, .maskCommand),                          // Cmd+Q 退出
         (0x0D, .maskCommand),                          // Cmd+W 关窗
         (0x04, .maskCommand),                          // Cmd+H 隐藏
@@ -156,7 +176,7 @@ final class AppSettings: ObservableObject {
 
     /// 判断给定组合是否为系统保留快捷键。HotkeyManager.matchShortcut 也用
     /// 此做防御性排除：即使旧版本设置中已存留了保留组合，也不匹配不吞键。
-    static func isReservedSystemCombo(keyCode: CGKeyCode, modifiers: CGEventFlags) -> Bool {
+    nonisolated static func isReservedSystemCombo(keyCode: CGKeyCode, modifiers: CGEventFlags) -> Bool {
         reservedSystemCombos.contains { $0.keyCode == keyCode && $0.modifiers == modifiers }
     }
 
@@ -208,9 +228,25 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    enum LinkPreviewMode: String, Codable, CaseIterable, Identifiable {
+        case disabled
+        case manual
+        case automatic
+
+        var id: String { rawValue }
+        var displayName: String {
+            switch self {
+            case .disabled: return "关闭"
+            case .manual: return "手动获取"
+            case .automatic: return "自动获取"
+            }
+        }
+    }
+
     // MARK: - Persistence
 
     private func debouncePersist() {
+        guard !isLoading else { return }
         persistWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.persist()
@@ -236,7 +272,10 @@ final class AppSettings: ObservableObject {
         var clipboardAutoPaste: Bool?
         var clipboardPlainPaste: Bool?
         var clipboardCapturingEnabled: Bool?
+        var clipboardPersistentHistoryEnabled: Bool?
         var ignoredClipboardApps: [String]?
+        var clipboardLinkPreviewMode: LinkPreviewMode?
+        /// v1 兼容字段；读取后迁移到 clipboardLinkPreviewMode。
         var clipboardLinkPreviewEnabled: Bool?
         var windowSwitcherEnabled: Bool?
 
@@ -268,8 +307,10 @@ final class AppSettings: ObservableObject {
             clipboardAutoPaste: clipboardAutoPaste,
             clipboardPlainPaste: clipboardPlainPaste,
             clipboardCapturingEnabled: clipboardCapturingEnabled,
+            clipboardPersistentHistoryEnabled: clipboardPersistentHistoryEnabled,
             ignoredClipboardApps: ignoredClipboardApps,
-            clipboardLinkPreviewEnabled: clipboardLinkPreviewEnabled,
+            clipboardLinkPreviewMode: clipboardLinkPreviewMode,
+            clipboardLinkPreviewEnabled: nil,
             windowSwitcherEnabled: windowSwitcherEnabled,
             systemMonitorEnabled: systemMonitorEnabled,
             monitorInterval: monitorInterval,
@@ -313,17 +354,24 @@ final class AppSettings: ObservableObject {
             if let capturingEnabled = snapshot.clipboardCapturingEnabled {
                 clipboardCapturingEnabled = capturingEnabled
             }
+            if let persistentHistory = snapshot.clipboardPersistentHistoryEnabled {
+                clipboardPersistentHistoryEnabled = persistentHistory
+            }
             if let ignoredApps = snapshot.ignoredClipboardApps {
                 ignoredClipboardApps = ignoredApps
             }
-            if let linkPreview = snapshot.clipboardLinkPreviewEnabled {
-                clipboardLinkPreviewEnabled = linkPreview
+            if let mode = snapshot.clipboardLinkPreviewMode {
+                clipboardLinkPreviewMode = mode
+            } else if let legacyEnabled = snapshot.clipboardLinkPreviewEnabled {
+                clipboardLinkPreviewMode = legacyEnabled ? .automatic : .disabled
             }
             if let wsEnabled = snapshot.windowSwitcherEnabled {
                 windowSwitcherEnabled = wsEnabled
             }
             if let v = snapshot.systemMonitorEnabled { systemMonitorEnabled = v }
-            if let v = snapshot.monitorInterval { monitorInterval = v }
+            if let v = snapshot.monitorInterval {
+                monitorInterval = Self.normalizedMonitorInterval(v)
+            }
             if let v = snapshot.temperatureUnit { temperatureUnit = v }
             if let v = snapshot.menuBarMetrics { menuBarMetrics = v }
             if let v = snapshot.menuBarMetricOrder { menuBarMetricOrder = v }

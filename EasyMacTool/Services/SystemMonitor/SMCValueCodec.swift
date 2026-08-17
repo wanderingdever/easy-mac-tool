@@ -2,7 +2,7 @@ import Foundation
 
 /// Decodes SMC key payloads into Double values. Only the read path is needed
 /// by the system monitor.
-enum SMCValueCodec {
+nonisolated enum SMCValueCodec {
     static func decode(_ bytes: [UInt8], type: String) -> Double? {
         switch type {
         case "flt " where bytes.count == 4:

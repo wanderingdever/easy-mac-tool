@@ -84,12 +84,13 @@ final class SystemMonitorMenuBarController {
     }
 
     private func render() {
-        guard statusItem != nil, !shownMetrics.isEmpty else { return }
+        guard let button = statusItem?.button, !shownMetrics.isEmpty else { return }
         let unit = TemperatureUnit(rawValue: AppSettings.shared.temperatureUnit) ?? .celsius
         let title = MenuBarMetricsRenderer.attributed(for: SystemMonitor.shared.snapshot,
                                                       metrics: shownMetrics,
                                                       temperatureUnit: unit)
-        statusItem?.button?.attributedTitle = title
+        guard !button.attributedTitle.isEqual(to: title) else { return }
+        button.attributedTitle = title
     }
 
     private func removeItem() {

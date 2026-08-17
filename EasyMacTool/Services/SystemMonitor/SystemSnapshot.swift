@@ -1,7 +1,7 @@
 import Foundation
 
 /// Memory pressure as reported by the kernel.
-enum MemoryPressure {
+nonisolated enum MemoryPressure: Sendable {
     case normal, warning, critical, unknown
 
     init(kernelLevel: Int32) {
@@ -16,11 +16,10 @@ enum MemoryPressure {
 
 /// One refresh tick of the system monitor. Optionals stay nil when a reading
 /// is unavailable on the current hardware.
-struct SystemSnapshot {
+nonisolated struct SystemSnapshot: Sendable {
     var cpuTemperature: Double?
     var gpuTemperature: Double?
     var cpuUsage: Double?
-    var cpuUsageReadAt: TimeInterval?
     var gpuUsage: Double?
     var memoryUsed: UInt64?
     var memoryAppUsed: UInt64?
@@ -52,7 +51,7 @@ struct SystemSnapshot {
     var systemPowerHistory: [Double] = []
 }
 
-struct DiskReading {
+nonisolated struct DiskReading: Sendable {
     var devices: [DiskDeviceReading]
 
     var uniqueIODevices: [DiskDeviceReading] {
@@ -64,7 +63,7 @@ struct DiskReading {
     }
 }
 
-struct DiskDeviceReading {
+nonisolated struct DiskDeviceReading: Sendable {
     var id: String
     var name: String
     var mountPath: String
@@ -89,7 +88,7 @@ struct DiskDeviceReading {
     }
 }
 
-struct PowerReading {
+nonisolated struct PowerReading: Sendable {
     var systemWatts: Double?
     var adapterWatts: Double?
     var adapterMaxWatts: Double?

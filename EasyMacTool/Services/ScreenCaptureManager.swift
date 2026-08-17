@@ -13,7 +13,6 @@ import ScreenCaptureKit
 @MainActor
 final class WindowPreviewCache {
     static let shared = WindowPreviewCache()
-    private static let byteLimit = 96 * 1024 * 1024
 
     private struct Key: Hashable {
         let pid: pid_t
@@ -61,8 +60,9 @@ final class WindowPreviewCache {
         let cost = image.bytesPerRow * image.height
         // An individual frame larger than the full budget is not cached; it
         // remains available in the current overlay but cannot bloat idle memory.
-        guard cost <= Self.byteLimit else { return }
-        while totalCost + cost > Self.byteLimit,
+        let byteLimit = ImageMemoryBudget.adjusted(ImageMemoryBudget.windowPreviewBytes)
+        guard cost <= byteLimit else { return }
+        while totalCost + cost > byteLimit,
               let leastRecent = cache.min(by: { $0.value.lastAccess < $1.value.lastAccess }) {
             totalCost -= leastRecent.value.cost
             cache.removeValue(forKey: leastRecent.key)
@@ -91,7 +91,7 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     // stream(_:didOutputSampleBuffer:of:) 回调中访问。与 lastFrameTime 同样处理。
     // 不加此标注在 Swift 6 strict concurrency 下会报 "Main actor-isolated property
     // 'ciContext' can not be referenced from a nonisolated context"。
-    private nonisolated(unsafe) let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private nonisolated let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     /// SCStream 帧回调队列：让 CIImage→CGImage 像素转换在后台执行，
     /// 仅最终赋值派发回主线程。之前用 .main 队列导致 10fps 的 createCGImage
     /// 持续占用主线程，造成切换器动画掉帧。
@@ -102,7 +102,7 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     /// 使用 OSAllocatedUnfairLock 替代 nonisolated(unsafe)：Date 内部 8 字节
     /// Double 非原子读写，极端情况可能读到撕裂值。锁开销可忽略（纳秒级），
     /// 消除数据竞争隐患。
-    private nonisolated(unsafe) let lastFrameTime = OSAllocatedUnfairLock(initialState: Date.distantPast)
+    private nonisolated let lastFrameTime = OSAllocatedUnfairLock(initialState: Date.distantPast)
 
     /// The window currently receiving a live stream (selected/hovered).
     private var liveWindowID: CGWindowID?
@@ -128,6 +128,7 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     private var warmingTask: Task<Void, Never>?
     /// PID whose warming is still awaited (guards against stale captures).
     private var pendingWarmPID: pid_t?
+    private static let maximumWarmWindows = 2
 
     func startCapture(for items: [WindowItem], previewSize: AppSettings.PreviewSize) {
         // 取消上一次未完成的快照 Task（若用户快速重新打开切换器）。
@@ -281,7 +282,9 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         ) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
                     as? NSRunningApplication else { return }
-            self?.scheduleWarm(pid: app.processIdentifier)
+            Task { @MainActor [weak self] in
+                self?.scheduleWarm(pid: app.processIdentifier)
+            }
         }
     }
 
@@ -298,17 +301,19 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     /// 激活后延迟 0.9s 再捕获，等 Space/Stage 过渡落定；期间再次激活则换目标。
     private func scheduleWarm(pid: pid_t) {
         guard AccessibilityChecker.isScreenRecordingTrusted else { return }
+        guard pid != ProcessInfo.processInfo.processIdentifier else { return }
         pendingWarmPID = pid
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
             guard let self, self.pendingWarmPID == pid, self.warmingObserver != nil else { return }
             self.pendingWarmPID = nil
             self.warmingTask?.cancel()
-            self.warmingTask = Task { [weak self] in
-                guard let self else { return }
+            self.warmingTask = Task {
                 guard AccessibilityChecker.isScreenRecordingTrusted else { return }
                 guard let content = try? await SCShareableContent.excludingDesktopWindows(
                     true, onScreenWindowsOnly: true) else { return }
-                let windows = content.windows.filter { $0.owningApplication?.processID == pid }
+                let windows = content.windows
+                    .filter { $0.owningApplication?.processID == pid }
+                    .prefix(Self.maximumWarmWindows)
                 for window in windows {
                     guard !Task.isCancelled else { return }
                     // 只写尚无缓存的条目，避免覆盖已有预览。
@@ -362,12 +367,12 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         // SCStream.delegate 是 weak 属性（Apple 框架惯例），不会强引用 self，
         // 因此不存在 manager → streams → stream → delegate → manager 的 retain cycle。
         // manager 常驻 app 生命周期，stopAll() 清空 streams 即可打破持有。
-        guard let stream = try? SCStream(filter: filter, configuration: config, delegate: self) else { return }
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
         do {
             // 使用后台 captureQueue 处理帧回调，避免 10fps 的 createCGImage
             // 占用主线程造成切换器动画掉帧。
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-            try stream.startCapture()
+            stream.startCapture()
             streams[item.id] = stream
             itemForStream[ObjectIdentifier(stream)] = item
         } catch {
@@ -445,8 +450,9 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         // 要求运行时已在主线程，从后台队列调用会触发
         // dispatch_assert_queue_fail 崩溃（已实测验证）。
         guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        let streamID = ObjectIdentifier(stream)
         Task { @MainActor in
-            if let item = self.itemForStream[ObjectIdentifier(stream)] {
+            if let item = self.itemForStream[streamID] {
                 item.latestImage = cgImage
                 // 不写 WindowPreviewCache：live stream 帧是临时的，
                 // 选中切换时实时帧不需要进缓存，缓存无意义。
@@ -462,13 +468,13 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         // 从后台队列调用会触发 dispatch_assert_queue_fail 崩溃，在 release
         // 下表现为 CPU 100%/卡死。改用 Task { @MainActor } 异步派回主线程，
         // 与 stream(_:didOutputSampleBuffer:of:) 保持一致。
+        let streamID = ObjectIdentifier(stream)
         Task { @MainActor in
-            let key = ObjectIdentifier(stream)
             // 同步清理 streams 字典和 liveWindowID：之前只移除 itemForStream，
             // 导致已停止的 stream 仍留在 streams 中，setLiveWindow 会再次
             // 调用 stopCapture（对已停止的 stream 无意义）。
             // 防御：stopAll() 可能已清空 streams，此时 key 不存在直接跳过。
-            guard let item = self.itemForStream.removeValue(forKey: key) else { return }
+            guard let item = self.itemForStream.removeValue(forKey: streamID) else { return }
             self.streams.removeValue(forKey: item.id)
             if self.liveWindowID == item.id {
                 self.liveWindowID = nil

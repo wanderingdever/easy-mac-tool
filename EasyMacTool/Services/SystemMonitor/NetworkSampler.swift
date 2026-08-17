@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// One network reading: instantaneous speed plus session totals.
-struct NetworkReading {
+nonisolated struct NetworkReading: Sendable {
     var downBytesPerSec: Double?
     var upBytesPerSec: Double?
     var totalDown: UInt64
@@ -10,15 +10,19 @@ struct NetworkReading {
 }
 
 /// Samples cumulative interface byte counters and derives speed + session totals.
-final class NetworkSampler {
+nonisolated final class NetworkSampler: @unchecked Sendable {
     private var previous: (counters: NetworkCounters, time: TimeInterval)?
     private var totalDown: UInt64 = 0
     private var totalUp: UInt64 = 0
+    /// Routing-table payloads are typically tens of KB. Keep capacity between
+    /// ticks instead of allocating a fresh array for every monitor refresh.
+    private var routeBuffer: [UInt8] = []
+    private var interfaceNameBuffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
 
     private static let maxGap: TimeInterval = 10
 
     func sample(now: TimeInterval) -> NetworkReading {
-        let counters = Self.readCounters()
+        let counters = readCountersReusingBuffer()
         defer { previous = (counters, now) }
 
         guard let prev = previous, now > prev.time, now - prev.time <= Self.maxGap else {
@@ -43,19 +47,34 @@ final class NetworkSampler {
     /// Sums received/sent bytes across the physical interfaces via the routing
     /// socket (`NET_RT_IFLIST2`), which reports 64-bit counters in `if_data64`.
     static func readCounters() -> NetworkCounters {
+        var routeBuffer: [UInt8] = []
+        var interfaceNameBuffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
+        return readCounters(routeBuffer: &routeBuffer, interfaceNameBuffer: &interfaceNameBuffer)
+    }
+
+    private func readCountersReusingBuffer() -> NetworkCounters {
+        Self.readCounters(routeBuffer: &routeBuffer, interfaceNameBuffer: &interfaceNameBuffer)
+    }
+
+    private static func readCounters(
+        routeBuffer: inout [UInt8],
+        interfaceNameBuffer: inout [CChar]
+    ) -> NetworkCounters {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
         var length = 0
         guard sysctl(&mib, 6, nil, &length, nil, 0) == 0, length > 0 else {
             return NetworkCounters()
         }
 
-        var buffer = [UInt8](repeating: 0, count: length)
-        guard sysctl(&mib, 6, &buffer, &length, nil, 0) == 0 else {
+        if routeBuffer.count < length {
+            routeBuffer = [UInt8](repeating: 0, count: length)
+        }
+        guard sysctl(&mib, 6, &routeBuffer, &length, nil, 0) == 0 else {
             return NetworkCounters()
         }
 
         var result = NetworkCounters()
-        buffer.withUnsafeBytes { raw in
+        routeBuffer.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
             let headerSize = MemoryLayout<if_msghdr>.size
@@ -69,9 +88,10 @@ final class NetworkSampler {
                    offset + MemoryLayout<if_msghdr2>.size <= length {
                     let info = base.advanced(by: offset)
                         .assumingMemoryBound(to: if_msghdr2.self).pointee
-                    var nameBuffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
-                    if if_indextoname(UInt32(info.ifm_index), &nameBuffer) != nil {
-                        let name = String(cString: nameBuffer)
+                    interfaceNameBuffer[0] = 0
+                    if if_indextoname(UInt32(info.ifm_index), &interfaceNameBuffer) != nil {
+                        let name = String(decoding: interfaceNameBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                                          as: UTF8.self)
                         if MetricFormat.includeNetworkInterface(name) {
                             result.received += info.ifm_data.ifi_ibytes
                             result.sent += info.ifm_data.ifi_obytes

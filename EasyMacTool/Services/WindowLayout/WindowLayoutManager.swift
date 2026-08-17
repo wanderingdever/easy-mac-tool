@@ -36,7 +36,11 @@ final class WindowLayoutManager {
     /// using that screen's visible frame (bottom-left origin, same space as
     /// AX window coordinates).
     func frame(for action: WindowLayoutAction, on screen: NSScreen) -> CGRect {
-        let vf = screen.visibleFrame
+        Self.targetFrame(for: action, visibleFrame: screen.visibleFrame)
+    }
+
+    nonisolated static func targetFrame(for action: WindowLayoutAction,
+                                        visibleFrame vf: CGRect) -> CGRect {
         let halfW = vf.width / 2
         let halfH = vf.height / 2
         switch action {
@@ -67,7 +71,7 @@ final class WindowLayoutManager {
     /// back to the main screen.
     private func screen(for window: AXUIElement) -> NSScreen? {
         guard let pos = cgPoint(window, kAXPositionAttribute as CFString),
-              let size = cgSize(window, kAXSizeAttribute as CFString) else { return NSScreen.main }
+              let size = cgSize(window, kAXSizeAttribute as CFString) else { return fallbackScreen() }
         // AX 坐标以主屏左上为原点、y 向下；NSScreen.frame 以主屏左下为原点、
         // y 向上。先把 AX 窗口 frame 翻转回 NSScreen 空间再匹配屏幕，
         // 否则副屏/多屏下会空间错位匹配到主屏。
@@ -75,7 +79,13 @@ final class WindowLayoutManager {
         let nsFrame = CGRect(x: pos.x + main.minX,
                              y: main.maxY - pos.y - size.height,
                              width: size.width, height: size.height)
-        return NSScreen.screens.first(where: { $0.frame.contains(nsFrame.center) }) ?? NSScreen.main
+        return NSScreen.screens.first(where: { $0.frame.contains(nsFrame.center) }) ?? fallbackScreen()
+    }
+
+    private func fallbackScreen() -> NSScreen? {
+        let pointer = NSEvent.mouseLocation
+        return NSScreen.screens.first(where: { $0.frame.contains(pointer) })
+            ?? NSScreen.screens.first
     }
 
     private func focusedWindow(of axApp: AXUIElement) -> AXUIElement? {
@@ -83,7 +93,7 @@ final class WindowLayoutManager {
         guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &ref) == .success,
               let window = ref,
               CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
-        return window as! AXUIElement
+        return unsafeDowncast(window, to: AXUIElement.self)
     }
 
     @discardableResult

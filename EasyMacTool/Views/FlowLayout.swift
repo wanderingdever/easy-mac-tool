@@ -31,7 +31,9 @@ struct FlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout CacheData) {
-        let rows = cache.rows
+        // Measurement and placement may receive different widths from SwiftUI.
+        let rows = computeRows(subviews: subviews, maxWidth: bounds.width)
+        cache.rows = rows
         var y = bounds.minY
         for row in rows {
             var x = bounds.minX

@@ -5,12 +5,13 @@ import SwiftUI
 /// 当 ClipboardItem 有 rtfData 时用此视图还原颜色/字体样式；
 /// 否则回退到普通 Text 渲染。
 struct RTFTextView: NSViewRepresentable {
+    let contentID: UUID
     let rtfData: Data?
     let plainText: String
     let font: NSFont
 
     final class Coordinator {
-        var lastRTFData: Data?
+        var lastContentID: UUID?
         var lastPlainText: String?
         var lastFontName: String?
         var lastFontSize: CGFloat?
@@ -45,7 +46,7 @@ struct RTFTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         let coordinator = context.coordinator
-        let contentUnchanged = coordinator.lastRTFData == rtfData &&
+        let contentUnchanged = coordinator.lastContentID == contentID &&
             coordinator.lastPlainText == plainText
         let fontUnchanged = coordinator.lastFontName == font.fontName &&
             coordinator.lastFontSize == font.pointSize
@@ -63,7 +64,7 @@ struct RTFTextView: NSViewRepresentable {
         } else {
             textView.string = plainText
         }
-        coordinator.lastRTFData = rtfData
+        coordinator.lastContentID = contentID
         coordinator.lastPlainText = plainText
         coordinator.lastFontName = font.fontName
         coordinator.lastFontSize = font.pointSize

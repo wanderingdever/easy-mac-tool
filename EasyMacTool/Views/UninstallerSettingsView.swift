@@ -2,17 +2,42 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private func uninstallByteString(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+}
+
+@MainActor
+private enum UninstallerIconCache {
+    static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 500
+        return cache
+    }()
+
+    static func icon(for url: URL) -> NSImage {
+        let key = url.standardizedFileURL.path as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        cache.setObject(icon, forKey: key)
+        return icon
+    }
+}
+
 /// 卸载器设置页（Aurora v2）：拖入或选择 .app，查看残留文件并移至废纸篓。
 struct UninstallerSettingsView: View {
     @ObservedObject private var uninstaller = AppUninstaller.shared
     @State private var apps: [InstalledApps.InstalledApp] = []
     @State private var appQuery = ""
     @State private var isScanningApps = false
+    @State private var showingRemovalConfirmation = false
 
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(DesignTokens.Aurora.pageBackground)
+            .sheet(isPresented: $showingRemovalConfirmation) {
+                removalConfirmation
+            }
     }
 
     @ViewBuilder
@@ -32,9 +57,9 @@ struct UninstallerSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Text("已安装应用")
-                    .font(.system(size: 16, weight: .semibold))
+                    .scaledSystemFont(16, weight: .semibold, relativeTo: .headline)
                 Text("\(uninstallableApps.count) 个")
-                    .font(.system(size: 12))
+                    .scaledSystemFont(12, relativeTo: .caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(action: refreshApps) {
@@ -50,7 +75,7 @@ struct UninstallerSettingsView: View {
             }
             TextField("搜索应用…", text: $appQuery)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
+                .scaledSystemFont(13)
             appList
             Text("卸载操作会将文件移至废纸篓，可随时恢复。")
                 .font(.caption)
@@ -89,7 +114,7 @@ struct UninstallerSettingsView: View {
         if isScanningApps && apps.isEmpty {
             VStack(spacing: 8) {
                 ProgressView()
-                Text("正在扫描应用…").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text("正在扫描应用…").scaledSystemFont(13).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .frame(maxHeight: .infinity)
@@ -98,7 +123,7 @@ struct UninstallerSettingsView: View {
                 Image(systemName: "app.dashed")
                     .font(.system(size: 34, weight: .light))
                     .foregroundStyle(.secondary)
-                Text("未找到应用").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text("未找到应用").scaledSystemFont(13).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .frame(maxHeight: .infinity)
@@ -174,7 +199,7 @@ struct UninstallerSettingsView: View {
                         let group = uninstaller.items.filter { $0.category == category }
                         if !group.isEmpty {
                             Text(label(for: category))
-                                .font(.system(size: 12, weight: .semibold))
+                                .scaledSystemFont(12, weight: .semibold, relativeTo: .caption)
                                 .foregroundStyle(.secondary)
                                 .padding(.top, 10)
                                 .padding(.bottom, 2)
@@ -197,7 +222,7 @@ struct UninstallerSettingsView: View {
             if let target = uninstaller.target {
                 Image(nsImage: target.icon).resizable().frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(target.name).font(.system(size: 16, weight: .semibold))
+                    Text(target.name).scaledSystemFont(16, weight: .semibold, relativeTo: .headline)
                     Text(target.bundleID ?? target.url.path)
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
@@ -205,48 +230,54 @@ struct UninstallerSettingsView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text(Self.byteString(uninstaller.totalSize))
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(uninstallByteString(uninstaller.totalSize))
+                    .scaledSystemFont(15, weight: .semibold, design: .rounded)
                 Text("共发现文件").font(.caption2).foregroundStyle(.secondary)
             }
             Button { uninstaller.reset() } label: {
                 Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("取消卸载")
         }
         .padding(16)
     }
 
     private func row(_ item: AppUninstaller.Leftover) -> some View {
         HStack(spacing: 10) {
-            Toggle("", isOn: includeBinding(item)).labelsHidden().toggleStyle(.checkbox)
-            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+            Toggle("", isOn: includeBinding(item))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+                .accessibilityLabel("移除\(item.name)")
+            Image(nsImage: UninstallerIconCache.icon(for: item.url))
                 .resizable().frame(width: 22, height: 22)
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.name).font(.system(size: 12.5)).lineLimit(1).truncationMode(.middle)
+                Text(item.name).scaledSystemFont(12.5).lineLimit(1).truncationMode(.middle)
                 Text(prettyPath(item.url))
-                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    .scaledSystemFont(10.5, relativeTo: .caption2).foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.head)
             }
             Spacer()
-            Text(Self.byteString(item.size))
-                .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            Text(uninstallByteString(item.size))
+                .scaledSystemFont(11.5, relativeTo: .caption).foregroundStyle(.secondary)
                 .monospacedDigit()
         }
         .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.name)，\(prettyPath(item.url))，\(uninstallByteString(item.size))")
     }
 
     private var footer: some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
                 Text("已选 \(uninstaller.items.filter(\.include).count) / \(uninstaller.items.count) 项")
-                    .font(.system(size: 12, weight: .medium))
-                Text(Self.byteString(uninstaller.selectedSize))
+                    .scaledSystemFont(12, weight: .medium, relativeTo: .caption)
+                Text(uninstallByteString(uninstaller.selectedSize))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Button("取消") { uninstaller.reset() }
-            Button("移除") { uninstaller.removeSelected() }
+            Button("移除") { showingRemovalConfirmation = true }
                 .buttonStyle(.borderedProminent)
                 .tint(DesignTokens.Colors.error)
                 .disabled(!uninstaller.items.contains(where: \.include))
@@ -262,14 +293,29 @@ struct UninstallerSettingsView: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 54))
                 .foregroundStyle(.green)
-            Text("卸载完成").font(.system(size: 20, weight: .bold))
-            Text("已释放 \(Self.byteString(freed))")
-                .font(.system(size: 13)).foregroundStyle(.secondary)
+            Text("卸载完成").scaledSystemFont(20, weight: .bold, relativeTo: .title2)
+            Text("已释放 \(uninstallByteString(freed))")
+                .scaledSystemFont(13).foregroundStyle(.secondary)
             if failed > 0 {
                 Text("有 \(failed) 项未能移除，可能被占用或需要管理员权限。")
                     .font(.caption).foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(uninstaller.removalFailures) { failure in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(failure.url.path)
+                                    .font(.caption.monospaced())
+                                    .textSelection(.enabled)
+                                Text(failure.reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 120)
             }
             Button("继续卸载") { uninstaller.reset() }
                 .controlSize(.large)
@@ -281,6 +327,39 @@ struct UninstallerSettingsView: View {
     }
 
     // MARK: Helpers
+
+    private var removalConfirmation: some View {
+        let selected = uninstaller.items.filter(\.include)
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("确认移至废纸篓")
+                .font(.title2.bold())
+            Text("将移动 \(selected.count) 项，共 \(uninstallByteString(uninstaller.selectedSize))。应用若正在运行会先收到退出请求。")
+                .foregroundStyle(.secondary)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(selected) { item in
+                        Text(item.url.path)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { showingRemovalConfirmation = false }
+                Button("移至废纸篓", role: .destructive) {
+                    showingRemovalConfirmation = false
+                    uninstaller.removeSelected()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(DesignTokens.Colors.error)
+            }
+        }
+        .padding(24)
+        .frame(width: 560, height: 420)
+    }
 
     private func includeBinding(_ item: AppUninstaller.Leftover) -> Binding<Bool> {
         Binding(
@@ -307,9 +386,6 @@ struct UninstallerSettingsView: View {
         }
     }
 
-    private static func byteString(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
 }
 
 /// 已安装应用行：图标 + 名称/bundleID + 占用存储 + 行尾「卸载」按钮。
@@ -324,17 +400,17 @@ private struct UninstallableAppRow: View {
                 .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 1) {
                 Text(app.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledSystemFont(13, weight: .medium)
                     .lineLimit(1)
                 Text(app.bundleID ?? app.url.path)
-                    .font(.system(size: 11))
+                    .scaledSystemFont(11, relativeTo: .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             Spacer(minLength: 0)
-            Text(Self.byteString(app.sizeBytes))
-                .font(.system(size: 11.5))
+            Text(uninstallByteString(app.sizeBytes))
+                .scaledSystemFont(11.5, relativeTo: .caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Button("卸载", action: onUninstall)
@@ -346,7 +422,4 @@ private struct UninstallableAppRow: View {
         .padding(.vertical, 6)
     }
 
-    private static func byteString(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
 }

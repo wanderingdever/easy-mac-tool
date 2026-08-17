@@ -4,7 +4,12 @@ import IOKit
 /// Minimal client for the System Management Controller (AppleSMC). Reads
 /// sensor keys and (optionally) writes narrowly-scoped values through the
 /// SMCParamStruct ABI. This app only uses the read path.
-final class SMCClient {
+///
+/// Concurrency contract: one client and its `io_connect_t` are confined to
+/// SystemMonitor's serial sampling queue. Callers must not invoke a client from
+/// multiple queues concurrently; `@unchecked Sendable` only permits ownership
+/// transfer to that queue.
+nonisolated final class SMCClient: @unchecked Sendable {
     struct Key {
         let code: UInt32
         let name: String
@@ -125,7 +130,7 @@ final class SMCClient {
 }
 
 /// Wire format of the AppleSMC user client (fixed 80-byte layout).
-struct SMCParamStruct {
+nonisolated struct SMCParamStruct {
     var key: UInt32 = 0
     var vers = SMCVersion()
     var pLimitData = SMCPLimitData()
@@ -143,16 +148,16 @@ struct SMCParamStruct {
          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 }
 
-struct SMCVersion {
+nonisolated struct SMCVersion {
     var major: UInt8 = 0, minor: UInt8 = 0, build: UInt8 = 0, reserved: UInt8 = 0
     var release: UInt16 = 0
 }
 
-struct SMCPLimitData {
+nonisolated struct SMCPLimitData {
     var version: UInt16 = 0, length: UInt16 = 0
     var cpuPLimit: UInt32 = 0, gpuPLimit: UInt32 = 0, memPLimit: UInt32 = 0
 }
 
-struct SMCKeyInfoData {
+nonisolated struct SMCKeyInfoData {
     var dataSize: UInt32 = 0, dataType: UInt32 = 0, dataAttributes: UInt8 = 0
 }

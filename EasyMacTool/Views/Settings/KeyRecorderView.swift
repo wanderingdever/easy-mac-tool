@@ -13,7 +13,7 @@ struct KeyRecorderView: View {
     /// Return a user-facing reason to reject a recorded combination.
     var validationMessage: (CGKeyCode, CGEventFlags) -> String? = { _, _ in nil }
     /// Shared mutex so only ONE recorder on screen can be recording at a time.
-    var isGlobalRecording: Binding<Bool> = .constant(false)
+    var isGlobalRecording: Binding<Bool>
 
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -47,14 +47,14 @@ struct KeyRecorderView: View {
             Group {
                 if isRecording {
                     Text("按下快捷键…")
-                        .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.kbd, design: .monospaced)
                         .foregroundStyle(DesignTokens.Aurora.tint)
                 } else {
                     // kbd: 14pt mono, 0.04em letter-spacing (~0.6 tracking).
                     // 与录制态同字号（DesignTokens.SettingsTypography.kbd），
                     // 避免录制/非录制切换时字号跳变。
                     Text(KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
-                        .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.kbd, design: .monospaced)
                         .tracking(0.6)
                         .foregroundStyle(DesignTokens.Colors.foreground)
                 }
@@ -81,6 +81,11 @@ struct KeyRecorderView: View {
             .animation(DesignTokens.Aurora.standard, value: isRecording)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("录制快捷键")
+        .accessibilityValue(isRecording
+                            ? "正在录制"
+                            : KeyComboFormatter.format(keyCode: keyCode, modifiers: modifiers))
+        .accessibilityHint(isRecording ? "按下快捷键，或按 Escape 取消" : "按下后开始录制新的快捷键")
         .onHover { hovering in
             if hovering {
                 NSCursor.pointingHand.set()
@@ -149,7 +154,7 @@ struct KeyRecorderView: View {
         // 后者仅加入 .default 模式，若录制期间有 NSMenu 模态会话（如右键菜单），
         // 定时器不触发会导致 isRecording 永久卡住。
         let t = Timer(timeInterval: 10, repeats: false) { _ in
-            stopRecording()
+            Task { @MainActor in stopRecording() }
         }
         RunLoop.main.add(t, forMode: .common)
         recordingTimeout = t

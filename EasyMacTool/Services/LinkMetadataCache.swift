@@ -31,10 +31,30 @@ final class LinkMetadataCache {
     private let cache: NSCache<NSString, MetadataBox> = {
         let c = NSCache<NSString, MetadataBox>()
         c.countLimit = 200
-        c.totalCostLimit = 16 * 1024 * 1024
+        c.totalCostLimit = ImageMemoryBudget.linkFaviconBytes
         return c
     }()
     private var inFlight: [String: Task<(title: String?, faviconData: Data?), Never>] = [:]
+
+    nonisolated private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession,
+                        task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+
+    nonisolated private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 6
+        configuration.timeoutIntervalForResource = 8
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        return URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
+    }()
 
     private init() {}
 
@@ -50,8 +70,9 @@ final class LinkMetadataCache {
     /// 隐私保护：默认不抓取。用户在设置中开启「链接预览」后才会对 http/https
     /// URL 发起网络请求，避免复制私有/带 token 的链接时 app 主动访问造成服务端
     /// 副作用或信息泄露。关闭时返回空 Metadata，视图回退到系统图标 + host 文本。
-    func metadata(for urlString: String) async -> Metadata {
-        guard AppSettings.shared.clipboardLinkPreviewEnabled else {
+    func metadata(for urlString: String, userInitiated: Bool = false) async -> Metadata {
+        let mode = AppSettings.shared.clipboardLinkPreviewMode
+        guard mode == .automatic || (mode == .manual && userInitiated) else {
             return Metadata(title: nil, favicon: nil)
         }
         if let cached = cache.object(forKey: urlString as NSString)?.metadata { return cached }
@@ -77,12 +98,17 @@ final class LinkMetadataCache {
         }
         inFlight[urlString] = task
         let raw = await task.value
+        guard raw.title != nil || raw.faviconData != nil else {
+            inFlight[urlString] = nil
+            return Metadata(title: nil, favicon: nil)
+        }
         let meta = Metadata(
             title: raw.title,
             favicon: raw.faviconData.flatMap { NSImage(data: $0) }
         )
         // cost = favicon 字节数，让 NSCache 按成本淘汰（大图标优先被回收）。
         let cost = raw.faviconData?.count ?? 0
+        cache.totalCostLimit = ImageMemoryBudget.adjusted(ImageMemoryBudget.linkFaviconBytes)
         cache.setObject(MetadataBox(meta), forKey: urlString as NSString, cost: cost)
         inFlight[urlString] = nil
         return meta
@@ -92,9 +118,7 @@ final class LinkMetadataCache {
 
     /// 抓取 URL 的标题与 favicon 原始数据。全部为 Sendable 类型，可跨 actor。
     nonisolated private static func fetchRaw(_ urlString: String) async -> (title: String?, faviconData: Data?) {
-        guard let url = URL(string: urlString),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
+        guard let url = URL(string: urlString), LinkPreviewNetworkPolicy.allows(url) else {
             return (nil, nil)
         }
 
@@ -112,8 +136,11 @@ final class LinkMetadataCache {
         let faviconURL: URL? = {
             if let href = iconHref, !href.hasPrefix("data:"),
                let abs = absoluteURL(href, base: url) { return abs }
-            guard let host = url.host else { return nil }
-            return URL(string: "\(scheme)://\(host)/favicon.ico")
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            components.path = "/favicon.ico"
+            components.query = nil
+            components.fragment = nil
+            return components.url
         }()
 
         // 3. 抓取 favicon 数据（截断 256KB）。
@@ -134,27 +161,39 @@ final class LinkMetadataCache {
     /// 用 URLSession.data(for:) 一次性获取后截断，替代 bytes 逐字节异步迭代。
     /// 之前的 `for try await byte in bytes` 逐字节迭代：512KB HTML = 524,288 次
     /// 异步挂起，每次挂起 ~微秒，总 CPU 开销 ~0.5s/请求。Apple 文档明确警告此模式。
-    nonisolated private static func fetchData(_ url: URL, limit: Int, htmlOnly: Bool = false) async -> Data? {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 6
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse {
-                guard (200..<300).contains(http.statusCode) else { return nil }
-                if htmlOnly {
-                    let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
-                    // 仅接受 HTML（防止对图片/二进制跑 title 解析）。
-                    guard contentType.contains("text/html") || contentType.contains("application/xhtml") else { return nil }
+    nonisolated private static func fetchData(_ initialURL: URL, limit: Int, htmlOnly: Bool = false) async -> Data? {
+        var url = initialURL
+        for redirectCount in 0...3 {
+            guard LinkPreviewNetworkPolicy.allows(url) else { return nil }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 6
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            do {
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse {
+                    if (300..<400).contains(http.statusCode) {
+                        guard redirectCount < 3,
+                              let location = http.value(forHTTPHeaderField: "Location"),
+                              let nextURL = URL(string: location, relativeTo: url)?.absoluteURL else { return nil }
+                        url = nextURL
+                        continue
+                    }
+                    guard (200..<300).contains(http.statusCode) else { return nil }
+                    if htmlOnly {
+                        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+                        // 仅接受 HTML（防止对图片/二进制跑 title 解析）。
+                        guard contentType.contains("text/html")
+                                || contentType.contains("application/xhtml") else { return nil }
+                    }
                 }
+                // 截断到 limit 字节（title 通常在前 64KB，不需完整下载）
+                if data.count > limit { return data.prefix(limit) }
+                return data.isEmpty ? nil : data
+            } catch {
+                return nil
             }
-            // 截断到 limit 字节（title 通常在前 64KB，不需完整下载）
-            if data.count > limit {
-                return data.prefix(limit)
-            }
-            return data.isEmpty ? nil : data
-        } catch {
-            return nil
         }
+        return nil
     }
 
     // MARK: - HTML 解析

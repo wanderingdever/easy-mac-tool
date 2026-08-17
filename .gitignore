@@ -44,3 +44,7 @@ com.apple.DeveloperTools/
 
 # Code review reports (internal documents)
 code-review-*.md
+CODE_REVIEW_REPORT*.md
+
+# Other editors' workspace configs
+.zcode/

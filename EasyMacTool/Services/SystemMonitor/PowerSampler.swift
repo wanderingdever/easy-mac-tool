@@ -5,7 +5,7 @@ import IOKit.ps
 /// Reads power without any special permission. Total system power and adapter
 /// input come from the SMC (the same sensors Activity Monitor's energy tab is
 /// built on); battery flow and the charger's rating come from AppleSmartBattery.
-final class PowerSampler {
+nonisolated final class PowerSampler: @unchecked Sendable {
     /// Internal-battery presence is immutable for the lifetime of a Mac boot.
     static let hasInternalBattery: Bool = {
         let service = IOServiceGetMatchingService(kIOMainPortDefault,
@@ -19,9 +19,9 @@ final class PowerSampler {
     private var systemKey: SMCClient.Key?
     private var adapterKey: SMCClient.Key?
     private var resolvedKeys = false
-    private var batteryService: io_service_t = 0
+    private var batteryServices: [io_service_t] = []
 
-    private static let systemPowerKeys = ["PSTR", "PDTR"]
+    private static let systemPowerKeys = ["PSTR"]
     private static let adapterPowerKeys = ["PDTR"]
 
     init(smc: SMCClient?) {
@@ -29,8 +29,8 @@ final class PowerSampler {
     }
 
     deinit {
-        if batteryService != 0 {
-            IOObjectRelease(batteryService)
+        batteryServices.forEach { service in
+            IOObjectRelease(service)
         }
     }
 
@@ -47,37 +47,57 @@ final class PowerSampler {
             reading.adapterWatts = plausibleWatts(adapterKey)
         }
 
-        if let props = batteryProperties() {
+        let batteries = batteryProperties()
+        if !batteries.isEmpty {
             reading.hasBattery = true
-            reading.externalConnected = (props["ExternalConnected"] as? Bool) ?? false
-            reading.isCharging = (props["IsCharging"] as? Bool) ?? false
+            reading.externalConnected = batteries.contains {
+                ($0["ExternalConnected"] as? Bool) == true
+            }
+            reading.isCharging = batteries.contains {
+                ($0["IsCharging"] as? Bool) == true
+            }
             reading.timeRemainingSeconds = timeRemainingSeconds(
                 externalConnected: reading.externalConnected,
                 isCharging: reading.isCharging)
 
-            let voltageMv = (props["Voltage"] as? Int) ?? 0
-            let amperageMa = (props["Amperage"] as? Int) ?? (props["InstantAmperage"] as? Int) ?? 0
-            if voltageMv > 0, amperageMa != 0 {
-                reading.batteryWatts = (Double(voltageMv) / 1000.0) * (Double(amperageMa) / 1000.0)
+            let watts = batteries.compactMap { props -> Double? in
+                let voltageMv = intValue(props["Voltage"]) ?? 0
+                let amperageMa = [props["Amperage"], props["InstantAmperage"]]
+                    .compactMap(intValue)
+                    .first(where: { $0 != 0 }) ?? 0
+                guard voltageMv > 0, amperageMa != 0 else { return nil }
+                return (Double(voltageMv) / 1000.0) * (Double(amperageMa) / 1000.0)
+            }
+            if !watts.isEmpty {
+                reading.batteryWatts = watts.reduce(0, +)
             }
 
-            if let adapter = props["AdapterDetails"] as? [String: Any],
-               let rated = adapter["Watts"] as? Int, rated > 0 {
-                reading.adapterMaxWatts = Double(rated)
+            let adapterRatings = batteries.compactMap { props -> Int? in
+                guard let adapter = props["AdapterDetails"] as? [String: Any] else { return nil }
+                return intValue(adapter["Watts"])
             }
+            if let rated = adapterRatings.max(), rated > 0 { reading.adapterMaxWatts = Double(rated) }
 
-            if let capacity = props["CurrentCapacity"] as? Int,
-               let maxCapacity = props["MaxCapacity"] as? Int, maxCapacity > 0 {
-                reading.chargePercent = Int((Double(capacity) / Double(maxCapacity) * 100).rounded())
+            let capacities = batteries.reduce(into: (current: 0, maximum: 0)) { total, props in
+                total.current += max(0, intValue(props["CurrentCapacity"]) ?? 0)
+                total.maximum += max(0, intValue(props["MaxCapacity"]) ?? 0)
             }
-            if let cycles = props["CycleCount"] as? Int { reading.cycleCount = cycles }
-            if let design = batteryInt("DesignCapacity", in: props), design > 0 {
-                let fullCharge = batteryInt("NominalChargeCapacity", in: props)
+            if capacities.maximum > 0 {
+                reading.chargePercent = Int((Double(capacities.current) / Double(capacities.maximum) * 100).rounded())
+            }
+            reading.cycleCount = batteries.compactMap { intValue($0["CycleCount"]) }.max()
+
+            let healthTotals = batteries.reduce(into: (full: 0, design: 0)) { total, props in
+                guard let design = batteryInt("DesignCapacity", in: props), design > 0 else { return }
+                let full = batteryInt("NominalChargeCapacity", in: props)
                     ?? batteryInt("FullChargeCapacity", in: props)
                     ?? batteryInt("AppleRawMaxCapacity", in: props)
-                if let fullCharge, fullCharge > 0 {
-                    reading.healthPercent = min(100, Double(fullCharge) / Double(design) * 100)
-                }
+                guard let full, full > 0 else { return }
+                total.full += full
+                total.design += design
+            }
+            if healthTotals.design > 0 {
+                reading.healthPercent = min(100, Double(healthTotals.full) / Double(healthTotals.design) * 100)
             }
         }
 
@@ -97,19 +117,13 @@ final class PowerSampler {
         return watts
     }
 
-    private func batteryProperties() -> [String: Any]? {
-        let service = resolvedBatteryService()
-        guard service != 0 else { return nil }
-
-        var properties: Unmanaged<CFMutableDictionary>?
-        guard IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0) == kIOReturnSuccess,
-              let dict = properties?.takeRetainedValue() as? [String: Any]
-        else {
-            IOObjectRelease(service)
-            batteryService = 0
-            return nil
+    private func batteryProperties() -> [[String: Any]] {
+        resolvedBatteryServices().compactMap { service in
+            var properties: Unmanaged<CFMutableDictionary>?
+            guard IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0)
+                    == kIOReturnSuccess else { return nil }
+            return properties?.takeRetainedValue() as? [String: Any]
         }
-        return dict
     }
 
     private func timeRemainingSeconds(externalConnected: Bool, isCharging: Bool) -> TimeInterval? {
@@ -118,15 +132,20 @@ final class PowerSampler {
               let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue()
         else { return nil }
         let sources = list as [CFTypeRef]
+        var weightedMinutes = 0.0
+        var totalCapacity = 0.0
         for source in sources {
             guard let description = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue()
                     as? [String: Any],
                   description[kIOPSPowerSourceStateKey] as? String == kIOPSBatteryPowerValue,
                   let minutes = intValue(description[kIOPSTimeToEmptyKey]) else { continue }
-            guard minutes > 0 else { return nil }
-            return TimeInterval(minutes * 60)
+            guard minutes > 0 else { continue }
+            let capacity = Double(max(1, intValue(description[kIOPSCurrentCapacityKey]) ?? 1))
+            weightedMinutes += Double(minutes) * capacity
+            totalCapacity += capacity
         }
-        return nil
+        guard totalCapacity > 0 else { return nil }
+        return TimeInterval((weightedMinutes / totalCapacity) * 60)
     }
 
     private func batteryInt(_ key: String, in props: [String: Any]) -> Int? {
@@ -154,11 +173,19 @@ final class PowerSampler {
         }
     }
 
-    private func resolvedBatteryService() -> io_service_t {
-        guard Self.hasInternalBattery else { return 0 }
-        if batteryService != 0 { return batteryService }
-        batteryService = IOServiceGetMatchingService(kIOMainPortDefault,
-                                                     IOServiceMatching("AppleSmartBattery"))
-        return batteryService
+    private func resolvedBatteryServices() -> [io_service_t] {
+        guard Self.hasInternalBattery else { return [] }
+        if !batteryServices.isEmpty { return batteryServices }
+        var iterator = io_iterator_t()
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                           IOServiceMatching("AppleSmartBattery"),
+                                           &iterator) == kIOReturnSuccess else { return [] }
+        defer { IOObjectRelease(iterator) }
+        var service = IOIteratorNext(iterator)
+        while service != 0 {
+            batteryServices.append(service)
+            service = IOIteratorNext(iterator)
+        }
+        return batteryServices
     }
 }

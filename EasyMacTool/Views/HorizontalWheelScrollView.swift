@@ -1,6 +1,35 @@
 import AppKit
 import SwiftUI
 
+nonisolated enum HorizontalScrollGeometry {
+    static let lineScrollStep: CGFloat = 40
+
+    static func redirectedDelta(verticalDelta: CGFloat, isPrecise: Bool) -> CGFloat {
+        -verticalDelta * (isPrecise ? 1 : lineScrollStep)
+    }
+
+    static func targetOrigin(index: Int,
+                             currentOrigin: CGFloat,
+                             viewportWidth: CGFloat,
+                             documentWidth: CGFloat,
+                             cardWidth: CGFloat,
+                             spacing: CGFloat,
+                             horizontalPadding: CGFloat) -> CGFloat? {
+        guard index >= 0, viewportWidth > 0, documentWidth > 0 else { return nil }
+        let cardMinX = horizontalPadding + CGFloat(index) * (cardWidth + spacing)
+        let cardMaxX = cardMinX + cardWidth
+        guard cardMaxX <= documentWidth + 1 else { return nil }
+
+        var target = currentOrigin
+        if cardMinX < currentOrigin {
+            target = cardMinX - horizontalPadding
+        } else if cardMaxX > currentOrigin + viewportWidth {
+            target = cardMaxX - viewportWidth + horizontalPadding
+        }
+        return min(max(0, target), max(0, documentWidth - viewportWidth))
+    }
+}
+
 /// 横向滚动手势的 NSScrollView 子类：将「无 Shift 修饰的垂直滚轮」
 /// 重定向为横向滚动，使鼠标滚轮可直接横向滚动剪切板卡片列表。
 /// 保留 trackpad 横向手势（deltaX）、Shift+滚轮、纵向 scroll view 默认行为。
@@ -27,31 +56,43 @@ final class WheelRedirectScrollView: NSScrollView {
             super.scrollWheel(with: event)
             return
         }
-        // 与系统 Shift+滚轮方向一致：滚轮向上（deltaY>0）→ 看左侧/前面内容
-        // → bounds.origin.x 减小。每刻度滚动约 40pt。
+        // 鼠标滚轮按行放大为 40pt；触控板精确像素增量直接使用，避免
+        // 亚像素手势被放大 40 倍而跳动。
         // 直接更新 bounds（去掉逐事件 animator 动画）：快速滚动时旧动画会被
         // 新事件打断并从未到位处重启动画，导致滚动永远追赶不上输入 → 卡顿
         // 滚不动。直接定位每个刻度立即生效、线性累积，与输入同步。
-        let step: CGFloat = 40
-        let dx = -event.deltaY * step
+        let dx = HorizontalScrollGeometry.redirectedDelta(
+            verticalDelta: event.scrollingDeltaY,
+            isPrecise: event.hasPreciseScrollingDeltas
+        )
         var origin = contentView.bounds.origin
         origin.x = min(max(0, origin.x + dx), hRoom)
         contentView.bounds.origin = origin
         reflectScrolledClipView(contentView)
     }
 
-    /// 按方向键时滚动一张卡片步进（242pt = 卡片宽 230 + 间距 12）。
-    /// 与滚轮的 40pt/tick 同源，但每次按一张卡片，平滑不跳页。
-    /// direction: +1 向右（看后面），-1 向左（看前面）。
-    func scrollByCards(_ direction: Int) {
-        guard let doc = documentView else { return }
-        let hRoom = doc.bounds.width - contentSize.width
-        guard hRoom > 0.5 else { return }
-        let cardStep: CGFloat = 242  // 卡片宽 230 + 间距 12
+    /// 最小滚动以完整揭示目标卡片。返回 false 表示 SwiftUI document view
+    /// 尚未完成布局，调用方应在下一帧重试且不能提前去重该索引。
+    func revealCard(at index: Int) -> Bool {
+        guard index >= 0, let doc = documentView else { return false }
+        doc.layoutSubtreeIfNeeded()
+        let documentWidth = doc.bounds.width
+        guard documentWidth > 0, contentSize.width > 0 else { return false }
+
+        guard let target = HorizontalScrollGeometry.targetOrigin(
+            index: index,
+            currentOrigin: contentView.bounds.origin.x,
+            viewportWidth: contentSize.width,
+            documentWidth: documentWidth,
+            cardWidth: DesignTokens.ClipboardLayout.cardWidth,
+            spacing: DesignTokens.ClipboardLayout.cardSpacing,
+            horizontalPadding: DesignTokens.ClipboardLayout.stripHorizontalPadding
+        ) else { return false }
         var origin = contentView.bounds.origin
-        origin.x = min(max(0, origin.x + CGFloat(direction) * cardStep), hRoom)
+        origin.x = target
         contentView.bounds.origin = origin
         reflectScrolledClipView(contentView)
+        return true
     }
 }
 
@@ -62,6 +103,22 @@ final class HWSVCoordinator {
     /// 记录上次方向键索引，用于推导滚动方向（+1/-1），并对重复 body
     /// 更新去重。
     var lastScrolledIndex: Int?
+    private var pendingIndex: Int?
+
+    func reveal(_ index: Int, in scrollView: WheelRedirectScrollView, attempt: Int = 0) {
+        pendingIndex = index
+        DispatchQueue.main.async { [weak self, weak scrollView] in
+            guard let self, let scrollView, self.pendingIndex == index else { return }
+            if scrollView.revealCard(at: index) {
+                self.lastScrolledIndex = index
+                self.pendingIndex = nil
+            } else if attempt < 4 {
+                self.reveal(index, in: scrollView, attempt: attempt + 1)
+            } else {
+                self.pendingIndex = nil
+            }
+        }
+    }
 }
 
 /// 用 NSHostingController 承载 SwiftUI 内容的横向滚动视图。
@@ -118,14 +175,9 @@ struct HorizontalWheelScrollView<Content: View>: NSViewRepresentable {
             return
         }
         hosting.rootView = content
-        // 键盘选中索引变化 → 推导方向（+1/-1），延后到布局完成后步进滚动。
+        // 仅在成功揭示后记录索引；布局未完成时 coordinator 会重试。
         if let idx = scrollToIndex, idx != context.coordinator.lastScrolledIndex {
-            let prev = context.coordinator.lastScrolledIndex ?? idx
-            context.coordinator.lastScrolledIndex = idx
-            let direction = idx > prev ? 1 : -1
-            DispatchQueue.main.async {
-                nsView.scrollByCards(direction)
-            }
+            context.coordinator.reveal(idx, in: nsView)
         }
     }
 }

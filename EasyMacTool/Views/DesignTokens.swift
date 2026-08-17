@@ -114,6 +114,12 @@ enum DesignTokens {
         static let permActionsTop: CGFloat = 10
     }
 
+    enum ClipboardLayout {
+        static let cardWidth: CGFloat = 230
+        static let cardSpacing: CGFloat = 12
+        static let stripHorizontalPadding: CGFloat = 16
+    }
+
     /// Builds an adaptive `Color` from explicit light/dark values.
     /// Used for design tokens that have no exact native semantic equivalent.
     static func dynamicColor(light: Color, dark: Color) -> Color {
@@ -127,7 +133,7 @@ enum DesignTokens {
                 return NSColor(dark)
             }
             return NSColor(light)
-        } ?? NSColor(light))
+        })
     }
 
     // MARK: - Filter dot colors (fixed per design spec)
@@ -346,6 +352,9 @@ struct AuroraKbd: View {
 
 /// 品牌渐变主按钮样式：实底渐变 + 白字 + 品牌色投影，按下缩放 0.97。
 struct AuroraPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
@@ -356,16 +365,26 @@ struct AuroraPrimaryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(DesignTokens.Aurora.brandGradient)
             )
-            .shadow(color: DesignTokens.Aurora.brandGlow,
+            .shadow(color: reduceTransparency ? .clear : DesignTokens.Aurora.brandGlow,
                     radius: configuration.isPressed ? 2 : 6,
                     y: configuration.isPressed ? 1 : 3)
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .animation(DesignTokens.Aurora.standard, value: configuration.isPressed)
+            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.97 : 1.0))
+            .animation(reduceMotion ? nil : DesignTokens.Aurora.standard,
+                       value: configuration.isPressed)
     }
 }
 
 /// View 扩展：设置分组卡片容器样式（表面填充 + 发丝描边 + 浮起阴影）。
 extension View {
+    func scaledSystemFont(_ size: CGFloat,
+                          weight: Font.Weight = .regular,
+                          design: Font.Design = .default,
+                          relativeTo textStyle: Font.TextStyle = .body) -> some View {
+        modifier(ScaledSystemFontModifier(size: size,
+                                          weight: weight,
+                                          design: design,
+                                          relativeTo: textStyle))
+    }
     /// 应用统一的设置卡片视觉：cardSurface 底、1px 发丝描边、圆角 12、
     /// 低透明度浮起阴影。
     func auroraSettingsCard(cornerRadius: CGFloat = 12) -> some View {
@@ -387,5 +406,44 @@ extension View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(DesignTokens.Aurora.brandGradient, lineWidth: lineWidth)
         )
+    }
+
+    /// Standard hover-state plumbing used by controls across the app. Controls
+    /// keep ownership of styling while animation and Reduce Motion behavior
+    /// stay consistent.
+    func auroraHover(_ isHovered: Binding<Bool>, animated: Bool = true) -> some View {
+        modifier(AuroraHoverModifier(isHovered: isHovered, animated: animated))
+    }
+}
+
+private struct ScaledSystemFontModifier: ViewModifier {
+    @ScaledMetric private var size: CGFloat
+    let weight: Font.Weight
+    let design: Font.Design
+
+    init(size: CGFloat, weight: Font.Weight, design: Font.Design, relativeTo: Font.TextStyle) {
+        _size = ScaledMetric(wrappedValue: size, relativeTo: relativeTo)
+        self.weight = weight
+        self.design = design
+    }
+
+    func body(content: Content) -> some View {
+        content.font(.system(size: size, weight: weight, design: design))
+    }
+}
+
+private struct AuroraHoverModifier: ViewModifier {
+    @Binding var isHovered: Bool
+    let animated: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content.onHover { hovering in
+            if animated, !reduceMotion {
+                withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
+            } else {
+                isHovered = hovering
+            }
+        }
     }
 }

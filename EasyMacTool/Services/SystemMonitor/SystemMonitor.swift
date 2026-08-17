@@ -3,16 +3,17 @@ import Darwin
 import Foundation
 import IOKit
 import IOKit.ps
+import os
 
 /// Reads temperatures (SMC), CPU/GPU usage, memory, network, disk and power on
 /// a background queue. Runs only while `setEnabled(true)` has been called —
 /// when disabled it holds no timer and samples nothing (zero idle cost).
-final class SystemMonitor: ObservableObject {
+nonisolated final class SystemMonitor: ObservableObject, @unchecked Sendable {
     static let shared = SystemMonitor()
 
-    @Published private(set) var snapshot = SystemSnapshot()
+    @MainActor @Published private(set) var snapshot = SystemSnapshot()
     /// 内存占用最高的几个运行应用（菜单栏下拉「活动应用内存」区块）。
-    @Published private(set) var topMemoryApps: [ActiveAppMemoryInfo] = []
+    @MainActor @Published private(set) var topMemoryApps: [ActiveAppMemoryInfo] = []
 
     private let queue = DispatchQueue(label: "com.easymactool.system-monitor", qos: .utility)
     private var timer: Timer?
@@ -69,7 +70,9 @@ final class SystemMonitor: ObservableObject {
     private var appMemoryTick = 0
     /// 后台队列持有的最近一次活动应用内存结果（节流时复用，
     /// 避免在后台线程读取 @Published 的 topMemoryApps 造成数据竞争）。
-    private var lastTopMemoryApps: [ActiveAppMemoryInfo] = []
+    private var lastTopMemorySamples: [AppMemorySampler.Sample] = []
+    /// 只有菜单弹层或监控设置页可见时才枚举进程。计数支持两个表面重叠显示。
+    private let detailedSurfaceCount = OSAllocatedUnfairLock(initialState: 0)
 
     private struct CachedMemoryReading {
         var used: UInt64
@@ -90,6 +93,13 @@ final class SystemMonitor: ObservableObject {
         diskReadHistory = MetricHistory(capacity: historyCapacity)
         diskWriteHistory = MetricHistory(capacity: historyCapacity)
         powerHistory = MetricHistory(capacity: historyCapacity)
+    }
+
+    /// Starts the one-time hardware capability probe away from the main actor.
+    static func prewarmHardwareCapabilities() {
+        DispatchQueue.global(qos: .utility).async {
+            _ = fanTelemetryCount
+        }
     }
 
     // MARK: - Lifecycle
@@ -127,6 +137,8 @@ final class SystemMonitor: ObservableObject {
     /// A full monitor surface became visible (Settings preview).
     @MainActor
     func panelDidAppear() {
+        detailedSurfaceCount.withLock { $0 += 1 }
+        queue.async { [weak self] in self?.appMemoryTick = 0 }
         guard enabled else { return }
         ensureTimer()
         refresh()
@@ -134,6 +146,7 @@ final class SystemMonitor: ObservableObject {
 
     @MainActor
     func panelDidDisappear() {
+        detailedSurfaceCount.withLock { $0 = max(0, $0 - 1) }
         stopTimerIfIdle()
     }
 
@@ -151,7 +164,7 @@ final class SystemMonitor: ObservableObject {
 
     private func startTimer() {
         let t = Timer(timeInterval: TimeInterval(intervalSeconds), repeats: true) { [weak self] _ in
-            self?.refresh()
+            Task { @MainActor [weak self] in self?.refresh() }
         }
         t.tolerance = TimeInterval(intervalSeconds) * 0.15
         RunLoop.main.add(t, forMode: .common)
@@ -173,8 +186,12 @@ final class SystemMonitor: ObservableObject {
         smcTried = false
         smc = nil
         powerSampler = nil
-        tempKeysPrepared = false
-        fanKeysPrepared = false
+        // Key descriptors are hardware metadata and remain valid across SMC
+        // connection reopen. Keep them across enable/disable so a new client
+        // does not enumerate hundreds of keys again. Empty/failed discovery is
+        // retried on the next enable.
+        tempKeysPrepared = !cpuKeys.isEmpty || !gpuKeys.isEmpty
+        fanKeysPrepared = !fanKeys.isEmpty || Self.fanTelemetryCount == 0
         previousCPUTicks = nil
         lastCPUUsage = nil
         lastGPUUsage = nil
@@ -185,16 +202,13 @@ final class SystemMonitor: ObservableObject {
         lastDiskReading = nil
         lastPowerReading = nil
         appMemoryTick = 0
-        lastTopMemoryApps = []
+        lastTopMemorySamples = []
     }
 
     // MARK: - Refresh
 
+    @MainActor
     private func refresh() {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.refresh() }
-            return
-        }
         guard enabled else {
             stopTimerIfIdle()
             return
@@ -204,6 +218,8 @@ final class SystemMonitor: ObservableObject {
             return
         }
         refreshInFlight = true
+        let needsDetailedApps = detailedSurfaceCount.withLock { $0 > 0 }
+        let appCandidates = needsDetailedApps ? AppMemorySampler.captureCandidates() : []
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -318,10 +334,10 @@ final class SystemMonitor: ObservableObject {
             // 全量枚举进程是重活（proc_listallpids + 逐进程 proc_pidpath/proc_pidinfo），
             // 且菜单栏下拉未打开时该区块不可见。节流为每 5 个 tick（≈10s@2s 间隔）
             // 采样一次，其余 tick 复用上次结果，降低常驻后台 CPU 占用。
-            var apps = lastTopMemoryApps
-            if appMemoryTick % 5 == 0 {
-                apps = AppMemorySampler.sample()
-                lastTopMemoryApps = apps
+            var appSamples = needsDetailedApps ? lastTopMemorySamples : []
+            if needsDetailedApps, appMemoryTick % 5 == 0 {
+                appSamples = AppMemorySampler.sample(candidates: appCandidates)
+                lastTopMemorySamples = appSamples
             }
             appMemoryTick &+= 1
 
@@ -331,7 +347,11 @@ final class SystemMonitor: ObservableObject {
                     return
                 }
                 self.snapshot = next
-                self.topMemoryApps = apps
+                if needsDetailedApps {
+                    self.topMemoryApps = AppMemorySampler.displayInfo(from: appSamples)
+                } else if !self.topMemoryApps.isEmpty {
+                    self.topMemoryApps = []
+                }
                 self.refreshInFlight = false
                 if self.pendingRefresh, self.enabled {
                     self.pendingRefresh = false
@@ -484,7 +504,9 @@ final class SystemMonitor: ObservableObject {
         let total = busy + idle
 
         defer { previousCPUTicks = (busy, total) }
-        guard let previous = previousCPUTicks, total > previous.total else { return nil }
+        guard let previous = previousCPUTicks,
+              total > previous.total,
+              busy >= previous.busy else { return nil }
         return Double(busy - previous.busy) / Double(total - previous.total)
     }
 
@@ -497,6 +519,7 @@ final class SystemMonitor: ObservableObject {
                                            &iterator) == kIOReturnSuccess else { return nil }
         defer { IOObjectRelease(iterator) }
 
+        var utilizations: [Double] = []
         var entry = IOIteratorNext(iterator)
         while entry != 0 {
             defer {
@@ -506,11 +529,22 @@ final class SystemMonitor: ObservableObject {
             guard let ref = IORegistryEntryCreateCFProperty(entry, "PerformanceStatistics" as CFString,
                                                             kCFAllocatorDefault, 0),
                   let stats = ref.takeRetainedValue() as? [String: Any],
-                  let utilization = stats["Device Utilization %"] as? Int
+                  let value = numericDouble(stats["Device Utilization %"])
             else { continue }
-            return Double(utilization) / 100.0
+            utilizations.append(min(100, max(0, value)) / 100.0)
         }
-        return nil
+        // 多 GPU 机器取最忙设备，避免把多个独立百分比相加后超过 100%。
+        return utilizations.max()
+    }
+
+    private static func numericDouble(_ value: Any?) -> Double? {
+        switch value {
+        case let value as NSNumber: return value.doubleValue
+        case let value as Double: return value
+        case let value as Float: return Double(value)
+        case let value as Int: return Double(value)
+        default: return nil
+        }
     }
 
     // MARK: - Memory pressure

@@ -19,18 +19,9 @@ struct WindowLayoutSettingsView: View {
         .background(DesignTokens.Aurora.pageBackground)
     }
 
-    private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
-            AuroraIconChip(systemName: systemImage, size: 26)
-            Text(title)
-                .font(.system(size: DesignTokens.SettingsTypography.subHeader, weight: .semibold))
-                .foregroundStyle(.primary)
-        }
-    }
-
     private func caption(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: DesignTokens.SettingsTypography.caption))
+            .scaledSystemFont(DesignTokens.SettingsTypography.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -39,27 +30,14 @@ struct WindowLayoutSettingsView: View {
 
     private var masterToggleSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("通用", systemImage: "gear")
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("启用窗口布局")
-                            .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                            .foregroundStyle(.primary)
-                        caption("通过快捷键或径向菜单快速排布当前窗口。关闭后不监听任何布局快捷键、零开销。")
-                    }
-                    Spacer(minLength: 0)
-                    Toggle("", isOn: $settings.windowLayoutEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(DesignTokens.Aurora.controlOn)
-                        .controlSize(.small)
-                        .padding(.top, 2)
-                }
+            SettingsSectionHeader(title: "通用", systemImage: "gear")
+            SettingsCard(spacing: 10) {
+                SettingsToggleRow(
+                    title: "启用窗口布局",
+                    description: "通过快捷键或径向菜单快速排布当前窗口。关闭后不监听任何布局快捷键、零开销。",
+                    isOn: $settings.windowLayoutEnabled
+                )
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
         }
     }
 
@@ -67,27 +45,17 @@ struct WindowLayoutSettingsView: View {
 
     private var radialSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("径向菜单", systemImage: "circle.grid.cross")
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: DesignTokens.Settings.formRowGap) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("启用径向菜单")
-                            .font(.system(size: DesignTokens.SettingsTypography.toggleTitle, weight: .medium))
-                            .foregroundStyle(.primary)
-                        caption("按住鼠标中键并移动鼠标，选择方向后松开即可排布窗口；也可设置下方键盘快捷键呼出。")
-                    }
-                    Spacer(minLength: 0)
-                    Toggle("", isOn: $settings.windowLayoutRadialEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(DesignTokens.Aurora.controlOn)
-                        .controlSize(.small)
-                        .padding(.top, 2)
-                }
-                divider
+            SettingsSectionHeader(title: "径向菜单", systemImage: "circle.grid.cross")
+            SettingsCard(spacing: 10) {
+                SettingsToggleRow(
+                    title: "启用径向菜单",
+                    description: "按住鼠标中键并移动鼠标，选择方向后松开即可排布窗口；也可设置下方键盘快捷键呼出。",
+                    isOn: $settings.windowLayoutRadialEnabled
+                )
+                SettingsRowDivider()
                 HStack(alignment: .center, spacing: DesignTokens.Settings.formRowGap) {
                     Text("键盘触发")
-                        .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
+                        .scaledSystemFont(DesignTokens.SettingsTypography.rowLabel)
                         .foregroundStyle(.primary)
                         .frame(width: DesignTokens.Settings.formLabelWidth, alignment: .leading)
                     KeyTriggerRecorderView(trigger: $settings.windowLayoutRadialKeyTrigger,
@@ -96,9 +64,6 @@ struct WindowLayoutSettingsView: View {
                 }
                 caption("中心为全屏，四周为上下左右半屏与四角。纯点击（不移动鼠标）不会触发布局。")
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
         }
     }
 
@@ -106,19 +71,23 @@ struct WindowLayoutSettingsView: View {
 
     private var shortcutsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("布局快捷键", systemImage: "keyboard")
-            VStack(spacing: 0) {
+            SettingsSectionHeader(title: "布局快捷键", systemImage: "keyboard")
+            SettingsCard(
+                spacing: 0,
+                contentInsets: EdgeInsets(
+                    top: DesignTokens.Settings.groupRowVPadding,
+                    leading: DesignTokens.Settings.groupRowHPadding,
+                    bottom: DesignTokens.Settings.groupRowVPadding,
+                    trailing: DesignTokens.Settings.groupRowHPadding
+                )
+            ) {
                 ForEach(Array(shortcutActions.enumerated()), id: \.element.rawValue) { index, action in
                     layoutActionRow(action: action)
                     if index < shortcutActions.count - 1 {
-                        divider
+                        SettingsRowDivider()
                     }
                 }
             }
-            .padding(.vertical, DesignTokens.Settings.groupRowVPadding)
-            .padding(.horizontal, DesignTokens.Settings.groupRowHPadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .auroraSettingsCard()
         }
     }
 
@@ -134,7 +103,7 @@ struct WindowLayoutSettingsView: View {
                 .foregroundStyle(DesignTokens.Aurora.brandGradient)
                 .frame(width: 22)
             Text(action.displayName)
-                .font(.system(size: DesignTokens.SettingsTypography.rowLabel))
+                .scaledSystemFont(DesignTokens.SettingsTypography.rowLabel)
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
             KeyRecorderView(
@@ -168,21 +137,12 @@ struct WindowLayoutSettingsView: View {
         }
     }
 
-    /// 读取某动作的快捷键；若尚未设置则创建默认（无快捷键）条目并返回。
+    /// 视图求值期间只读；缺失项由 Binding setter 在用户编辑时补入。
     private func layoutShortcut(for action: WindowLayoutAction) -> LayoutShortcut {
-        if let existing = settings.windowLayoutShortcuts.first(where: { $0.action == action }) {
-            return existing
-        }
-        let fresh = LayoutShortcut(action: action, keyCode: 0, modifiers: [])
-        settings.windowLayoutShortcuts.append(fresh)
-        return fresh
+        settings.windowLayoutShortcuts.first(where: { $0.action == action })
+            ?? LayoutShortcut(action: action, keyCode: 0, modifiers: [])
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(DesignTokens.Aurora.insetSeparator)
-            .frame(height: 1)
-    }
 }
 
 /// Records a modifier-hold trigger (with left/right awareness) for summoning
@@ -195,6 +155,7 @@ private struct KeyTriggerRecorderView: View {
     @State private var isRecording = false
     @State private var monitor: Any?
     @State private var currentMods: UInt64 = 0
+    @State private var recordingTimeout: Timer?
 
     var body: some View {
         Button {
@@ -205,7 +166,7 @@ private struct KeyTriggerRecorderView: View {
             }
         } label: {
             Text(isRecording ? "按住修饰键…" : trigger.displayString)
-                .font(.system(size: DesignTokens.SettingsTypography.kbd, design: .monospaced))
+                .scaledSystemFont(DesignTokens.SettingsTypography.kbd, design: .monospaced)
                 .tracking(0.6)
                 .foregroundStyle(isRecording ? DesignTokens.Aurora.tint : DesignTokens.Colors.foreground)
                 .frame(minWidth: 90)
@@ -226,6 +187,9 @@ private struct KeyTriggerRecorderView: View {
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("录制径向菜单触发键")
+        .accessibilityValue(isRecording ? "正在录制" : trigger.displayString)
+        .accessibilityHint(isRecording ? "按住修饰键后松开以确认" : "按下后开始录制修饰键")
         .onDisappear { stopRecording() }
     }
 
@@ -248,9 +212,16 @@ private struct KeyTriggerRecorderView: View {
             }
             return event
         }
+        let timeout = Timer(timeInterval: 10, repeats: false) { _ in
+            Task { @MainActor in stopRecording() }
+        }
+        RunLoop.main.add(timeout, forMode: .common)
+        recordingTimeout = timeout
     }
 
     private func stopRecording() {
+        recordingTimeout?.invalidate()
+        recordingTimeout = nil
         if let monitor = monitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil

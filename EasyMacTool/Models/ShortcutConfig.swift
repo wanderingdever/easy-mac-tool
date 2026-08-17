@@ -121,7 +121,7 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
 }
 
 /// Renders a (keyCode, modifiers) combo as a macOS-style label, e.g. "⌘⇥".
-enum KeyComboFormatter {
+nonisolated enum KeyComboFormatter {
     static func format(keyCode: CGKeyCode, modifiers: CGEventFlags) -> String {
         var s = ""
         if modifiers.contains(.maskControl) { s += "⌃" }
@@ -143,7 +143,8 @@ enum KeyComboFormatter {
         case 0x7E: return "↑"
         case 0x31: return "␣"
         default:
-            if let scalar = Unicode.Scalar(UCKeyTranslateMapper.char(for: code)) {
+            if let value = UCKeyTranslateMapper.char(for: code),
+               let scalar = Unicode.Scalar(value) {
                 return String(scalar)
             }
             return "Key\(code)"
@@ -153,8 +154,8 @@ enum KeyComboFormatter {
 
 /// Bridges virtual key codes to a printable character without importing Carbon.
 /// Covers the common letters / digits; everything else falls back to the raw code.
-private enum UCKeyTranslateMapper {
-    static func char(for code: CGKeyCode) -> UInt32 {
+nonisolated private enum UCKeyTranslateMapper {
+    static func char(for code: CGKeyCode) -> UInt32? {
         switch code {
         case 0x00: return 0x61   // a
         case 0x0B: return 0x62   // b
@@ -182,8 +183,17 @@ private enum UCKeyTranslateMapper {
         case 0x07: return 0x78   // x
         case 0x10: return 0x79   // y
         case 0x06: return 0x7A   // z
-        case 0x1D...0x26: return 0x30 + UInt32(code - 0x1D)   // 0-9
-        default: return 0xFFFD
+        case 0x1D: return 0x30   // 0
+        case 0x12: return 0x31   // 1
+        case 0x13: return 0x32   // 2
+        case 0x14: return 0x33   // 3
+        case 0x15: return 0x34   // 4
+        case 0x17: return 0x35   // 5
+        case 0x16: return 0x36   // 6
+        case 0x1A: return 0x37   // 7
+        case 0x1C: return 0x38   // 8
+        case 0x19: return 0x39   // 9
+        default: return nil
         }
     }
 }
