@@ -57,4 +57,9 @@ struct P2RegressionTests {
         #expect(item.matchesSearch("cafe needle"))
         #expect(!item.matchesSearch("missing value"))
     }
+
+    @MainActor @Test func processMemorySamplingDoesNotTrapOnRusageBuffer() {
+        let candidates = AppMemorySampler.captureCandidates()
+        _ = AppMemorySampler.sample(candidates: Array(candidates.prefix(1)), limit: 1)
+    }
 }

@@ -246,7 +246,16 @@ final class HotkeyManager {
     }
 
     func endRecording() {
-        assert(recordingSessions > 0, "beginRecording/endRecording not paired")
+        // A recorder can disappear while SwiftUI is tearing down its view tree,
+        // and a late local-monitor callback may then call stop a second time.
+        // Do not turn that benign teardown race into a process-wide assertion
+        // trap; the recorder state is already the desired inactive state.
+        guard recordingSessions > 0 else {
+            Self.logger.warning("Ignoring unmatched endRecording() call")
+            isRecording = false
+            Self.routeMirror.setRecording(false)
+            return
+        }
         recordingSessions = max(0, recordingSessions - 1)
         isRecording = recordingSessions > 0
         Self.routeMirror.setRecording(isRecording)
@@ -412,8 +421,8 @@ final class HotkeyManager {
     }
 
     nonisolated private func restartOnMain() {
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.start() }
+        Task { @MainActor [weak self] in
+            self?.start()
         }
     }
 
@@ -514,9 +523,8 @@ final class HotkeyManager {
     /// Enqueue without waiting. Matched key-down events have already been
     /// consumed by `route`; flagsChanged events are passed through separately.
     nonisolated private func enqueueToMain(_ event: RoutedEvent) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            MainActor.assumeIsolated { self.handle(event: event) }
+        Task { @MainActor [weak self] in
+            self?.handle(event: event)
         }
     }
 

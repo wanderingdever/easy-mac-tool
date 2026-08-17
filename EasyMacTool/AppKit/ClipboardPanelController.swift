@@ -121,15 +121,6 @@ final class ClipboardPanelController: ObservableObject {
             return
         }
 
-        // 记录呼出面板前的前台 app：nonactivatingPanel 不改变 frontmostApp，
-        // 此刻读取的就是 paste 的目标 app。dismiss 后 simulatePaste 用它校验。
-        pasteTargetBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-
-        // 保存 manager 引用供 dismiss 时切换轮询频率。面板打开切高频轮询：
-        // 用户正在查看历史，此时从其他 app 复制内容应立即出现在卡片中。
-        clipboardManager = manager
-        manager.setActivePolling(true)
-
         if let hosting = hostingController {
             // 复用已有 hosting controller：更新 rootView 确保依赖一致，
             // 避免 future 扩展（多 manager、测试场景）时 rootView 持有旧引用。
@@ -150,6 +141,27 @@ final class ClipboardPanelController: ObservableObject {
             self.hostingController = hosting
             panel.contentViewController = hosting
         }
+
+        // AppKit 在第一次设置 contentViewController 时，可能根据
+        // NSHostingController 的 fitting size 重算 NSPanel 的 frame，覆盖前面
+        // 的全屏定位。这会让首次展示落回 OverlayPanel 的初始尺寸（左下角
+        // 的迷你面板）；后续展示复用 hosting 时通常不会再触发该重算。
+        // 先完成一次内容布局，再重新定位，确保窗口真正显示前 frame 已稳定。
+        panel.contentView?.layoutSubtreeIfNeeded()
+        guard positionPanel() else {
+            Self.logger.error("[ClipboardPanel] present aborted: no valid target screen after content layout")
+            return
+        }
+
+        // 记录呼出面板前的前台 app：nonactivatingPanel 不改变 frontmostApp，
+        // 此刻读取的就是 paste 的目标 app。dismiss 后 simulatePaste 用它校验。
+        pasteTargetBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+
+        // 保存 manager 引用供 dismiss 时切换轮询频率。面板打开切高频轮询：
+        // 用户正在查看历史，此时从其他 app 复制内容应立即出现在卡片中。
+        // 放在最终定位成功之后，避免显示器热插拔导致面板未显示却留下高频轮询。
+        clipboardManager = manager
+        manager.setActivePolling(true)
 
         panel.orderFrontRegardless()
         // 直接设为 true：present 调用即表示意图显示面板。之前读 panel.isVisible

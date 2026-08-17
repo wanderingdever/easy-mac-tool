@@ -69,8 +69,13 @@ nonisolated enum AppMemorySampler {
     private static func footprintBytes(for pid: pid_t) -> UInt64? {
         var info = rusage_info_v2()
         return withUnsafeMutablePointer(to: &info) { pointer in
-            var raw: rusage_info_t? = UnsafeMutableRawPointer(pointer)
-            guard proc_pid_rusage(pid, RUSAGE_INFO_V2, &raw) == 0 else { return nil }
+            // `rusage_info_t` is imported as a void-pointer typedef, but the
+            // C API treats the argument as the output buffer itself. Passing
+            // the address of a temporary pointer (`&raw`) makes the kernel
+            // copy the struct into pointer storage and can corrupt the stack.
+            let buffer = UnsafeMutableRawPointer(pointer)
+                .assumingMemoryBound(to: rusage_info_t?.self)
+            guard proc_pid_rusage(pid, RUSAGE_INFO_V2, buffer) == 0 else { return nil }
             return pointer.pointee.ri_phys_footprint
         }
     }

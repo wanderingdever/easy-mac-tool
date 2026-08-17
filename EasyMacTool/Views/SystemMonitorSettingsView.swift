@@ -28,7 +28,7 @@ struct SystemMonitorSettingsView: View {
 
     private var masterSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader(title: "系统监控", systemImage: "gauge")
+            SettingsSectionHeader(title: "通用", systemImage: "gear")
             SettingsCard {
                 SettingsToggleRow(
                     title: "启用系统监控",
