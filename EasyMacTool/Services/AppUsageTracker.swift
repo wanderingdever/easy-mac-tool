@@ -25,6 +25,10 @@ final class AppUsageTracker {
     private var windowOwners: [CGWindowID: pid_t] = [:]
     /// PIDs ordered by most recent activation (fallback for icon-only items).
     private var order: [pid_t] = []
+    /// Monotonically increasing activation token. AX reads run off the main
+    /// actor and may finish out of order; completions from an older activation
+    /// must not move a previously selected window back to the front.
+    private var activationGeneration = 0
     private let ownBundleID = Bundle.main.bundleIdentifier ?? ""
 
     /// AX observers keyed by PID so we can clean up when apps exit.
@@ -44,7 +48,8 @@ final class AppUsageTracker {
         // Seed with the current frontmost app + its focused window.
         if let front = NSWorkspace.shared.frontmostApplication {
             order = [front.processIdentifier]
-            seedFocusedWindowAsync(pid: front.processIdentifier)
+            seedFocusedWindowAsync(pid: front.processIdentifier,
+                                    generation: activationGeneration)
         }
         // Subscribe to app activations (for app-level fallback ordering).
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -257,6 +262,10 @@ final class AppUsageTracker {
 
     /// Called on the main thread when an app's focused window changes.
     private func handleFocusedWindowChange(pid: pid_t, notification: CFString) {
+        // AX notifications can arrive after the app has already lost focus.
+        // Ignore those stale callbacks; the activation seed for the new app
+        // will establish the correct frontmost window.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
         guard let windowID = Self.readFocusedWindowID(pid: pid) else { return }
         recordFocusedWindow(windowID, pid: pid)
     }
@@ -294,38 +303,102 @@ final class AppUsageTracker {
         // （"conditional downcast to CF type will always succeed"），
         // 纯 as! 不做运行时类型验证，个别 app 返回非 AXUIElement 类型会崩溃。
         // CFGetTypeID 预检查后 as! 安全（类型已验证）。
-        guard let value = focusedWindowRef,
-              CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        let axWindow = value as! AXUIElement
-        var windowIDRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(
-            axWindow,
-            "AXWindowID" as CFString,
-            &windowIDRef
-        )
-        guard let windowIDNum = windowIDRef as? NSNumber else { return nil }
-        // 与 WindowActivator/WindowExtractor 保持一致：用 uint32Value 而非 intValue。
-        // CGWindowID 是 UInt32，intValue 对超过 Int32.max 的值会溢出为负数，
-        // 导致 MRU 排序匹配失效。
-        return CGWindowID(windowIDNum.uint32Value)
+        if let value = focusedWindowRef,
+           CFGetTypeID(value) == AXUIElementGetTypeID() {
+            let axWindow = value as! AXUIElement
+            var windowIDRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(
+                axWindow,
+                "AXWindowID" as CFString,
+                &windowIDRef
+            )
+            if let windowIDNum = windowIDRef as? NSNumber {
+                // 与 WindowActivator/WindowExtractor 保持一致：用 uint32Value 而非 intValue。
+                // CGWindowID 是 UInt32，intValue 对超过 Int32.max 的值会溢出为负数，
+                // 导致 MRU 排序匹配失效。
+                return CGWindowID(windowIDNum.uint32Value)
+            }
+        }
+
+        // A few applications expose a focused AX window but omit AXWindowID.
+        // WindowServer still reports the frontmost on-screen window for the
+        // process, which is a reliable fallback for MRU ordering (activation
+        // itself remains handled by WindowActivator's AX path).
+        return frontmostWindowID(pid: pid)
+    }
+
+    /// Returns the topmost normal/modal on-screen window owned by `pid`.
+    /// CGWindowList is ordered front-to-back, so the first matching entry is
+    /// the window the user most recently clicked.
+    nonisolated private static func frontmostWindowID(pid: pid_t) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for info in list {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? Int,
+                  pid_t(ownerPID) == pid,
+                  let windowNumber = info[kCGWindowNumber as String] as? Int,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  (0...8).contains(layer),
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let width = bounds["Width"] as? CGFloat,
+                  let height = bounds["Height"] as? CGFloat,
+                  width > 0, height > 0 else { continue }
+            return CGWindowID(windowNumber)
+        }
+        return nil
     }
 
     /// 后台读取指定 PID 的当前聚焦窗口并更新 MRU。
     /// AX 属性读取是同步跨进程 IPC，主线程调用会阻塞；app 激活频繁时
     /// 改为后台执行，仅把结果派回主线程更新 MRU。
-    private func seedFocusedWindowAsync(pid: pid_t) {
+    ///
+    /// A short retry window handles the activation->focused-window ordering on
+    /// macOS: didActivateApplication can be delivered before AX exposes the
+    /// newly focused window. The generation and frontmost-PID checks prevent a
+    /// delayed read from a previous app activation overwriting the latest one.
+    private func seedFocusedWindowAsync(pid: pid_t, generation: Int) {
         // 用 [weak self] 捕获实例而非 AppUsageTracker.shared：本方法在 init() 中调用，
         // 此时 static let shared 尚未初始化完成，访问它会触发 EXC_BREAKPOINT。
-        // guard let self 在 detached 闭包内执行（self 变为 let 常量）后再进入
-        // MainActor.run，避免 Swift 6 并发捕获警告。
         Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            let windowID = Self.readFocusedWindowID(pid: pid)
-            await MainActor.run {
-                guard let windowID else { return }
-                self.recordFocusedWindow(windowID, pid: pid)
+            for attempt in 0..<3 {
+                guard !Task.isCancelled else { return }
+                if attempt > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 50_000_000)
+                }
+                let windowID = Self.readFocusedWindowID(pid: pid)
+                let accepted = await MainActor.run { [weak self] in
+                    guard let self,
+                          self.activationGeneration == generation,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                          let windowID else { return false }
+                    self.recordFocusedWindow(windowID, pid: pid)
+                    return true
+                }
+                if accepted { return }
             }
         }
+    }
+
+    /// Refreshes the currently frontmost app's focused window before a
+    /// switcher snapshot is sorted. This is a final consistency check for
+    /// mouse activation paths where Workspace/AX notifications can be delayed
+    /// or coalesced by the system.
+    func refreshFrontmostWindow() async {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != ownBundleID else { return }
+        let pid = app.processIdentifier
+        installAXObserver(for: app)
+        recordAppActivation(pid)
+        let generation = activationGeneration
+        let windowID = await Task.detached(priority: .userInitiated) {
+            Self.readFocusedWindowID(pid: pid)
+        }.value
+        guard activationGeneration == generation,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let windowID else { return }
+        recordFocusedWindow(windowID, pid: pid)
     }
 
     // MARK: - NSWorkspace notifications
@@ -335,14 +408,22 @@ final class AppUsageTracker {
                 as? NSRunningApplication else { return }
         let pid = app.processIdentifier
         if app.bundleIdentifier == ownBundleID { return }
-        // App-level order
-        order.removeAll { $0 == pid }
-        order.insert(pid, at: 0)
-        if order.count > 64 { order.removeLast(order.count - 64) }
+        activationGeneration &+= 1
+        let generation = activationGeneration
+        recordAppActivation(pid)
         // Install observer if not yet installed (app was running before us)
         installAXObserver(for: app)
         // Seed the focused window for this app（AX 读取在后台执行，避免阻塞主线程）
-        seedFocusedWindowAsync(pid: pid)
+        seedFocusedWindowAsync(pid: pid, generation: generation)
+    }
+
+    /// Moves an app to the front of the PID-level MRU list. This is used both
+    /// by Workspace notifications and by the snapshot-time frontmost refresh,
+    /// covering activation paths where the notification is delayed or missed.
+    private func recordAppActivation(_ pid: pid_t) {
+        order.removeAll { $0 == pid }
+        order.insert(pid, at: 0)
+        if order.count > 64 { order.removeLast(order.count - 64) }
     }
 
     @objc private func appDidLaunch(_ note: Notification) {

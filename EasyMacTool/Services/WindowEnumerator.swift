@@ -73,6 +73,13 @@ final class WindowEnumerator {
             Self.logger.error("AX not trusted! minimized/hidden windows will not be detected. Grant Accessibility permission.")
         }
 
+        // Workspace/AX activation notifications are asynchronous and can be
+        // coalesced when the user clicks another app immediately after a
+        // software-driven switch. Refresh the frontmost window before taking
+        // the focused ID used by the MRU sorter, so the next switcher opening
+        // always reflects the user's actual mouse activation.
+        await AppUsageTracker.shared.refreshFrontmostWindow()
+
         // 2. SCShareableContent 用于获取窗口（需要 SCWindow 来捕获预览）。
         //    currentSpaceOnly=true（默认）：仅当前桌面（Space）可见窗口，
         //    剔除其他桌面上的窗口——收紧默认过滤，避免切快捷键时出现
