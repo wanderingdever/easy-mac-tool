@@ -37,6 +37,16 @@ struct UninstallerSettingsView: View {
             .sheet(isPresented: $showingRemovalConfirmation) {
                 removalConfirmation
             }
+            .alert("应用仍在运行", isPresented: forceQuitPresented) {
+                Button("取消卸载", role: .cancel) {
+                    uninstaller.cancelForceQuit()
+                }
+                Button("强制退出并继续", role: .destructive) {
+                    uninstaller.confirmForceQuit()
+                }
+            } message: {
+                Text(forceQuitMessage)
+            }
     }
 
     @ViewBuilder
@@ -45,7 +55,11 @@ struct UninstallerSettingsView: View {
         case .empty: emptyState
         case .scanning: busyState("正在扫描残留文件…")
         case .results: resultsState
+        case .stopping: busyState("正在停止应用和后台组件…")
+        case .awaitingForceQuit: busyState("等待确认是否强制退出…")
         case .removing: busyState("正在移动至废纸篓…")
+        case let .awaitingFinderAuthorization(freed, pending):
+            finderAuthorizationState(freed: freed, pending: pending)
         case let .done(freed, failed): doneState(freed: freed, failed: failed)
         }
     }
@@ -293,6 +307,13 @@ struct UninstallerSettingsView: View {
                 }
                 .frame(maxHeight: 120)
             }
+            if uninstaller.requiresRestart {
+                Label("检测到系统级后台服务，相关进程可能持续运行到下次重新启动。", systemImage: "restart")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+            }
             Button("继续卸载") { uninstaller.reset() }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
@@ -304,13 +325,53 @@ struct UninstallerSettingsView: View {
 
     // MARK: Helpers
 
+    private func finderAuthorizationState(freed: Int64, pending: Int) -> some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "folder.badge.gearshape")
+                .font(.system(size: 50))
+                .foregroundStyle(.orange)
+            Text("需要 Finder 自动化权限")
+                .scaledSystemFont(20, weight: .bold, relativeTo: .title2)
+            Text("还有 \(pending) 项位于受保护目录。EasyMacTool 只会请求 Finder 将已确认的项目移至废纸篓，不会读取或控制其他 Finder 内容。")
+                .scaledSystemFont(13)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+            if freed > 0 {
+                Text("已成功释放 \(uninstallByteString(freed))，授权后只重试剩余项目。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                Button("暂时跳过") {
+                    uninstaller.finishWithoutFinderRetry()
+                }
+                Button("打开自动化设置") {
+                    NSWorkspace.shared.open(FinderAutomationAuthorization.settingsURL)
+                }
+                Button("已授权，重试") {
+                    uninstaller.retryFinderRemoval()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            Spacer()
+        }
+        .padding(28)
+    }
+
     private var removalConfirmation: some View {
         let selected = uninstaller.items.filter(\.include)
         return VStack(alignment: .leading, spacing: 16) {
             Text("确认移至废纸篓")
                 .font(.title2.bold())
-            Text("将移动 \(selected.count) 项，共 \(uninstallByteString(uninstaller.selectedSize))。应用若正在运行会先收到退出请求。")
+            Text("将移动 \(selected.count) 项，共 \(uninstallByteString(uninstaller.selectedSize))。卸载器会先停止相关启动项并请求应用正常退出；只有应用拒绝退出时，才会再次询问是否强制退出。")
                 .foregroundStyle(.secondary)
+            if uninstaller.requiresRestart {
+                Label("检测到系统级后台服务；本版本不会强制停止 root 进程，卸载后可能需要重新启动。", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(selected) { item in
@@ -335,6 +396,18 @@ struct UninstallerSettingsView: View {
         }
         .padding(24)
         .frame(width: 560, height: 420)
+    }
+
+    private var forceQuitPresented: Binding<Bool> {
+        Binding(
+            get: { uninstaller.phase == .awaitingForceQuit },
+            set: { _ in }
+        )
+    }
+
+    private var forceQuitMessage: String {
+        let names = uninstaller.runningComponents.map(\.name).joined(separator: "、")
+        return "\(names.isEmpty ? "目标应用" : names) 未在 3 秒内退出。强制退出可能丢失尚未保存的数据，是否继续？"
     }
 
     private func includeBinding(_ item: AppUninstaller.Leftover) -> Binding<Bool> {
