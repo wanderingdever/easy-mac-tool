@@ -30,8 +30,6 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>EasyMacTool 仅在卸载需要管理员权限的应用或残留文件时，请求 Finder 将所选项目移至废纸篓。</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>EasyMacTool 需要屏幕录制权限，才能在窗口切换器中显示窗口实时预览。</string>
 </dict>

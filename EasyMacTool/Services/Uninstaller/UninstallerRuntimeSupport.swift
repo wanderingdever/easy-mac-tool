@@ -35,6 +35,7 @@ nonisolated enum UninstallerRuntimeSupport {
     }
 
     private static let pathBufferSize = 4_096
+    private static let launchctlTimeout: TimeInterval = 5
 
     static func launchItemKind(for url: URL, home: URL) -> LaunchItemKind? {
         let path = url.standardizedFileURL.path
@@ -82,7 +83,14 @@ nonisolated enum UninstallerRuntimeSupport {
         process.standardError = errorPipe
         do {
             try process.run()
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(launchctlTimeout)
+            while process.isRunning, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            guard !process.isRunning else {
+                process.terminate()
+                return CommandResult(exitCode: -2, errorText: "launchctl 超时")
+            }
             let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

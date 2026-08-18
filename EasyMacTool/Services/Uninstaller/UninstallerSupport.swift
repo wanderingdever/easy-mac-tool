@@ -20,6 +20,21 @@ nonisolated enum UninstallerSupport {
                             fileType: UInt16(type))
     }
 
+    /// Returns true when deleting the item is likely to require an elevated
+    /// operation. System-owned roots are treated as protected even when an
+    /// individual file happens to be user-owned, because their parent cannot
+    /// be modified by the current user.
+    static func requiresPrivilege(at url: URL,
+                                  currentUID: uid_t = getuid()) -> Bool {
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix("/Applications/") || path.hasPrefix("/Library/") {
+            return true
+        }
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return true }
+        return info.st_uid != currentUID
+    }
+
     static func isDescendant(_ url: URL, of root: URL) -> Bool {
         let path = url.standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
@@ -100,8 +115,11 @@ nonisolated enum UninstallerSupport {
     /// System/protected bundle identifiers are never eligible for removal.
     static func isProtectedBundleID(_ raw: String) -> Bool {
         let lower = raw.lowercased()
-        return lower.hasPrefix("com.apple.")
+        return lower == "com.apple"
+            || lower.hasPrefix("com.apple.")
+            || lower == "com.opensource"
             || lower.hasPrefix("com.opensource.")
+            || lower == "org.gnu"
             || lower.hasPrefix("org.gnu.")
     }
 }

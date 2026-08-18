@@ -47,6 +47,16 @@ struct UninstallerSettingsView: View {
             } message: {
                 Text(forceQuitMessage)
             }
+            .alert("需要管理员清理权限", isPresented: protectedCleanupPresented) {
+                Button("取消本次卸载", role: .cancel) {
+                    uninstaller.cancelProtectedCleanup()
+                }
+                Button("授权并移到废纸篓", role: .destructive) {
+                    uninstaller.confirmProtectedCleanup()
+                }
+            } message: {
+                Text(protectedCleanupMessage)
+            }
     }
 
     @ViewBuilder
@@ -55,11 +65,10 @@ struct UninstallerSettingsView: View {
         case .empty: emptyState
         case .scanning: busyState("正在扫描残留文件…")
         case .results: resultsState
+        case .awaitingProtectedConfirmation: resultsState
         case .stopping: busyState("正在停止应用和后台组件…")
         case .awaitingForceQuit: busyState("等待确认是否强制退出…")
         case .removing: busyState("正在移动至废纸篓…")
-        case let .awaitingFinderAuthorization(freed, pending):
-            finderAuthorizationState(freed: freed, pending: pending)
         case let .done(freed, failed): doneState(freed: freed, failed: failed)
         }
     }
@@ -287,7 +296,7 @@ struct UninstallerSettingsView: View {
             Text("已释放 \(uninstallByteString(freed))")
                 .scaledSystemFont(13).foregroundStyle(.secondary)
             if failed > 0 {
-                Text("有 \(failed) 项未能移除，可能被占用或需要管理员权限。")
+                Text("有 \(failed) 项未能移除，可能被占用或管理员清理 helper 不可用。")
                     .font(.caption).foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 40)
@@ -325,48 +334,19 @@ struct UninstallerSettingsView: View {
 
     // MARK: Helpers
 
-    private func finderAuthorizationState(freed: Int64, pending: Int) -> some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "folder.badge.gearshape")
-                .font(.system(size: 50))
-                .foregroundStyle(.orange)
-            Text("需要 Finder 自动化权限")
-                .scaledSystemFont(20, weight: .bold, relativeTo: .title2)
-            Text("还有 \(pending) 项位于受保护目录。EasyMacTool 只会请求 Finder 将已确认的项目移至废纸篓，不会读取或控制其他 Finder 内容。")
-                .scaledSystemFont(13)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
-            if freed > 0 {
-                Text("已成功释放 \(uninstallByteString(freed))，授权后只重试剩余项目。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            HStack(spacing: 10) {
-                Button("暂时跳过") {
-                    uninstaller.finishWithoutFinderRetry()
-                }
-                Button("打开自动化设置") {
-                    NSWorkspace.shared.open(FinderAutomationAuthorization.settingsURL)
-                }
-                Button("已授权，重试") {
-                    uninstaller.retryFinderRemoval()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            Spacer()
-        }
-        .padding(28)
-    }
-
     private var removalConfirmation: some View {
         let selected = uninstaller.items.filter(\.include)
+        let protectedCount = selected.filter { UninstallerSupport.requiresPrivilege(at: $0.url) }.count
         return VStack(alignment: .leading, spacing: 16) {
             Text("确认移至废纸篓")
                 .font(.title2.bold())
-            Text("将移动 \(selected.count) 项，共 \(uninstallByteString(uninstaller.selectedSize))。卸载器会先停止相关启动项并请求应用正常退出；只有应用拒绝退出时，才会再次询问是否强制退出。")
+            Text("将处理 \(selected.count) 项，共 \(uninstallByteString(uninstaller.selectedSize))。普通文件会移到废纸篓；受保护项目会在下一步单独确认后由管理员 helper 移到当前用户的废纸篓。卸载器会先停止相关启动项并请求应用正常退出。")
                 .foregroundStyle(.secondary)
+            if protectedCount > 0 {
+                Label("其中 \(protectedCount) 项需要管理员权限并会移到废纸篓。", systemImage: "lock.trianglebadge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             if uninstaller.requiresRestart {
                 Label("检测到系统级后台服务；本版本不会强制停止 root 进程，卸载后可能需要重新启动。", systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -403,6 +383,23 @@ struct UninstallerSettingsView: View {
             get: { uninstaller.phase == .awaitingForceQuit },
             set: { _ in }
         )
+    }
+
+    private var protectedCleanupPresented: Binding<Bool> {
+        Binding(
+            get: {
+                if case .awaitingProtectedConfirmation = uninstaller.phase { return true }
+                return false
+            },
+            set: { _ in }
+        )
+    }
+
+    private var protectedCleanupMessage: String {
+        if case let .awaitingProtectedConfirmation(count, bytes) = uninstaller.phase {
+            return "发现 \(count) 项受系统保护的文件，共 \(uninstallByteString(bytes))。这些项目将由管理员 helper 严格校验后移到当前用户的废纸篓；普通用户文件也会移到废纸篓。"
+        }
+        return "部分项目需要管理员权限并会移到废纸篓。"
     }
 
     private var forceQuitMessage: String {

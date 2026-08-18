@@ -14,11 +14,19 @@
 			remoteGlobalIDString = C9A750B23011AA1900A888B2;
 			remoteInfo = EasyMacTool;
 		};
+		D10000000000000000000007 /* Helper dependency proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C9A750AB3011AA1900A888B2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D100000000000000000000B2;
+			remoteInfo = EasyMacToolPrivilegedHelper;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* EasyMacToolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EasyMacToolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C9A750B33011AA1900A888B2 /* EasyMacTool.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EasyMacTool.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10000000000000000000001 /* EasyMacToolPrivilegedHelper */ = {isa = PBXFileReference; explicitFileType = compiled.mach-o.executable; includeInIndex = 0; path = EasyMacToolPrivilegedHelper; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -29,6 +37,15 @@
 				Info.plist,
 			);
 			target = C9A750B23011AA1900A888B2 /* EasyMacTool */;
+		};
+		D1000000000000000000000D /* Exceptions for helper folder */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+				EasyMacToolPrivilegedHelper.entitlements,
+				com.easy.EasyMacTool.PrivilegedHelper.plist,
+			);
+			target = D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -44,6 +61,14 @@
 				C9A750D23011AA1900A888B2 /* Exceptions for "EasyMacTool" folder in "EasyMacTool" target */,
 			);
 			path = EasyMacTool;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000002 /* EasyMacToolPrivilegedHelper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D1000000000000000000000D /* Exceptions for helper folder */,
+			);
+			path = EasyMacToolPrivilegedHelper;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -63,6 +88,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D10000000000000000000003 /* Helper Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -71,6 +103,7 @@
 			children = (
 				C9A750B53011AA1900A888B2 /* EasyMacTool */,
 				A20000000000000000000002 /* EasyMacToolTests */,
+				D10000000000000000000002 /* EasyMacToolPrivilegedHelper */,
 				C9A750B43011AA1900A888B2 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -80,6 +113,7 @@
 			children = (
 				C9A750B33011AA1900A888B2 /* EasyMacTool.app */,
 				A20000000000000000000001 /* EasyMacToolTests.xctest */,
+				D10000000000000000000001 /* EasyMacToolPrivilegedHelper */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -118,10 +152,12 @@
 				C9A750B03011AA1900A888B2 /* Frameworks */,
 				C9A750B13011AA1900A888B2 /* Resources */,
 				C9A750D73011AA1900A888B2 /* Inject AppIcon */,
+				D100000000000000000000D7 /* Embed privileged helper */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				D10000000000000000000008 /* Build helper before app */,
 			);
 			fileSystemSynchronizedGroups = (
 				C9A750B53011AA1900A888B2 /* EasyMacTool */,
@@ -132,6 +168,27 @@
 			productName = EasyMacTool;
 			productReference = C9A750B33011AA1900A888B2 /* EasyMacTool.app */;
 			productType = "com.apple.product-type.application";
+		};
+		D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D1000000000000000000000B /* Build configuration list for helper */;
+			buildPhases = (
+				D10000000000000000000004 /* Helper Sources */,
+				D10000000000000000000003 /* Helper Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D10000000000000000000002 /* EasyMacToolPrivilegedHelper */,
+			);
+			name = EasyMacToolPrivilegedHelper;
+			packageProductDependencies = (
+			);
+			productName = EasyMacToolPrivilegedHelper;
+			productReference = D10000000000000000000001 /* EasyMacToolPrivilegedHelper */;
+			productType = "com.apple.product-type.tool";
 		};
 /* End PBXNativeTarget section */
 
@@ -148,6 +205,9 @@
 						TestTargetID = C9A750B23011AA1900A888B2;
 					};
 					C9A750B23011AA1900A888B2 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					D100000000000000000000B2 = {
 						CreatedOnToolsVersion = 26.6;
 					};
 				};
@@ -169,6 +229,7 @@
 			targets = (
 				C9A750B23011AA1900A888B2 /* EasyMacTool */,
 				A20000000000000000000006 /* EasyMacToolTests */,
+				D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */,
 			);
 		};
 /* End PBXProject section */
@@ -213,6 +274,29 @@
 			shellPath = /bin/sh;
 			shellScript = "# Compile Assets.xcassets manually — PBXFileSystemSynchronizedRootGroup\n# does NOT trigger actool, so Assets.car is never generated and macOS shows\n# the generic app icon (modern macOS 11+ requires CFBundleIconName pointing\n# at an asset catalog entry).\n#\n# We run actool ourselves to produce:\n#   - Assets.car  (referenced by CFBundleIconName = AppIcon)\n#   - AppIcon.icns (referenced by CFBundleIconFile = AppIcon, legacy fallback)\n# INFOPLIST_KEY_CFBundleIconName=AppIcon in build settings injects the key.\nset -e\nAPP=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app\"\nRES=\"${APP}/Contents/Resources\"\nOUT=\"${TMPDIR}/actool_out\"\nrm -rf \"$OUT\"; mkdir -p \"$OUT\"\nactool \\\n  --output-format human-readable-text \\\n  --output-partial-info-plist \"${OUT}/partial-info.plist\" \\\n  --app-icon AppIcon \\\n  --target-device mac \\\n  --platform macosx \\\n  --minimum-deployment-target \"${MACOSX_DEPLOYMENT_TARGET}\" \\\n  --compile \"$OUT\" \\\n  \"${SRCROOT}/EasyMacTool/Assets.xcassets\" >/dev/null\n# Inject the compiled Assets.car and AppIcon.icns into the app bundle.\ncp \"${OUT}/Assets.car\" \"${RES}/Assets.car\"\ncp \"${OUT}/AppIcon.icns\" \"${RES}/AppIcon.icns\"\necho \"[InjectAppIcon] Assets.car ($(stat -f%z \"${RES}/Assets.car\") bytes) + AppIcon.icns ($(stat -f%z \"${RES}/AppIcon.icns\") bytes) injected\"\n";
 		};
+		D100000000000000000000D7 /* Embed privileged helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/EasyMacToolPrivilegedHelper",
+				"$(SRCROOT)/EasyMacToolPrivilegedHelper/com.easy.EasyMacTool.PrivilegedHelper.plist",
+			);
+			name = "Embed privileged helper";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/Library/LaunchDaemons/EasyMacToolPrivilegedHelper",
+				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/Library/LaunchDaemons/com.easy.EasyMacTool.PrivilegedHelper.plist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nAPP=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app\"\nHELPER_DIR=\"${APP}/Contents/Library/LaunchDaemons\"\nmkdir -p \"$HELPER_DIR\"\ncp \"${BUILT_PRODUCTS_DIR}/EasyMacToolPrivilegedHelper\" \"${HELPER_DIR}/EasyMacToolPrivilegedHelper\"\ncp \"${SRCROOT}/EasyMacToolPrivilegedHelper/com.easy.EasyMacTool.PrivilegedHelper.plist\" \"${HELPER_DIR}/com.easy.EasyMacTool.PrivilegedHelper.plist\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -230,6 +314,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D10000000000000000000004 /* Helper Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -237,6 +328,11 @@
 			isa = PBXTargetDependency;
 			target = C9A750B23011AA1900A888B2 /* EasyMacTool */;
 			targetProxy = A20000000000000000000007 /* PBXContainerItemProxy */;
+		};
+		D10000000000000000000008 /* Build helper before app */ = {
+			isa = PBXTargetDependency;
+			target = D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */;
+			targetProxy = D10000000000000000000007 /* Helper dependency proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -459,6 +555,39 @@
 			};
 			name = Release;
 		};
+		D10000000000000000000009 /* Helper Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EasyMacToolPrivilegedHelper/EasyMacToolPrivilegedHelper.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EasyMacToolPrivilegedHelper/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.easy.EasyMacTool.PrivilegedHelper;
+				PRODUCT_NAME = EasyMacToolPrivilegedHelper;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		D1000000000000000000000A /* Helper Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EasyMacToolPrivilegedHelper/EasyMacToolPrivilegedHelper.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EasyMacToolPrivilegedHelper/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.easy.EasyMacTool.PrivilegedHelper;
+				PRODUCT_NAME = EasyMacToolPrivilegedHelper;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -485,6 +614,15 @@
 			buildConfigurations = (
 				C9A750BF3011AA1A00A888B2 /* Debug */,
 				C9A750C03011AA1A00A888B2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D1000000000000000000000B /* Build configuration list for helper */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D10000000000000000000009 /* Helper Debug */,
+				D1000000000000000000000A /* Helper Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -1,4 +1,3 @@
-import CoreServices
 import Darwin
 import Foundation
 import Testing
@@ -11,6 +10,7 @@ struct UninstallerSupportTests {
         #expect(UninstallerSupport.verifiedBundleID("Tool") == nil)
         #expect(UninstallerSupport.verifiedBundleID("../Library") == nil)
         #expect(UninstallerSupport.verifiedBundleID("com..example") == nil)
+        #expect(UninstallerSupport.verifiedBundleID("com.apple") == nil)
         #expect(UninstallerSupport.verifiedBundleID("com.apple.Safari") == nil)
     }
 
@@ -43,31 +43,19 @@ struct UninstallerSupportTests {
         #expect(UninstallerSupport.fileIdentity(at: file) != original)
     }
 
-    @Test func finderAutomationStatusMapsConsentAndDenial() {
-        #expect(FinderAutomationAuthorization.status(for: noErr) == .granted)
-        #expect(FinderAutomationAuthorization.status(
-            for: OSStatus(errAEEventWouldRequireUserConsent)
-        ) == .notDetermined)
-        #expect(FinderAutomationAuthorization.status(
-            for: OSStatus(errAEEventNotPermitted)
-        ) == .denied)
-        #expect(FinderAutomationAuthorization.status(for: -9999) == .unavailable)
-    }
-
-    @Test func finderEscalationOnlyAppliesToPermissionErrors() {
-        #expect(AppUninstaller.requiresFinderAuthorization(
-            for: NSError(domain: NSCocoaErrorDomain,
-                         code: CocoaError.Code.fileWriteNoPermission.rawValue)
+    @Test func protectedRootsRequirePrivilegedCleanup() throws {
+        let userFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EasyMacTool-user-owned-(UUID().uuidString)")
+        try Data().write(to: userFile)
+        defer { try? FileManager.default.removeItem(at: userFile) }
+        #expect(UninstallerSupport.requiresPrivilege(
+            at: URL(fileURLWithPath: "/Applications/Example.app")
         ))
-        #expect(AppUninstaller.requiresFinderAuthorization(
-            for: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))
+        #expect(UninstallerSupport.requiresPrivilege(
+            at: URL(fileURLWithPath: "/Library/Application Support/com.example.Tool")
         ))
-        #expect(!AppUninstaller.requiresFinderAuthorization(
-            for: NSError(domain: NSCocoaErrorDomain,
-                         code: CocoaError.Code.fileNoSuchFile.rawValue)
-        ))
-        #expect(!AppUninstaller.requiresFinderAuthorization(
-            for: NSError(domain: NSPOSIXErrorDomain, code: Int(EBUSY))
+        #expect(!UninstallerSupport.requiresPrivilege(
+            at: userFile
         ))
     }
 

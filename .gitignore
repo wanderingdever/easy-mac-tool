@@ -45,6 +45,8 @@ com.apple.DeveloperTools/
 # Code review reports (internal documents)
 code-review-*.md
 CODE_REVIEW_REPORT*.md
+VORSSAINT_UNINSTALLER_REVIEW.md
+VORSSAINT_*.md
 
 # Other editors' workspace configs
 .zcode/

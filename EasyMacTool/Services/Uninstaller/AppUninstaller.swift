@@ -13,10 +13,10 @@ final class AppUninstaller: ObservableObject {
         case empty
         case scanning
         case results
+        case awaitingProtectedConfirmation(count: Int, bytes: Int64)
         case stopping
         case awaitingForceQuit
         case removing
-        case awaitingFinderAuthorization(freed: Int64, pending: Int)
         case done(freed: Int64, failed: Int)
     }
 
@@ -75,6 +75,14 @@ final class AppUninstaller: ObservableObject {
         let items: [Leftover]
         let allowedPaths: Set<String>
         let targetURL: URL
+
+        var protectedItems: [Leftover] {
+            items.filter { UninstallerSupport.requiresPrivilege(at: $0.url) }
+        }
+
+        var userItems: [Leftover] {
+            items.filter { !UninstallerSupport.requiresPrivilege(at: $0.url) }
+        }
     }
 
     @Published private(set) var phase: Phase = .empty
@@ -88,7 +96,6 @@ final class AppUninstaller: ObservableObject {
     private var relatedLaunchItems: [UninstallerRuntimeSupport.LaunchItem] = []
     private var stoppedLaunchItems: [UninstallerRuntimeSupport.LaunchItem] = []
     private var pendingRemovalPlan: RemovalPlan?
-    private var pendingFinderItems: [Leftover] = []
     private var accumulatedFreed: Int64 = 0
     private var accumulatedFailures: [RemovalFailure] = []
 
@@ -120,7 +127,6 @@ final class AppUninstaller: ObservableObject {
         relatedLaunchItems = []
         stoppedLaunchItems = []
         pendingRemovalPlan = nil
-        pendingFinderItems = []
         accumulatedFreed = 0
         accumulatedFailures = []
         requiresRestart = false
@@ -155,7 +161,6 @@ final class AppUninstaller: ObservableObject {
         relatedLaunchItems = []
         stoppedLaunchItems = []
         pendingRemovalPlan = nil
-        pendingFinderItems = []
         accumulatedFreed = 0
         accumulatedFailures = []
         requiresRestart = false
@@ -193,8 +198,33 @@ final class AppUninstaller: ObservableObject {
         pendingRemovalPlan = plan
         accumulatedFreed = 0
         accumulatedFailures = initialFailures
-        pendingFinderItems = []
         removalFailures = []
+        if !plan.protectedItems.isEmpty {
+            phase = .awaitingProtectedConfirmation(
+                count: plan.protectedItems.count,
+                bytes: plan.protectedItems.reduce(0) { $0 + $1.size }
+            )
+        } else {
+            beginRemoval(plan)
+        }
+    }
+
+    func confirmProtectedCleanup() {
+        guard case .awaitingProtectedConfirmation = phase,
+              let plan = pendingRemovalPlan else { return }
+        beginRemoval(plan)
+    }
+
+    func cancelProtectedCleanup() {
+        guard case .awaitingProtectedConfirmation = phase else { return }
+        pendingRemovalPlan = nil
+        accumulatedFailures = []
+        removalFailures = []
+        phase = .results
+    }
+
+    private func beginRemoval(_ plan: RemovalPlan) {
+        phase = .stopping
         Task { @MainActor [weak self] in
             await self?.prepareForRemoval(plan)
         }
@@ -244,44 +274,23 @@ final class AppUninstaller: ObservableObject {
         }
     }
 
-    func retryFinderRemoval() {
-        guard case .awaitingFinderAuthorization = phase,
-              let plan = pendingRemovalPlan,
-              !pendingFinderItems.isEmpty else { return }
-        phase = .removing
-        Task { @MainActor [weak self] in
-            await self?.performFinderRemoval(plan: plan, candidates: self?.pendingFinderItems ?? [])
-        }
-    }
-
-    func finishWithoutFinderRetry() {
-        guard case .awaitingFinderAuthorization = phase,
-              let plan = pendingRemovalPlan else { return }
-        accumulatedFailures.append(contentsOf: pendingFinderItems.map {
-            RemovalFailure(url: $0.url, reason: "未授予 Finder 自动化权限，项目未移除")
-        })
-        pendingFinderItems = []
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let appStillExists = FileManager.default.fileExists(atPath: plan.targetURL.path)
-            await self.restoreStoppedLaunchItemsIfNeeded(appStillExists: appStillExists)
-            self.finishRemoval(targetURL: plan.targetURL)
-        }
-    }
-
     private func prepareForRemoval(_ plan: RemovalPlan) async {
         guard phase == .stopping else { return }
-        let launchItems = relatedLaunchItems
+        // System/shared launch items are stopped by the privileged helper so
+        // the normal-user phase does not produce duplicate permission errors.
+        let launchItems = relatedLaunchItems.filter {
+            !UninstallerSupport.requiresPrivilege(at: $0.url)
+        }
         let uid = getuid()
         let stopResults = await Task.detached(priority: .userInitiated) {
-            launchItems.compactMap { item -> (
+            launchItems.map { item -> (
                 UninstallerRuntimeSupport.LaunchItem,
                 UninstallerRuntimeSupport.BootoutDisposition,
                 String
-            )? in
+            ) in
                 guard let arguments = UninstallerRuntimeSupport.bootoutArguments(for: item, uid: uid),
                       UninstallerSupport.fileIdentity(at: item.url) == item.identity else {
-                    return nil
+                    return (item, .failed, "启动项身份、类型或路径校验失败")
                 }
                 let result = UninstallerRuntimeSupport.runLaunchctl(arguments: arguments)
                 return (item,
@@ -291,10 +300,19 @@ final class AppUninstaller: ObservableObject {
         }.value
         guard phase == .stopping else { return }
         stoppedLaunchItems = stopResults.filter { $0.1 == .stopped }.map(\.0)
-        accumulatedFailures.append(contentsOf: stopResults.filter { $0.1 == .failed }.map {
+        let failedStops = stopResults.filter { $0.1 == .failed }
+        accumulatedFailures.append(contentsOf: failedStops.map {
             RemovalFailure(url: $0.0.url,
                            reason: "无法停止启动项：\($0.2.isEmpty ? "launchctl 返回错误" : $0.2)")
         })
+        // Do not remove an application while a verified user launch item could
+        // still relaunch it. Restore any items stopped earlier in this batch and
+        // leave the selected files in place for an explicit retry.
+        if !failedStops.isEmpty {
+            await restoreStoppedLaunchItemsIfNeeded(appStillExists: true)
+            finishRemoval(targetURL: plan.targetURL)
+            return
+        }
 
         let components = Self.runningComponents(
             appURL: plan.targetURL,
@@ -318,159 +336,94 @@ final class AppUninstaller: ObservableObject {
         phase = .removing
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await Task.detached(priority: .userInitiated) {
-                Self.moveDirectlyToTrash(plan: plan)
-            }.value
+            let result = await Self.recycleUserItems(plan.userItems)
             guard self.phase == .removing else { return }
             self.accumulatedFreed += result.freed
             self.accumulatedFailures.append(contentsOf: result.failures)
-            if result.finderCandidates.isEmpty {
+            if plan.protectedItems.isEmpty {
                 let appStillExists = FileManager.default.fileExists(atPath: plan.targetURL.path)
                 await self.restoreStoppedLaunchItemsIfNeeded(appStillExists: appStillExists)
                 self.finishRemoval(targetURL: plan.targetURL)
             } else {
-                await self.performFinderRemoval(plan: plan, candidates: result.finderCandidates)
+                await self.performProtectedCleanup(plan)
             }
         }
     }
 
-    nonisolated private static func moveDirectlyToTrash(plan: RemovalPlan) -> (
+    nonisolated private static func recycleUserItems(_ items: [Leftover]) async -> (
         freed: Int64,
-        finderCandidates: [Leftover],
         failures: [RemovalFailure]
     ) {
-        let fm = FileManager.default
-        var freed: Int64 = 0
-        var stubborn: [Leftover] = []
-        var failures: [RemovalFailure] = []
-        for item in plan.items {
-            guard Self.removalIsStillSafe(item,
-                                          allowedPaths: plan.allowedPaths,
-                                          targetURL: plan.targetURL) else {
-                failures.append(RemovalFailure(url: item.url,
-                                               reason: "删除前文件身份或路径发生变化"))
-                continue
-            }
-            do {
-                try fm.trashItem(at: item.url, resultingItemURL: nil)
-                freed += item.size
-            } catch {
-                if requiresFinderAuthorization(for: error) {
-                    stubborn.append(item)
-                } else {
-                    failures.append(RemovalFailure(
-                        url: item.url,
-                        reason: removalErrorMessage(error)
-                    ))
+        guard !items.isEmpty else { return (0, []) }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                let urls = items.map(\.url)
+                NSWorkspace.shared.recycle(urls) { moved, error in
+                    let movedPaths = Set(moved.keys.map { $0.standardizedFileURL.path })
+                    var freed: Int64 = 0
+                    var failures: [RemovalFailure] = []
+                    for item in items {
+                        if movedPaths.contains(item.url.standardizedFileURL.path)
+                            || !FileManager.default.fileExists(atPath: item.url.path) {
+                            freed += item.size
+                        } else {
+                            failures.append(RemovalFailure(
+                                url: item.url,
+                                reason: error?.localizedDescription ?? "无法移至废纸篓"
+                            ))
+                        }
+                    }
+                    continuation.resume(returning: (freed, failures))
                 }
             }
         }
-
-        // Items we lack rights for go through Finder, which shows the
-        // administrator prompt and moves them to the Trash like a drag.
-        let finderCandidates = stubborn.filter {
-            Self.removalIsStillSafe($0,
-                                    allowedPaths: plan.allowedPaths,
-                                    targetURL: plan.targetURL)
-        }
-        let finderCandidateIDs = Set(finderCandidates.map(\.id))
-        for item in stubborn where !finderCandidateIDs.contains(item.id) {
-            failures.append(RemovalFailure(url: item.url,
-                                           reason: "请求 Finder 前文件身份或路径发生变化"))
-        }
-        return (freed, finderCandidates, failures)
     }
 
-    /// Finder is only an escalation path for an explicit permission failure.
-    /// Treating every `trashItem` error as an Apple Event problem hides useful
-    /// diagnostics such as a missing path or a file that changed underneath us.
-    nonisolated static func requiresFinderAuthorization(for error: Error) -> Bool {
-        let nsError = error as NSError
-        if nsError.domain == NSCocoaErrorDomain {
-            return nsError.code == CocoaError.Code.fileWriteNoPermission.rawValue
-                || nsError.code == CocoaError.Code.fileReadNoPermission.rawValue
+    private func performProtectedCleanup(_ plan: RemovalPlan) async {
+        let protected = plan.protectedItems
+        let protectedPaths = Set(protected.map { $0.url.standardizedFileURL.path })
+        let launchItems = relatedLaunchItems.compactMap { launchItem -> PrivilegedCleanupWire.LaunchItem? in
+            guard protectedPaths.contains(launchItem.url.standardizedFileURL.path) else { return nil }
+            let item = PrivilegedCleanupWire.Item(
+                path: launchItem.url.standardizedFileURL.path,
+                identity: .init(device: launchItem.identity.device,
+                                 inode: launchItem.identity.inode,
+                                 fileType: launchItem.identity.fileType),
+                kind: "launchItem"
+            )
+            return .init(item: item,
+                         label: launchItem.label,
+                         launchKind: String(describing: launchItem.kind))
         }
-        if nsError.domain == NSPOSIXErrorDomain {
-            return nsError.code == Int(EACCES) || nsError.code == Int(EPERM)
-        }
-        return false
-    }
-
-    nonisolated private static func removalErrorMessage(_ error: Error) -> String {
-        let nsError = error as NSError
-        if nsError.domain == NSCocoaErrorDomain {
-            switch nsError.code {
-            case CocoaError.Code.fileNoSuchFile.rawValue:
-                return "项目已不存在"
-            default:
-                break
-            }
-        }
-        if nsError.domain == NSPOSIXErrorDomain, nsError.code == Int(EBUSY) {
-            return "项目正在使用，无法移至废纸篓"
-        }
-        return "移至废纸篓失败：\(nsError.localizedDescription)"
-    }
-
-    private func performFinderRemoval(plan: RemovalPlan, candidates: [Leftover]) async {
-        let validCandidates = candidates.filter {
-            Self.removalIsStillSafe($0,
-                                    allowedPaths: plan.allowedPaths,
-                                    targetURL: plan.targetURL)
-        }
-        let validIDs = Set(validCandidates.map(\.id))
-        accumulatedFailures.append(contentsOf: candidates.filter { !validIDs.contains($0.id) }.map {
-            RemovalFailure(url: $0.url, reason: "重试前文件身份或路径发生变化")
-        })
-        guard !validCandidates.isEmpty else {
-            pendingFinderItems = []
-            let appStillExists = FileManager.default.fileExists(atPath: plan.targetURL.path)
-            await restoreStoppedLaunchItemsIfNeeded(appStillExists: appStillExists)
-            finishRemoval(targetURL: plan.targetURL)
-            return
-        }
-
-        let authorization = await FinderAutomationAuthorization.requestPermission()
+        let request = PrivilegedCleanupWire.Request(
+            version: PrivilegedCleanupWire.protocolVersion,
+            appPath: plan.targetURL.standardizedFileURL.path,
+            bundleID: target?.bundleID ?? "",
+            bundleIDs: relatedBundleIDs.sorted(),
+            uid: UInt32(getuid()),
+            items: protected.map { item in
+                .init(path: item.url.standardizedFileURL.path,
+                      identity: .init(device: item.identity.device,
+                                      inode: item.identity.inode,
+                                      fileType: item.identity.fileType),
+                      kind: String(describing: item.category))
+            },
+            launchItems: launchItems
+        )
+        let response = await PrivilegedCleanupClient.perform(request)
         guard phase == .removing else { return }
-        guard authorization == .granted else {
-            pendingFinderItems = validCandidates
-            phase = .awaitingFinderAuthorization(
-                freed: accumulatedFreed,
-                pending: validCandidates.count
-            )
-            return
-        }
-
-        let finderError = await Task.detached(priority: .userInitiated) {
-            Self.trashViaFinder(validCandidates.map(\.url))
-        }.value
-        guard phase == .removing else { return }
-        let fm = FileManager.default
-        var remaining: [Leftover] = []
-        for item in validCandidates {
-            if fm.fileExists(atPath: item.url.path) {
-                remaining.append(item)
-            } else {
-                accumulatedFreed += item.size
-            }
-        }
-
-        if !remaining.isEmpty, finderError?.number == Int(errAEEventNotPermitted) {
-            pendingFinderItems = remaining
-            phase = .awaitingFinderAuthorization(
-                freed: accumulatedFreed,
-                pending: remaining.count
-            )
-            return
-        }
-        accumulatedFailures.append(contentsOf: remaining.map {
-            RemovalFailure(
-                url: $0.url,
-                reason: finderError?.message ?? "Finder 未移动该项目，可能已取消管理员验证"
-            )
+        accumulatedFreed += response.results.filter(\.removed).reduce(0) { $0 + $1.bytes }
+        accumulatedFailures.append(contentsOf: response.results.filter { !$0.removed }.map {
+            RemovalFailure(url: URL(fileURLWithPath: $0.path),
+                           reason: $0.error ?? "管理员清理失败")
         })
-        pendingFinderItems = []
-        let appStillExists = fm.fileExists(atPath: plan.targetURL.path)
+        accumulatedFailures.append(contentsOf: response.launchErrors.map {
+            RemovalFailure(url: plan.targetURL, reason: $0)
+        })
+        if let fatalError = response.fatalError, response.results.isEmpty {
+            accumulatedFailures.append(RemovalFailure(url: plan.targetURL, reason: fatalError))
+        }
+        let appStillExists = FileManager.default.fileExists(atPath: plan.targetURL.path)
         await restoreStoppedLaunchItemsIfNeeded(appStillExists: appStillExists)
         finishRemoval(targetURL: plan.targetURL)
     }
@@ -505,12 +458,17 @@ final class AppUninstaller: ObservableObject {
                 continue
             }
             let isInsideApp = UninstallerRuntimeSupport.isEligibleProcess(identity, appURL: appURL)
+            // A matching bundle identifier is not sufficient authorization to
+            // terminate an executable outside the selected bundle. Such a
+            // process may be a separately installed helper or an unrelated
+            // process that reused the identifier.
+            guard isInsideApp else { continue }
             componentsByPID[identity.pid] = RunningComponent(
                 pid: identity.pid,
                 name: app.localizedName
                     ?? URL(fileURLWithPath: identity.executablePath).lastPathComponent,
                 identity: identity,
-                allowsExternalPath: !isInsideApp
+                allowsExternalPath: false
             )
         }
 
@@ -613,7 +571,6 @@ final class AppUninstaller: ObservableObject {
     private func finishRemoval(targetURL: URL) {
         let applicationWasRemoved = !FileManager.default.fileExists(atPath: targetURL.path)
         items = []
-        pendingFinderItems = []
         runningComponents = []
         removalFailures = accumulatedFailures
         phase = .done(freed: accumulatedFreed, failed: accumulatedFailures.count)
@@ -621,43 +578,6 @@ final class AppUninstaller: ObservableObject {
         if applicationWasRemoved {
             InstalledAppsCatalog.shared.removeApplication(at: targetURL)
         }
-    }
-
-    /// Asks Finder to trash `urls` in one batch via in-process Apple Events.
-    /// Finder owns the privilege elevation (the administrator prompt); a cancel
-    /// simply leaves the items in place.
-    nonisolated private struct FinderError: Sendable {
-        let number: Int?
-        let message: String
-    }
-
-    nonisolated private static func trashViaFinder(_ urls: [URL]) -> FinderError? {
-        guard !urls.isEmpty else { return nil }
-        let targets = urls
-            .map { "set end of targets to POSIX file \(literal($0.path))" }
-            .joined(separator: "\n")
-        let source = """
-        set targets to {}
-        \(targets)
-        tell application "Finder" to delete targets
-        """
-        guard let script = NSAppleScript(source: source) else {
-            return FinderError(number: nil, message: "无法创建 Finder 删除请求")
-        }
-        var errorInfo: NSDictionary?
-        _ = script.executeAndReturnError(&errorInfo)
-        guard let errorInfo else { return nil }
-        let message = errorInfo[NSAppleScript.errorMessage] as? String
-        let number = errorInfo[NSAppleScript.errorNumber] as? Int
-        return FinderError(number: number,
-                           message: message.map { "Finder 错误 \(number ?? 0)：\($0)" }
-                               ?? "Finder 拒绝了删除请求")
-    }
-
-    nonisolated private static func literal(_ s: String) -> String {
-        let escaped = s.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
     }
 
     // MARK: - Scanning

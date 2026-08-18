@@ -16,7 +16,6 @@ struct PermissionsSettingsView: View {
     // SwiftUI 重绘，所以用 @State 显式持有并定时更新。
     @State private var accessibilityGranted = AccessibilityChecker.isTrusted
     @State private var screenRecordingGranted = AccessibilityChecker.isScreenRecordingTrusted
-    @State private var finderAutomationStatus: FinderAutomationAuthorization.Status = .unavailable
 
     var body: some View {
         ScrollView {
@@ -92,7 +91,6 @@ struct PermissionsSettingsView: View {
                 onRequest: requestScreenRecording,
                 settingsURL: "x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_ScreenCapture"
             )
-            finderAutomationRow
             keychainInformationRow
             // 输入监控（Input Monitoring）已移除：app 使用 .defaultTap 的
             // CGEventTap，运行时只需辅助功能权限（AX 是 IM 的超集，AX 授权
@@ -170,47 +168,6 @@ struct PermissionsSettingsView: View {
         .accessibilityHint(description)
     }
 
-    private var finderAutomationRow: some View {
-        HStack(alignment: .top, spacing: DesignTokens.Settings.permCardGap) {
-            AuroraIconChip(systemName: "folder.badge.gearshape", size: 34)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text("Finder 自动化")
-                        .scaledSystemFont(DesignTokens.SettingsTypography.permTitle,
-                                          weight: .semibold)
-                        .foregroundStyle(.primary)
-                    statusPill(finderAutomationGranted)
-                }
-                Text("仅在卸载需要管理员权限的应用或残留文件时，让 Finder 将已确认项目移至废纸篓。")
-                    .scaledSystemFont(DesignTokens.SettingsTypography.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: DesignTokens.Settings.permActionsGap + 2) {
-                    Button("请求权限") {
-                        requestFinderAutomation()
-                    }
-                    .buttonStyle(AuroraPrimaryButtonStyle())
-                    borderlessLinkButton("打开系统设置") {
-                        NSWorkspace.shared.open(FinderAutomationAuthorization.settingsURL)
-                    }
-                }
-                .padding(.top, DesignTokens.Settings.permActionsTop)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .auroraSettingsCard()
-    }
-
-    private var finderAutomationGranted: Bool? {
-        switch finderAutomationStatus {
-        case .granted: true
-        case .denied: false
-        case .notDetermined, .unavailable: nil
-        }
-    }
-
     /// 状态胶囊：已授权 = 绿底白字 check；未授权 = 红底白字叹号；
     /// 未知 = 灰底问号。替代原来孤立的 20pt 状态图标，语义更明确。
     private func statusPill(_ granted: Bool?) -> some View {
@@ -277,11 +234,6 @@ struct PermissionsSettingsView: View {
     private func refreshPermissionStatus() {
         accessibilityGranted = AccessibilityChecker.isTrusted
         screenRecordingGranted = AccessibilityChecker.isScreenRecordingTrusted
-        Task {
-            finderAutomationStatus = await Task.detached(priority: .utility) {
-                FinderAutomationAuthorization.currentStatus()
-            }.value
-        }
     }
 
     private func requestAccessibility() {
@@ -303,15 +255,6 @@ struct PermissionsSettingsView: View {
                 Self.logger.info("SCShareableContent.current succeeded — app registered for Screen Recording")
             } catch {
                 Self.logger.info("SCShareableContent.current threw (expected if not authorized): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    private func requestFinderAutomation() {
-        Task {
-            finderAutomationStatus = await FinderAutomationAuthorization.requestPermission()
-            if finderAutomationStatus == .denied {
-                NSWorkspace.shared.open(FinderAutomationAuthorization.settingsURL)
             }
         }
     }
