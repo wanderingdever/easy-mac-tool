@@ -48,3 +48,7 @@ CODE_REVIEW_REPORT*.md
 
 # Other editors' workspace configs
 .zcode/
+
+# LLVM coverage artifacts
+*.profraw
+default.profraw

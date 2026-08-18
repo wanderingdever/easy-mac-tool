@@ -26,9 +26,8 @@ private enum UninstallerIconCache {
 /// 卸载器设置页（Aurora v2）：拖入或选择 .app，查看残留文件并移至废纸篓。
 struct UninstallerSettingsView: View {
     @ObservedObject private var uninstaller = AppUninstaller.shared
-    @State private var apps: [InstalledApps.InstalledApp] = []
+    @ObservedObject private var appCatalog = InstalledAppsCatalog.shared
     @State private var appQuery = ""
-    @State private var isScanningApps = false
     @State private var showingRemovalConfirmation = false
 
     var body: some View {
@@ -62,16 +61,23 @@ struct UninstallerSettingsView: View {
                     .scaledSystemFont(12, relativeTo: .caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(action: refreshApps) {
+                if appCatalog.isDiscovering || appCatalog.isMeasuringSizes {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text(appCatalog.isDiscovering ? "正在查找应用…" : "正在计算大小…")
+                            .scaledSystemFont(11, relativeTo: .caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                Button(action: appCatalog.refresh) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("刷新应用列表")
-                if isScanningApps {
-                    ProgressView().controlSize(.small)
-                }
+                .accessibilityLabel("刷新应用列表")
             }
             TextField("搜索应用…", text: $appQuery)
                 .textFieldStyle(.roundedBorder)
@@ -83,7 +89,7 @@ struct UninstallerSettingsView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear(perform: loadAppsIfNeeded)
+        .onAppear { appCatalog.loadIfNeeded() }
         .dropDestination(for: URL.self) { urls, _ in
             guard let app = urls.first(where: { $0.pathExtension == "app" }) ?? urls.first else { return false }
             uninstaller.select(appURL: app)
@@ -93,10 +99,7 @@ struct UninstallerSettingsView: View {
 
     /// 可卸载的非系统应用：排除本应用自身与符号链接。
     private var uninstallableApps: [InstalledApps.InstalledApp] {
-        apps.filter { app in
-            app.url.standardizedFileURL != Bundle.main.bundleURL.standardizedFileURL
-                && !Self.isSymbolicLink(app.url)
-        }
+        appCatalog.apps
     }
 
     private var filteredApps: [InstalledApps.InstalledApp] {
@@ -111,10 +114,10 @@ struct UninstallerSettingsView: View {
     @ViewBuilder
     private var appList: some View {
         let shown = filteredApps
-        if isScanningApps && apps.isEmpty {
+        if appCatalog.isDiscovering && appCatalog.apps.isEmpty {
             VStack(spacing: 8) {
                 ProgressView()
-                Text("正在扫描应用…").scaledSystemFont(13).foregroundStyle(.secondary)
+                Text("正在查找应用…").scaledSystemFont(13).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .frame(maxHeight: .infinity)
@@ -139,33 +142,6 @@ struct UninstallerSettingsView: View {
                 .padding(.vertical, 3)
             }
         }
-    }
-
-    private func loadAppsIfNeeded() {
-        guard apps.isEmpty, !isScanningApps else { return }
-        performLoad()
-    }
-
-    /// 清空缓存并重新扫描应用列表（用于应用安装/卸载后手动刷新）。
-    private func refreshApps() {
-        InstalledApps.invalidateInstalledApplicationsCache()
-        apps = []
-        performLoad()
-    }
-
-    private func performLoad() {
-        isScanningApps = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let loaded = InstalledApps.installedApplications()
-            DispatchQueue.main.async {
-                apps = loaded
-                isScanningApps = false
-            }
-        }
-    }
-
-    private static func isSymbolicLink(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
     }
 
     // MARK: Busy
@@ -409,10 +385,19 @@ private struct UninstallableAppRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 0)
-            Text(uninstallByteString(app.sizeBytes))
-                .scaledSystemFont(11.5, relativeTo: .caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            Group {
+                if let sizeBytes = app.sizeBytes {
+                    Text(uninstallByteString(sizeBytes))
+                        .accessibilityLabel("占用存储 \(uninstallByteString(sizeBytes))")
+                } else {
+                    Text("计算中…")
+                        .accessibilityLabel("正在计算应用大小")
+                }
+            }
+            .scaledSystemFont(11.5, relativeTo: .caption)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .frame(width: 72, alignment: .trailing)
             Button("卸载", action: onUninstall)
                 .buttonStyle(.bordered)
                 .controlSize(.small)

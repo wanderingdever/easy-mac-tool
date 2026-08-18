@@ -222,11 +222,17 @@ final class AppUninstaller: ObservableObject {
                 }
             }
 
+            let applicationWasRemoved = targetURL.map {
+                !fm.fileExists(atPath: $0.path)
+            } ?? false
             DispatchQueue.main.async {
                 guard let self, self.phase == .removing else { return }
                 self.items = []
                 self.removalFailures = failures
                 self.phase = .done(freed: freed, failed: failures.count)
+                if applicationWasRemoved, let targetURL {
+                    InstalledAppsCatalog.shared.removeApplication(at: targetURL)
+                }
             }
         }
     }

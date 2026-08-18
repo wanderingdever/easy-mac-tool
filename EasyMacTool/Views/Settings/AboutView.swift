@@ -40,15 +40,6 @@ struct AboutView: View {
                 .scaledSystemFont(14)
                 .foregroundStyle(.secondary)
                 .padding(.top, 14)
-
-            // 功能 chip 行：渐变淡底 + 渐变图标 + 文字。
-            HStack(spacing: 10) {
-                featureChip(icon: "square.grid.2x2", title: "窗口切换")
-                featureChip(icon: "list.clipboard", title: "剪切板历史")
-                featureChip(icon: "keyboard", title: "全局快捷键")
-            }
-            .padding(.top, 24)
-
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
