@@ -12,32 +12,33 @@ struct WindowSwitcherSettingsView: View {
     /// 多屏幕分段的本地状态：避免直接在视图更新阶段写回 @Published 触发
     /// "Publishing changes from within view updates" 警告，改由 onChange 写回。
     @State private var displayTarget: AppSettings.DisplayTarget = .active
-    /// Tracks the proportional width of the left column. Default 0.2 (20%),
-    /// so the shortcut list is narrow and the detail editor is wide (80%).
-    @State private var splitFraction: CGFloat = 0.2
     @State private var globalRecording = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
-            globalToggleSection
-            displayTargetSection
-            shortcutSection
-        }
-        .padding(DesignTokens.Settings.contentPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(DesignTokens.Aurora.pageBackground)
-        .onAppear {
-            displayTarget = settings.displayTarget
-            selectFirstShortcutIfNeeded()
-        }
-        .onChange(of: displayTarget) { _, newValue in
-            settings.displayTarget = newValue
-        }
-        .onChange(of: selectedShortcutID) { _, newValue in
-            if newValue == nil {
-                selectedShortcutID = settings.shortcuts.first?.id
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignTokens.Settings.contentSpacing) {
+                globalToggleSection
+                displayTargetSection
+                shortcutSection
+            }
+            .padding(DesignTokens.Settings.contentPadding)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .onAppear {
+                displayTarget = settings.displayTarget
+                selectFirstShortcutIfNeeded()
+            }
+            .onChange(of: displayTarget) { _, newValue in
+                settings.displayTarget = newValue
+            }
+            .onChange(of: selectedShortcutID) { _, newValue in
+                if newValue == nil {
+                    selectedShortcutID = settings.shortcuts.first?.id
+                }
             }
         }
+        .scrollIndicators(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(DesignTokens.Aurora.pageBackground)
     }
 
     // MARK: - Global toggle
@@ -52,6 +53,24 @@ struct WindowSwitcherSettingsView: View {
                     description: "关闭后所有窗口切换快捷键将恢复系统默认行为（原生 Cmd+Tab）。",
                     isOn: $settings.windowSwitcherEnabled
                 )
+                SettingsToggleRow(
+                    title: "悬停自动选中",
+                    description: "鼠标悬停到缩略图上时直接移动键盘选中项，点击仍然立即激活。",
+                    isOn: $settings.mouseHoverSelects
+                )
+                SettingsToggleRow(
+                    title: "触控板滑动切换",
+                    description: "三指左右滑动呼出切换器；已打开时继续滑动切换选中项。",
+                    isOn: $settings.trackpadSwipeEnabled
+                )
+                Picker("展示模式", selection: $settings.switcherStyle) {
+                    ForEach(AppSettings.SwitcherStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360, alignment: .leading)
             }
         }
     }
@@ -85,42 +104,19 @@ struct WindowSwitcherSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsSectionHeader(title: "快捷键", systemImage: "keyboard")
 
-            // Custom split: left column at `splitFraction` of width, draggable
-            // divider in the middle, right column fills the rest. Default 20/80.
-            // Aurora v2：整个 split 容器是一张浮起卡片。
-            GeometryReader { geo in
-                let totalWidth = geo.size.width
-                let dividerWidth: CGFloat = 8
-                let leftWidth = max(180, min(totalWidth - 380 - dividerWidth,
-                                             totalWidth * splitFraction - dividerWidth / 2))
-                HStack(spacing: 0) {
-                    shortcutListColumn
-                        .frame(width: leftWidth)
-                    // Draggable divider
-                    Rectangle()
-                        .fill(DesignTokens.Aurora.insetSeparator)
-                        .frame(width: 1)
-                        .overlay(
-                            Rectangle()
-                                .fill(.clear)
-                                .frame(width: dividerWidth)
-                                .contentShape(Rectangle())
-                                .cursor(NSCursor.resizeLeftRight)
-                                .gesture(
-                                    DragGesture(minimumDistance: 1)
-                                        .onChanged { value in
-                                            let proposed = leftWidth + value.translation.width
-                                            let newFraction = proposed / totalWidth
-                                            splitFraction = max(0.15, min(0.6, newFraction))
-                                        }
-                                )
-                        )
-                    shortcutDetail
-                        .frame(maxWidth: .infinity)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            // 快捷键详情直接展开：右侧不再内嵌滚动视图，整页由外层
+            // ScrollView 承接，避免卡片高度被压死并出现内部滚动条。
+            HStack(spacing: 0) {
+                shortcutListColumn
+                    .frame(width: 220)
+                Rectangle()
+                    .fill(DesignTokens.Aurora.insetSeparator)
+                    .frame(width: 1)
+                shortcutDetail
+                    .frame(maxWidth: .infinity)
             }
-            .frame(minHeight: 280)
+            .frame(minHeight: 360)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .auroraSettingsCard()
         }
     }
@@ -131,6 +127,7 @@ struct WindowSwitcherSettingsView: View {
     private var shortcutListColumn: some View {
         VStack(spacing: 0) {
             shortcutList
+            Spacer(minLength: 0)
             SettingsRowDivider()
             // Toolbar with + / − buttons at the bottom, like macOS settings.
             HStack(spacing: 4) {
@@ -154,19 +151,18 @@ struct WindowSwitcherSettingsView: View {
     }
 
     private var shortcutList: some View {
-        ScrollView {
-            VStack(spacing: 4) {
-                ForEach(settings.shortcuts) { shortcut in
-                    ShortcutItemView(
-                        shortcut: shortcut,
-                        isSelected: selectedShortcutID == shortcut.id
-                    ) {
-                        selectedShortcutID = shortcut.id
-                    }
+        VStack(spacing: 4) {
+            ForEach(settings.shortcuts) { shortcut in
+                ShortcutItemView(
+                    shortcut: shortcut,
+                    isSelected: selectedShortcutID == shortcut.id
+                ) {
+                    selectedShortcutID = shortcut.id
                 }
             }
-            .padding(6)
         }
+        .padding(6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var canDeleteSelected: Bool {
@@ -332,8 +328,7 @@ struct ShortcutDetailView: View {
     @State private var axGranted = AccessibilityChecker.isTrusted
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 14) {
                 groupCard("基本信息", systemImage: "info.circle") {
                     row("名称") {
                         if shortcut.isDefault {
@@ -385,17 +380,68 @@ struct ShortcutDetailView: View {
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
                     SettingsRowDivider()
+                    Toggle("每个应用仅显示主窗口", isOn: $shortcut.showMainWindowOnly)
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
+                        .controlSize(.small)
+                    SettingsRowDivider()
+                    Picker("屏幕范围", selection: $shortcut.screensToShow) {
+                        ForEach(SwitcherScreensToShow.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360, alignment: .leading)
+                    SettingsRowDivider()
+                    Picker("标签页", selection: $shortcut.tabGrouping) {
+                        ForEach(SwitcherTabGrouping.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360, alignment: .leading)
+                    SettingsRowDivider()
+                    Picker("应用范围", selection: $shortcut.appsToShow) {
+                        ForEach(SwitcherAppsToShow.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360, alignment: .leading)
+                    SettingsRowDivider()
+                    Picker("排序方式", selection: $shortcut.windowOrder) {
+                        ForEach(SwitcherWindowOrder.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360, alignment: .leading)
+                    SettingsRowDivider()
                     Toggle("显示最小化窗口", isOn: $shortcut.showMinimized)
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
-                        .help("在切换器中显示最小化到 Dock 的窗口（显示应用图标）")
+                        .help("在切换器中显示最小化到 Dock 的窗口（显示最后已知预览或应用图标）")
                     SettingsRowDivider()
                     Toggle("显示隐藏窗口", isOn: $shortcut.showHidden)
                         .toggleStyle(.switch)
                         .tint(DesignTokens.Aurora.controlOn)
                         .controlSize(.small)
-                        .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示应用图标）")
+                        .help("在切换器中显示被 Cmd+H 隐藏的应用的窗口（显示最后已知预览或应用图标）")
+                    SettingsRowDivider()
+                    Toggle("显示全屏窗口", isOn: $shortcut.showFullscreen)
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
+                        .controlSize(.small)
+                    SettingsRowDivider()
+                    Toggle("显示无窗口应用", isOn: $shortcut.showWindowless)
+                        .toggleStyle(.switch)
+                        .tint(DesignTokens.Aurora.controlOn)
+                        .controlSize(.small)
                     if !axGranted {
                         Label("显示最小化/隐藏窗口需要『辅助功能』权限，当前未授予，开关暂不生效。",
                               systemImage: "exclamationmark.triangle.fill")
@@ -403,7 +449,7 @@ struct ShortcutDetailView: View {
                             .foregroundStyle(.orange)
                             .padding(.top, 2)
                     }
-                    Text("最小化和隐藏的窗口无法实时捕获预览，将显示应用图标和窗口标题")
+                    Text("最小化和隐藏的窗口无法实时捕获，将显示最后已知预览或应用图标和窗口标题")
                         .scaledSystemFont(DesignTokens.SettingsTypography.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
@@ -419,11 +465,11 @@ struct ShortcutDetailView: View {
                 }
             }
             .padding(10)
-        }
-        .onAppear { refreshAccessibilityStatus() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            refreshAccessibilityStatus()
-        }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onAppear { refreshAccessibilityStatus() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                refreshAccessibilityStatus()
+            }
     }
 
     /// Group card（Aurora v2）：渐变 chip 标题 + 浮起卡片。
@@ -459,23 +505,5 @@ struct ShortcutDetailView: View {
 
     private func refreshAccessibilityStatus() {
         axGranted = AccessibilityChecker.isTrusted
-    }
-}
-
-private extension View {
-    /// Applies a system cursor over the view's frame. Used for the split divider.
-    /// 使用 NSCursor.set() 替代 push()/pop()：push/pop 操作全局 cursor 栈，
-    /// 视图销毁时若 onHover(false) 未触发会导致栈不平衡，残留错误光标。
-    /// set() 直接替换当前光标，无需平衡；离开时恢复 arrow，onDisappear 兜底。
-    @ViewBuilder
-    func cursor(_ cursor: NSCursor) -> some View {
-        self.onHover { hovering in
-            if hovering {
-                cursor.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
-        .onDisappear { NSCursor.arrow.set() }
     }
 }

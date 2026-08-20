@@ -5,8 +5,8 @@ import AppKit
 /// embedded into an attributed string as a text attachment, matching the
 /// Vorssaint menu bar look.
 enum MenuBarMetricsRenderer {
-    private static let stackedFontSize: CGFloat = 9.4
-    private static let singleLineFontSize: CGFloat = 11.6
+    private static let stackedFontSize: CGFloat = 8.8
+    private static let singleLineFontSize: CGFloat = 10.5
 
     private static let blockImageCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
@@ -43,9 +43,7 @@ enum MenuBarMetricsRenderer {
         for metric in metrics {
             guard let value = valueAttributed(for: metric, snapshot: snapshot, temperatureUnit: temperatureUnit) else { continue }
             if !first {
-                result.append(compactGap())
                 result.append(verticalSeparator())
-                result.append(compactGap())
             }
             first = false
             result.append(value)
@@ -113,20 +111,20 @@ enum MenuBarMetricsRenderer {
                               value: String,
                               minimum: String,
                               pressure: MemoryPressure? = nil) -> NSAttributedString? {
-        let labelFont = NSFont.systemFont(ofSize: 6.6, weight: .medium)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .semibold)
+        let labelFont = NSFont.systemFont(ofSize: 6.2, weight: .medium)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
         let sizingLabel: [NSAttributedString.Key: Any] = [.font: labelFont]
         let sizingValue: [NSAttributedString.Key: Any] = [.font: valueFont]
         let labelSize = (label as NSString).size(withAttributes: sizingLabel)
         let valueSize = (value as NSString).size(withAttributes: sizingValue)
         let minValueSize = (minimum as NSString).size(withAttributes: sizingValue)
-        let dotDiameter: CGFloat = pressure == nil ? 0 : 4.8
-        let dotGap: CGFloat = pressure == nil || value.isEmpty ? 0 : 4
+        let dotDiameter: CGFloat = pressure == nil ? 0 : 4
+        let dotGap: CGFloat = pressure == nil || value.isEmpty ? 0 : 2.5
         let reservedValueWidth = max(valueSize.width, minValueSize.width)
         let reservedGroupWidth = dotDiameter + dotGap + reservedValueWidth
         let drawnGroupWidth = dotDiameter + dotGap + valueSize.width
-        let width = ceil(max(labelSize.width, reservedGroupWidth) + 0.5)
-        let height: CGFloat = 21
+        let width = ceil(max(labelSize.width, reservedGroupWidth))
+        let height: CGFloat = 20
 
         let cacheKey = "metric|\(label)|\(value)|\(minimum)|\(pressure.map(String.init(describing:)) ?? "none")" as NSString
         if let cached = blockImageCache.object(forKey: cacheKey) {
@@ -138,16 +136,16 @@ enum MenuBarMetricsRenderer {
             rect.fill()
             let labelAttrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: NSColor.labelColor]
             let valueAttrs: [NSAttributedString.Key: Any] = [.font: valueFont, .foregroundColor: NSColor.labelColor]
-            (label as NSString).draw(at: NSPoint(x: (width - labelSize.width) / 2, y: 12.0),
+            (label as NSString).draw(at: NSPoint(x: (width - labelSize.width) / 2, y: 11.3),
                                      withAttributes: labelAttrs)
             var valueX = (width - drawnGroupWidth) / 2
             if let pressure {
-                let dotRect = NSRect(x: valueX, y: 3.5, width: dotDiameter, height: dotDiameter)
+                let dotRect = NSRect(x: valueX, y: 3.4, width: dotDiameter, height: dotDiameter)
                 MenuBarMetricsRenderer.nsColor(for: pressure).setFill()
                 NSBezierPath(ovalIn: dotRect).fill()
                 valueX += dotDiameter + dotGap
             }
-            (value as NSString).draw(at: NSPoint(x: valueX, y: -0.8), withAttributes: valueAttrs)
+            (value as NSString).draw(at: NSPoint(x: valueX, y: 0), withAttributes: valueAttrs)
             return true
         }
         image.isTemplate = false
@@ -158,14 +156,16 @@ enum MenuBarMetricsRenderer {
     private static func networkBlock(down: Double, up: Double) -> NSAttributedString? {
         let downText = MetricFormat.bytesPerSecCompact(down)
         let upText = MetricFormat.bytesPerSecCompact(up)
-        let font = NSFont.monospacedSystemFont(ofSize: 9.2, weight: .semibold)
-        let lineHeight: CGFloat = 10.0
-        let height: CGFloat = 20
+        let font = NSFont.monospacedSystemFont(ofSize: 8.5, weight: .semibold)
+        let lineHeight: CGFloat = 9
+        let height: CGFloat = 19
         let lines = ["↓\(downText)", "↑\(upText)"]
-        let reserved = ["↓8888M", "↑8888M"]
+        let reserved = ["↓888M", "↑888M"]
         let sizing: [NSAttributedString.Key: Any] = [.font: font]
-        let contentWidth = reserved.map { ($0 as NSString).size(withAttributes: sizing).width }.max() ?? 22
-        let width = ceil(contentWidth + 1.0)
+        let contentWidth = (reserved + lines)
+            .map { ($0 as NSString).size(withAttributes: sizing).width }
+            .max() ?? 22
+        let width = ceil(contentWidth)
         let cacheKey = "network|\(downText)|\(upText)" as NSString
         if let cached = blockImageCache.object(forKey: cacheKey) {
             return attachment(image: cached)
@@ -180,7 +180,7 @@ enum MenuBarMetricsRenderer {
             for (index, line) in lines.enumerated() {
                 let y = bottomY + lineHeight * CGFloat(1 - index)
                 let lineSize = (line as NSString).size(withAttributes: attrs)
-                (line as NSString).draw(at: NSPoint(x: max(0.5, width - lineSize.width - 0.5), y: y),
+                (line as NSString).draw(at: NSPoint(x: max(0, width - lineSize.width), y: y),
                                         withAttributes: attrs)
             }
             return true
@@ -197,22 +197,16 @@ enum MenuBarMetricsRenderer {
         return NSAttributedString(attachment: attachment)
     }
 
-    /// A slim horizontal gap used between metric blocks for a compact breathing space.
-    private static func compactGap() -> NSAttributedString {
-        NSAttributedString(string: " ",
-                           attributes: [.foregroundColor: NSColor.clear])
-    }
-
     /// A thin vertical divider line placed between metric blocks.
     private static var separatorImage: NSImage = {
-        let height: CGFloat = 13
-        let width: CGFloat = 5
+        let height: CGFloat = 12
+        let width: CGFloat = 3
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
             NSColor.clear.setFill()
             rect.fill()
             let lineX = floor((width - 1) / 2)
             NSColor.tertiaryLabelColor.setFill()
-            NSRect(x: lineX, y: 3, width: 1, height: height - 6).fill()
+            NSRect(x: lineX, y: 2.5, width: 1, height: height - 5).fill()
             return true
         }
         image.isTemplate = false

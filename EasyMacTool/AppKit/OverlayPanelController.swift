@@ -7,12 +7,15 @@ import SwiftUI
 @MainActor
 final class OverlayPanelController: ObservableObject {
     @Published var items: [WindowItem] = []
+    private var allItems: [WindowItem] = []
     // didSet 统一触发 notifySelectionChanged，避免直接赋值绕过 live stream 切换。
     // next()/prev()/removeItem() 中不再显式调用 notifySelectionChanged()。
     @Published var selectedIndex: Int = 0 {
         didSet { notifySelectionChanged() }
     }
     @Published var previewSize: AppSettings.PreviewSize = .small
+    @Published var mouseHoverSelects = false
+    @Published var switcherStyle: AppSettings.SwitcherStyle = .thumbnails
     /// Which screen the panel appears on (set per presentation from
     /// AppSettings.displayTarget).
     private var displayTarget: AppSettings.DisplayTarget = .active
@@ -34,6 +37,7 @@ final class OverlayPanelController: ObservableObject {
 
     /// Set by `AppCoordinator` so clicks can activate the target window.
     var onActivateItem: ((WindowItem) -> Void)?
+    var onWindowAction: ((WindowItem, WindowControlAction) -> Void)?
     /// Set by `AppCoordinator` so selection changes trigger live stream switch.
     var onSelectChanged: ((WindowItem?) -> Void)?
     /// 点击面板外部时由 AppCoordinator 执行完整关闭流程（停 capture、清
@@ -50,11 +54,15 @@ final class OverlayPanelController: ObservableObject {
 
     func present(with items: [WindowItem],
                  previewSize: AppSettings.PreviewSize,
-                 displayTarget: AppSettings.DisplayTarget) {
+                 displayTarget: AppSettings.DisplayTarget,
+                 mouseHoverSelects: Bool,
+                 switcherStyle: AppSettings.SwitcherStyle) {
+        allItems = items
         self.items = items
+        self.mouseHoverSelects = mouseHoverSelects
+        self.switcherStyle = switcherStyle
         self.previewSize = previewSize
         self.displayTarget = displayTarget
-        self.selectedIndex = 0
         // isSwitcherOpen 现在是计算属性，直接反映 panel.isVisible，
         // 无需手动设置。orderFrontRegardless 后自动变为 true。
 
@@ -65,7 +73,11 @@ final class OverlayPanelController: ObservableObject {
         if hostingController == nil {
             let view = SwitcherOverlayView(
                 controller: self,
-                onActivate: { [weak self] index in self?.activate(at: index) }
+                onActivate: { [weak self] index in self?.activate(at: index) },
+                onSelect: { [weak self] index in self?.select(at: index) },
+                onWindowAction: { [weak self] item, action in
+                    self?.onWindowAction?(item, action)
+                }
             )
             let hosting = NSHostingController(rootView: view)
             hosting.view.wantsLayer = true
@@ -109,9 +121,23 @@ final class OverlayPanelController: ObservableObject {
         // isSwitcherOpen 现在是计算属性，orderOut 后自动变为 false。
         HotkeyManager.shared.syncSwitcherVisibility()
         HotkeyManager.shared.resetActiveShortcut()
+        allItems = []
         items = []
         selectedIndex = 0
         // 不释放 hostingController —— 复用，下次 present 时不再重建视图树
+    }
+
+    /// Replaces the unfiltered window set after a live refresh, preserving the
+    /// current selected item.
+    func replaceAllItems(_ items: [WindowItem]) {
+        let selectedID = selectedItem?.id
+        allItems = items
+        self.items = items
+        if let selectedID, let index = items.firstIndex(where: { $0.id == selectedID }) {
+            selectedIndex = index
+        } else {
+            selectedIndex = 0
+        }
     }
 
     /// 点击面板外部（鼠标按下事件发生在 panel frame 之外）时关闭切换器。
@@ -161,13 +187,24 @@ final class OverlayPanelController: ObservableObject {
 
     func next() {
         guard !items.isEmpty else { return }
-        selectedIndex = (selectedIndex + 1) % items.count
-        // selectedIndex 的 didSet 已触发 notifySelectionChanged，无需显式调用。
+        if let next = SelectionResolver.nextIndex(
+            current: selectedIndex,
+            count: items.count,
+            direction: 1
+        ) {
+            selectedIndex = next
+        }
     }
 
     func prev() {
         guard !items.isEmpty else { return }
-        selectedIndex = (selectedIndex - 1 + items.count) % items.count
+        if let previous = SelectionResolver.nextIndex(
+            current: selectedIndex,
+            count: items.count,
+            direction: -1
+        ) {
+            selectedIndex = previous
+        }
     }
 
     /// 从 items 列表移除已关闭/最小化的窗口并调整选中索引。
@@ -175,6 +212,7 @@ final class OverlayPanelController: ObservableObject {
     /// 已关闭的窗口（激活失败）。Windows Alt+Tab 也是立即移除。
     /// 移除后 selectedIndex 自动夹紧到有效范围；若列表变空则关闭切换器。
     func removeItem(_ item: WindowItem) {
+        allItems.removeAll { $0.id == item.id }
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         items.remove(at: idx)
         if items.isEmpty {
@@ -182,15 +220,12 @@ final class OverlayPanelController: ObservableObject {
             onDismiss?()
             return
         }
-        // 调整 selectedIndex：若移除的是当前选中项之前的，索引前移；
-        // 若移除的是当前选中项或之后的，索引不变但需夹紧到有效范围。
-        if idx < selectedIndex {
-            selectedIndex -= 1
-        } else if idx == selectedIndex {
-            // 移除的就是当前选中项：保持 selectedIndex 指向同位置（下一个窗口）
-            if selectedIndex >= items.count {
-                selectedIndex = items.count - 1
-            }
+        if let adjusted = SelectionResolver.indexAfterRemoval(
+            current: selectedIndex,
+            removedIndex: idx,
+            countAfterRemoval: items.count
+        ) {
+            selectedIndex = adjusted
         }
     }
 
@@ -200,6 +235,12 @@ final class OverlayPanelController: ObservableObject {
         selectedIndex = index
         let item = items[index]
         onActivateItem?(item)
+    }
+
+    /// Moves keyboard selection without committing. Used by hover auto-select.
+    func select(at index: Int) {
+        guard items.indices.contains(index) else { return }
+        selectedIndex = index
     }
 
     /// Notifies AppCoordinator that the selected window changed, so the live
@@ -241,6 +282,16 @@ final class OverlayPanelController: ObservableObject {
         }
     }
 
+    /// Resolves the screen the switcher will appear on without presenting it.
+    /// Used before snapshot so the screen filter can match the same target.
+    func preferredScreenFrame(for target: AppSettings.DisplayTarget) -> CGRect? {
+        let saved = displayTarget
+        displayTarget = target
+        let frame = selectScreen()?.frame
+        displayTarget = saved
+        return frame
+    }
+
     /// 鼠标在屏幕缝隙（dead zone）时，按距离选最近的屏。
     /// 计算鼠标点到每个屏 frame 最近边的距离，取最小值。
     /// 若所有屏距离相同（极罕见），返回首个。
@@ -271,9 +322,10 @@ final class OverlayPanelController: ObservableObject {
         let panelPadding: CGFloat = 0
         let cellInnerPadding: CGFloat = 10  // WindowThumbnailCell .padding(10)
         let vStackSpacing: CGFloat = DesignTokens.Spacing.sm // VStack(spacing: 8)
-        // 13pt .medium 系统字体的实际行高（含 ascender+descender+leading）约 17-18pt，
-        // 用 18pt 留 1pt 余量，避免每个 cell 高度低估 1-2pt 累计导致面板高度不足。
-        let captionHeight: CGFloat = 18
+        // 标题行固定为 22pt，与 WindowThumbnailCell 的 title row 一致；
+        // 红绿灯按钮只做 overlay，不参与布局，避免悬停/选中时 cell 高度
+        // 变化导致 FlowLayout 重排和面板抖动。
+        let captionHeight: CGFloat = 22
         // Aurora v2：SwitcherOverlayView 含固定高度的 header（标题+计数）与
         // footer（键盘提示条），面板高度必须预留这两个块——其数值与
         // SwitcherOverlayView.headerBlock/footerBlock 静态常量保持一致。
@@ -289,8 +341,8 @@ final class OverlayPanelController: ObservableObject {
         }
         guard !cells.isEmpty else { return }
 
-        // 最大可用宽度：屏幕 92%。
-        let maxPanelWidth = screenRect.width * 0.92
+        // 最大可用宽度：屏幕 92%，夹紧非负值防止异常屏幕几何。
+        let maxPanelWidth = max(0, screenRect.width * 0.92)
         let maxInnerWidth = maxPanelWidth - outerPadding * 2 - panelPadding * 2
 
         // 两遍计算：消除 positionPanel 估算宽度与 FlowLayout 实际渲染宽度的不一致。
@@ -325,9 +377,9 @@ final class OverlayPanelController: ObservableObject {
         let contentHeight = rows.reduce(CGFloat.zero) { partial, row in
             partial + row.height + (partial > 0 ? interCell : 0)
         }
-        let heightToFit = contentHeight + headerBlock + footerBlock + outerPadding * 2 + panelPadding * 2
+        let heightToFit = max(0, contentHeight + headerBlock + footerBlock + outerPadding * 2 + panelPadding * 2)
         // 硬上限：屏幕高度 95%，避免极端情况超出屏幕。
-        let height = min(heightToFit, screenRect.height * 0.95)
+        let height = max(0, min(heightToFit, max(0, screenRect.height * 0.95)))
 
         let origin = CGPoint(
             x: screenRect.midX - width / 2,
@@ -369,11 +421,11 @@ final class OverlayPanelController: ObservableObject {
         if item.frame == .zero {
             return CGSize(width: maxWidth, height: maxHeight)
         }
-        let aspect = item.aspectRatio
+        let aspect = max(0.01, item.aspectRatio)
         if aspect >= maxWidth / maxHeight {
-            return CGSize(width: maxWidth, height: maxWidth / aspect)
+            return CGSize(width: maxWidth, height: max(1, maxWidth / aspect))
         } else {
-            return CGSize(width: maxHeight * aspect, height: maxHeight)
+            return CGSize(width: max(1, maxHeight * aspect), height: maxHeight)
         }
     }
 }

@@ -2,8 +2,7 @@ import SwiftUI
 
 /// A simple wrap layout that arranges subviews left-to-right and wraps to the
 /// next row when the current row is full — like text wrapping. Used by the
-/// switcher so all window thumbnails are always visible with NO scroll bar,
-/// regardless of preview size or window count.
+/// switcher grid so overflow wraps to additional rows without scrollbars.
 ///
 /// Based on SwiftUI's `Layout` protocol (macOS 13+).
 struct FlowLayout: Layout {
@@ -18,7 +17,7 @@ struct FlowLayout: Layout {
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout CacheData) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
+        let maxWidth = max(0, proposal.width ?? .infinity)
         let rows = computeRows(subviews: subviews, maxWidth: maxWidth)
         cache.rows = rows
         guard !rows.isEmpty else { return .zero }
@@ -27,12 +26,12 @@ struct FlowLayout: Layout {
             partial + row.height + (partial > 0 ? spacing : 0)
         }
         let totalWidth = rows.map { $0.width }.max() ?? 0
-        return CGSize(width: min(totalWidth, maxWidth), height: totalHeight)
+        return CGSize(width: max(0, min(totalWidth, maxWidth)), height: max(0, totalHeight))
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout CacheData) {
         // Measurement and placement may receive different widths from SwiftUI.
-        let rows = computeRows(subviews: subviews, maxWidth: bounds.width)
+        let rows = computeRows(subviews: subviews, maxWidth: max(0, bounds.width))
         cache.rows = rows
         var y = bounds.minY
         for row in rows {
@@ -58,18 +57,20 @@ struct FlowLayout: Layout {
         var rows: [Row] = [Row()]
         for (index, subview) in subviews.enumerated() {
             let size = subview.sizeThatFits(.unspecified)
+            let width = max(0, size.width)
+            let height = max(0, size.height)
             let candidateWidth = rows[rows.count - 1].width
                 + (rows[rows.count - 1].indices.isEmpty ? 0 : spacing)
-                + size.width
+                + width
             if candidateWidth > maxWidth, !rows[rows.count - 1].indices.isEmpty {
                 rows.append(Row())
             }
             let rowIdx = rows.count - 1
             rows[rowIdx].indices.append(index)
             if !rows[rowIdx].indices.isEmpty {
-                rows[rowIdx].width += (rows[rowIdx].indices.count > 1 ? spacing : 0) + size.width
+                rows[rowIdx].width += (rows[rowIdx].indices.count > 1 ? spacing : 0) + width
             }
-            rows[rowIdx].height = max(rows[rowIdx].height, size.height)
+            rows[rowIdx].height = max(rows[rowIdx].height, height)
         }
         return rows
     }

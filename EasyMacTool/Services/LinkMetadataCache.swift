@@ -46,6 +46,8 @@ final class LinkMetadataCache {
         }
     }
 
+    nonisolated private static let noRedirectDelegate = NoRedirectDelegate()
+
     nonisolated private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 6
@@ -53,7 +55,9 @@ final class LinkMetadataCache {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        return URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
+        return URLSession(configuration: configuration,
+                          delegate: noRedirectDelegate,
+                          delegateQueue: nil)
     }()
 
     private init() {}

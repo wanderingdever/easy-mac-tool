@@ -36,6 +36,12 @@ final class AppSettings: ObservableObject {
     /// 窗口切换功能全局开关。关闭后所有窗口切换快捷键透传至系统，
     /// 恢复 macOS 原生 Cmd+Tab 行为。
     @Published var windowSwitcherEnabled: Bool = true { didSet { debouncePersist() } }
+    /// 鼠标悬停到缩略图上时是否直接移动键盘选中项。
+    @Published var mouseHoverSelects: Bool = false { didSet { debouncePersist() } }
+    /// 切换器的展示模式：缩略图 / 应用图标 / 标题列表。
+    @Published var switcherStyle: SwitcherStyle = .thumbnails { didSet { debouncePersist() } }
+    /// 是否用三指左右滑动呼出/切换窗口。
+    @Published var trackpadSwipeEnabled: Bool = false { didSet { debouncePersist() } }
 
     // MARK: - 系统监控
     /// 系统监控总开关。关闭时不采样、不启动定时器、菜单栏不渲染指标块（零开销）。
@@ -112,25 +118,51 @@ final class AppSettings: ObservableObject {
                                 modifiers: CGEventFlags,
                                 excludingWindowShortcutID: UUID? = nil,
                                 includeClipboardShortcut: Bool = true) -> String? {
+        Self.globalShortcutConflictDescription(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            switcherShortcuts: shortcuts,
+            clipboardShortcut: includeClipboardShortcut ? clipboardShortcut : nil,
+            layoutShortcuts: windowLayoutShortcuts,
+            excludingWindowShortcutID: excludingWindowShortcutID
+        )
+    }
+
+    /// Pure conflict check shared by the switcher, clipboard, and layout
+    /// shortcut recorders. Kept static so it can be unit-tested without
+    /// touching persisted settings.
+    static func globalShortcutConflictDescription(
+        keyCode: CGKeyCode,
+        modifiers: CGEventFlags,
+        switcherShortcuts: [ShortcutConfig],
+        clipboardShortcut: ShortcutConfig?,
+        layoutShortcuts: [LayoutShortcut],
+        excludingWindowShortcutID: UUID?
+    ) -> String? {
         // 系统保留组合校验优先于内部冲突：event tap 是 .defaultTap，匹配成功
         // 会 return nil 吞掉事件。若允许录制 Cmd+Q 等系统关键组合，所有 app
         // 的对应功能被全局劫持且极难排查到本 app。
         if Self.isReservedSystemCombo(keyCode: keyCode, modifiers: modifiers) {
             return "系统保留快捷键，不可使用"
         }
-        if let existing = shortcuts.first(where: {
+        if let existing = switcherShortcuts.first(where: {
             $0.id != excludingWindowShortcutID &&
             $0.keyCode == keyCode &&
             $0.modifiers == modifiers
         }) {
             return "已被窗口切换快捷键「\(existing.name)」使用"
         }
-        if includeClipboardShortcut,
+        if let clipboardShortcut,
            clipboardShortcut.keyCode == keyCode,
            clipboardShortcut.modifiers == modifiers {
             return "已被剪切板快捷键使用"
         }
-        return nil
+        return Self.layoutShortcutConflictDescription(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            excludingAction: nil,
+            shortcuts: layoutShortcuts
+        )
     }
 
     /// Reject duplicate global shortcut combinations for window layout actions.
@@ -139,24 +171,38 @@ final class AppSettings: ObservableObject {
     func layoutShortcutConflictMessage(keyCode: CGKeyCode,
                                        modifiers: CGEventFlags,
                                        excludingAction: WindowLayoutAction) -> String? {
-        if Self.isReservedSystemCombo(keyCode: keyCode, modifiers: modifiers) {
-            return "系统保留快捷键，不可使用"
+        if let message = Self.globalShortcutConflictDescription(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            switcherShortcuts: shortcuts,
+            clipboardShortcut: clipboardShortcut,
+            layoutShortcuts: [],
+            excludingWindowShortcutID: nil
+        ) {
+            return message
         }
-        if let existing = shortcuts.first(where: {
-            $0.keyCode == keyCode && $0.modifiers == modifiers
-        }) {
-            return "已被窗口切换快捷键「\(existing.name)」使用"
-        }
-        if clipboardShortcut.keyCode == keyCode,
-           clipboardShortcut.modifiers == modifiers {
-            return "已被剪切板快捷键使用"
-        }
-        if let existing = windowLayoutShortcuts.first(where: {
-            $0.action != excludingAction && $0.keyCode == keyCode && $0.modifiers == modifiers
-        }) {
-            return "已被窗口布局「\(existing.action.displayName)」使用"
-        }
-        return nil
+        return Self.layoutShortcutConflictDescription(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            excludingAction: excludingAction,
+            shortcuts: windowLayoutShortcuts
+        )
+    }
+
+    /// Shared layout-shortcut conflict check, used by both the switcher and
+    /// layout shortcut recorders so conflicts are always reported in both
+    /// directions.
+    static func layoutShortcutConflictDescription(
+        keyCode: CGKeyCode,
+        modifiers: CGEventFlags,
+        excludingAction: WindowLayoutAction?,
+        shortcuts: [LayoutShortcut]
+    ) -> String? {
+        shortcuts.first {
+            $0.action != excludingAction &&
+                $0.keyCode == keyCode &&
+                $0.modifiers == modifiers
+        }.map { "已被窗口布局「\($0.action.displayName)」使用" }
     }
 
     /// 系统关键组合：不允许录制为全局快捷键。
@@ -228,6 +274,22 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    enum SwitcherStyle: String, Codable, CaseIterable, Identifiable {
+        case thumbnails
+        case appIcons
+        case titles
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .thumbnails: return "缩略图"
+            case .appIcons: return "应用图标"
+            case .titles: return "标题"
+            }
+        }
+    }
+
     enum LinkPreviewMode: String, Codable, CaseIterable, Identifiable {
         case disabled
         case manual
@@ -265,6 +327,7 @@ final class AppSettings: ObservableObject {
     }
 
     private struct Persisted: Codable {
+        var version: Int?
         var displayTarget: DisplayTarget?
         var shortcuts: [ShortcutConfig]
         var clipboardShortcut: ShortcutConfig?
@@ -278,6 +341,9 @@ final class AppSettings: ObservableObject {
         /// v1 兼容字段；读取后迁移到 clipboardLinkPreviewMode。
         var clipboardLinkPreviewEnabled: Bool?
         var windowSwitcherEnabled: Bool?
+        var mouseHoverSelects: Bool?
+        var switcherStyle: SwitcherStyle?
+        var trackpadSwipeEnabled: Bool?
 
         // 系统监控
         var systemMonitorEnabled: Bool?
@@ -300,6 +366,7 @@ final class AppSettings: ObservableObject {
 
     private func persist() {
         let snapshot = Persisted(
+            version: 2,
             displayTarget: displayTarget,
             shortcuts: shortcuts,
             clipboardShortcut: clipboardShortcut,
@@ -312,6 +379,9 @@ final class AppSettings: ObservableObject {
             clipboardLinkPreviewMode: clipboardLinkPreviewMode,
             clipboardLinkPreviewEnabled: nil,
             windowSwitcherEnabled: windowSwitcherEnabled,
+            mouseHoverSelects: mouseHoverSelects,
+            switcherStyle: switcherStyle,
+            trackpadSwipeEnabled: trackpadSwipeEnabled,
             systemMonitorEnabled: systemMonitorEnabled,
             monitorInterval: monitorInterval,
             temperatureUnit: temperatureUnit,
@@ -344,6 +414,9 @@ final class AppSettings: ObservableObject {
         guard let data = defaults.data(forKey: storageKey) else { return }
         do {
             let snapshot = try JSONDecoder().decode(Persisted.self, from: data)
+            if (snapshot.version ?? 1) < 2 {
+                Self.logger.info("Migrating settings from schema v1; optional fields use defaults.")
+            }
             if let dt = snapshot.displayTarget { displayTarget = dt }
             // 空数组时回退到默认快捷键，避免切换器再也呼不出来
             shortcuts = snapshot.shortcuts.isEmpty ? ShortcutConfig.defaults : snapshot.shortcuts
@@ -367,6 +440,15 @@ final class AppSettings: ObservableObject {
             }
             if let wsEnabled = snapshot.windowSwitcherEnabled {
                 windowSwitcherEnabled = wsEnabled
+            }
+            if let mouseHoverSelects = snapshot.mouseHoverSelects {
+                self.mouseHoverSelects = mouseHoverSelects
+            }
+            if let switcherStyle = snapshot.switcherStyle {
+                self.switcherStyle = switcherStyle
+            }
+            if let trackpadSwipeEnabled = snapshot.trackpadSwipeEnabled {
+                self.trackpadSwipeEnabled = trackpadSwipeEnabled
             }
             if let v = snapshot.systemMonitorEnabled { systemMonitorEnabled = v }
             if let v = snapshot.monitorInterval {

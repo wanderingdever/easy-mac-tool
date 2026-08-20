@@ -14,7 +14,7 @@
 			remoteGlobalIDString = C9A750B23011AA1900A888B2;
 			remoteInfo = EasyMacTool;
 		};
-		D10000000000000000000007 /* Helper dependency proxy */ = {
+		D10000000000000000000007 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = C9A750AB3011AA1900A888B2 /* Project object */;
 			proxyType = 1;
@@ -26,7 +26,7 @@
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* EasyMacToolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EasyMacToolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C9A750B33011AA1900A888B2 /* EasyMacTool.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EasyMacTool.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		D10000000000000000000001 /* EasyMacToolPrivilegedHelper */ = {isa = PBXFileReference; explicitFileType = compiled.mach-o.executable; includeInIndex = 0; path = EasyMacToolPrivilegedHelper; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10000000000000000000001 /* EasyMacToolPrivilegedHelper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = EasyMacToolPrivilegedHelper; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -37,15 +37,6 @@
 				Info.plist,
 			);
 			target = C9A750B23011AA1900A888B2 /* EasyMacTool */;
-		};
-		D1000000000000000000000D /* Exceptions for helper folder */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-				EasyMacToolPrivilegedHelper.entitlements,
-				com.easy.EasyMacTool.PrivilegedHelper.plist,
-			);
-			target = D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -65,9 +56,6 @@
 		};
 		D10000000000000000000002 /* EasyMacToolPrivilegedHelper */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				D1000000000000000000000D /* Exceptions for helper folder */,
-			);
 			path = EasyMacToolPrivilegedHelper;
 			sourceTree = "<group>";
 		};
@@ -88,7 +76,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		D10000000000000000000003 /* Helper Frameworks */ = {
+		D10000000000000000000003 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -157,7 +145,7 @@
 			buildRules = (
 			);
 			dependencies = (
-				D10000000000000000000008 /* Build helper before app */,
+				D10000000000000000000008 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				C9A750B53011AA1900A888B2 /* EasyMacTool */,
@@ -171,10 +159,10 @@
 		};
 		D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = D1000000000000000000000B /* Build configuration list for helper */;
+			buildConfigurationList = D1000000000000000000000B /* Build configuration list for PBXNativeTarget "EasyMacToolPrivilegedHelper" */;
 			buildPhases = (
-				D10000000000000000000004 /* Helper Sources */,
-				D10000000000000000000003 /* Helper Frameworks */,
+				D10000000000000000000004 /* Sources */,
+				D10000000000000000000003 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -213,10 +201,10 @@
 				};
 			};
 			buildConfigurationList = C9A750AE3011AA1900A888B2 /* Build configuration list for PBXProject "EasyMacTool" */;
-			developmentRegion = zh-Hans;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				zh-Hans,
+				"zh-Hans",
 				en,
 				Base,
 			);
@@ -314,7 +302,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		D10000000000000000000004 /* Helper Sources */ = {
+		D10000000000000000000004 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -329,10 +317,10 @@
 			target = C9A750B23011AA1900A888B2 /* EasyMacTool */;
 			targetProxy = A20000000000000000000007 /* PBXContainerItemProxy */;
 		};
-		D10000000000000000000008 /* Build helper before app */ = {
+		D10000000000000000000008 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = D100000000000000000000B2 /* EasyMacToolPrivilegedHelper */;
-			targetProxy = D10000000000000000000007 /* Helper dependency proxy */;
+			targetProxy = D10000000000000000000007 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -555,7 +543,7 @@
 			};
 			name = Release;
 		};
-		D10000000000000000000009 /* Helper Debug */ = {
+		D10000000000000000000009 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EasyMacToolPrivilegedHelper/EasyMacToolPrivilegedHelper.entitlements;
@@ -571,7 +559,7 @@
 			};
 			name = Debug;
 		};
-		D1000000000000000000000A /* Helper Release */ = {
+		D1000000000000000000000A /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EasyMacToolPrivilegedHelper/EasyMacToolPrivilegedHelper.entitlements;
@@ -618,11 +606,11 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		D1000000000000000000000B /* Build configuration list for helper */ = {
+		D1000000000000000000000B /* Build configuration list for PBXNativeTarget "EasyMacToolPrivilegedHelper" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				D10000000000000000000009 /* Helper Debug */,
-				D1000000000000000000000A /* Helper Release */,
+				D10000000000000000000009 /* Debug */,
+				D1000000000000000000000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

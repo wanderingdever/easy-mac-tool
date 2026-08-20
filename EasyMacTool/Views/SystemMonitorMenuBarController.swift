@@ -45,12 +45,9 @@ final class SystemMonitorMenuBarController {
     private func enabledMetrics() -> [MenuBarMetric] {
         let settings = AppSettings.shared
         let shown = Set(settings.menuBarMetrics.filter { $0.value }.keys)
-        let order = settings.menuBarMetricOrder.compactMap(MenuBarMetric.init(rawValue:))
-        let ordered = order.filter { shown.contains($0.settingsKey) && $0.isAvailableOnCurrentHardware }
-        let remaining = MenuBarMetric.defaultOrder.filter {
-            shown.contains($0.settingsKey) && $0.isAvailableOnCurrentHardware && !order.contains($0)
+        return MenuBarMetric.ordered(using: settings.menuBarMetricOrder).filter {
+            shown.contains($0.settingsKey) && $0.isAvailableOnCurrentHardware
         }
-        return ordered + remaining
     }
 
     /// Reconciles the status item's existence with the current configuration.
@@ -73,6 +70,8 @@ final class SystemMonitorMenuBarController {
     private func ensureItem() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // This controller is initialized after the main MenuBarExtra, so the
+        // monitor item occupies the adjacent slot on its left.
         item.behavior = []
         item.isVisible = true
         if let button = item.button {

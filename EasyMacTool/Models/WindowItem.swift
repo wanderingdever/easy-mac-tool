@@ -19,6 +19,7 @@ final class WindowItem: ObservableObject, Identifiable {
     let id: CGWindowID
     let pid: pid_t
     let appName: String
+    let bundleIdentifier: String?
     let appIcon: NSImage?
     let title: String
     let frame: CGRect             // for AX matching
@@ -40,6 +41,7 @@ final class WindowItem: ObservableObject, Identifiable {
     init(id: CGWindowID,
          pid: pid_t,
          appName: String,
+         bundleIdentifier: String? = nil,
          appIcon: NSImage?,
          title: String,
          frame: CGRect,
@@ -51,6 +53,7 @@ final class WindowItem: ObservableObject, Identifiable {
         self.id = id
         self.pid = pid
         self.appName = appName
+        self.bundleIdentifier = bundleIdentifier
         self.appIcon = appIcon
         self.title = title
         self.frame = frame

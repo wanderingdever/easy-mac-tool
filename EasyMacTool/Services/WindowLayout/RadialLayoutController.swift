@@ -94,11 +94,16 @@ final class RadialLayoutController: ObservableObject {
                 self?.handleMouseMove(to: location)
             }
         }
-        let flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            let held = UInt64(event.modifierFlags.rawValue) & ModifierBits.deviceMask
-            Task { @MainActor [weak self] in
-                self?.handleModifiersHeld(held)
+        let flagsMonitor: Any?
+        if keyTrigger != .none {
+            flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                let held = UInt64(event.modifierFlags.rawValue) & ModifierBits.deviceMask
+                Task { @MainActor [weak self] in
+                    self?.handleModifiersHeld(held)
+                }
             }
+        } else {
+            flagsMonitor = nil
         }
         if let downMonitor { monitors.append(downMonitor) }
         if let upMonitor { monitors.append(upMonitor) }

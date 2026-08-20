@@ -90,10 +90,11 @@ extension Notification.Name {
 final class AppCoordinator {
     private static let logger = Logger(subsystem: "com.easymactool", category: "AppCoordinator")
     private let settings: AppSettings
-    private let enumerator = WindowEnumerator()
+    private let windowStateStore = WindowStateStore()
     private let captureManager = ScreenCaptureManager()
     private let activator = WindowActivator()
     private let panelController = OverlayPanelController()
+    private let trackpadMonitor = TrackpadGestureMonitor()
     private let clipboardManager = ClipboardManager.shared
     private let clipboardPanelController = ClipboardPanelController()
     /// Combine 订阅集合：设置变更同步到运行中的服务。
@@ -168,6 +169,19 @@ final class AppCoordinator {
             self?.handle(event)
         }
         HotkeyManager.shared.start()
+        if settings.trackpadSwipeEnabled {
+            startTrackpadMonitor()
+        }
+        settings.$trackpadSwipeEnabled
+            .dropFirst()
+            .sink { [weak self] enabled in
+                if enabled {
+                    self?.startTrackpadMonitor()
+                } else {
+                    self?.trackpadMonitor.stop()
+                }
+            }
+            .store(in: &cancellables)
         // 系统监控：按总开关启停采样，并常驻菜单栏指标渲染控制器。
         SystemMonitor.shared.setEnabled(settings.systemMonitorEnabled, interval: settings.monitorInterval)
         _ = SystemMonitorMenuBarController.shared
@@ -253,6 +267,21 @@ final class AppCoordinator {
         panelController.onActivateItem = { [weak self] item in
             self?.activateItem(item)
         }
+        panelController.onWindowAction = { [weak self] item, action in
+            guard let self else { return }
+            switch action {
+            case .close:
+                if self.activator.close(item) {
+                    self.panelController.removeItem(item)
+                }
+            case .minimize:
+                if self.activator.minimize(item) {
+                    self.panelController.removeItem(item)
+                }
+            case .fullscreen:
+                _ = self.activator.toggleFullscreen(item)
+            }
+        }
         panelController.onSelectChanged = { [weak self] item in
             // Use the previewSize captured during present() — each shortcut
             // has its own preview size, set on the panelController at open.
@@ -298,7 +327,6 @@ final class AppCoordinator {
     func flushClipboardForTermination() {
         hotkeyRetryTimer?.invalidate()
         hotkeyRetryTimer = nil
-        captureManager.stopWarming()
         captureManager.stopAll()
         clipboardManager.stop()
     }
@@ -405,6 +433,23 @@ final class AppCoordinator {
         }
     }
 
+    private func startTrackpadMonitor() {
+        trackpadMonitor.start { [weak self] direction in
+            self?.handleTrackpadSwipe(direction)
+        }
+    }
+
+    private func handleTrackpadSwipe(_ direction: TrackpadGestureMonitor.Direction) {
+        if panelController.isPresented {
+            switch direction {
+            case .left: panelController.prev()
+            case .right: panelController.next()
+            }
+        } else if let shortcut = settings.shortcuts.first {
+            handle(.open(shortcut))
+        }
+    }
+
     /// Enables/disables the radial layout controller based on the current
     /// settings (master switch + radial sub-switch) and trigger configuration.
     private func syncRadialController() {
@@ -476,7 +521,11 @@ final class AppCoordinator {
             // 不再使打开失效，只有显式关闭（closeSwitcher）或更新的打开请求
             // （openSwitcher 递增 openSession）才使本会话失效。
             let session = openSession
-            let items = await enumerator.snapshot(filter: shortcut)
+            let screenFrame = panelController.preferredScreenFrame(for: settings.displayTarget)
+            let items = await windowStateStore.load(
+                filter: shortcut,
+                preferredScreenFrame: screenFrame
+            )
             // 检查取消/会话失效：用户在 snapshot 期间关闭了切换器或发起了新的
             // 打开请求，不应继续 present。
             if Task.isCancelled || openSession != session {
@@ -493,7 +542,9 @@ final class AppCoordinator {
             }
             panelController.present(with: items,
                                     previewSize: shortcut.previewSize,
-                                    displayTarget: settings.displayTarget)
+                                    displayTarget: settings.displayTarget,
+                                    mouseHoverSelects: settings.mouseHoverSelects,
+                                    switcherStyle: settings.switcherStyle)
             // 竞态防护：present 后再次检查，防止 present 与后续操作之间
             // 切换器被关闭，导致 capture 为已关闭面板运行。
             if Task.isCancelled || openSession != session {
@@ -531,6 +582,16 @@ final class AppCoordinator {
             // 就被切走，浪费资源）。若用户在 500ms 内 Tab 切换，防抖 Task 被
             // cancel，stream 不会启动，新选中项重新开始 500ms 防抖。
             captureManager.setLiveWindow(panelController.selectedItem, previewSize: shortcut.previewSize)
+            windowStateStore.startLiveUpdates(
+                filter: shortcut,
+                preferredScreenFrame: screenFrame,
+                onRefresh: { [weak self] in
+                    self?.applyLiveState()
+                },
+                onEmpty: { [weak self] in
+                    self?.closeSwitcher()
+                }
+            )
         }
     }
 
@@ -567,10 +628,24 @@ final class AppCoordinator {
         // 而放弃 present。
         openSession += 1
         pendingActivationSession = nil
+        windowStateStore.stopLiveUpdates()
         captureManager.stopAll()
         panelController.dismiss()
         // activeShortcut 由 panelController.dismiss() → resetActiveShortcut() 清理，
         // 无需重复设置。
+    }
+
+    /// Applies the store's refreshed window list to the panel. The selected
+    /// window is preserved by ID so a live refresh never jumps the user's
+    /// choice to a different tile.
+    private func applyLiveState() {
+        let items = windowStateStore.items
+        guard panelController.isPresented, !items.isEmpty else { return }
+        let previewSize = panelController.previewSize
+
+        captureManager.adoptItems(items)
+        panelController.replaceAllItems(items)
+        captureManager.startCapture(for: items, previewSize: previewSize, onlyMissing: true)
     }
 
     /// Called when the user clicks a cell while the switcher is open.

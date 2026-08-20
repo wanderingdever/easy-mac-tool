@@ -2,8 +2,26 @@ import AppKit
 import ApplicationServices
 import os
 
+/// Pure policy for reconciling Accessibility and WindowServer focus reads.
+/// WindowServer may briefly report a popup; when AX can prove that the ID is
+/// not one of the app's top-level windows, retain the AX result instead.
+nonisolated enum WindowFocusResolver {
+    static func resolved(axID: CGWindowID?,
+                         windowServerID: CGWindowID?,
+                         knownAXIDs: Set<CGWindowID>?) -> CGWindowID? {
+        guard let axID, let windowServerID, axID != windowServerID else {
+            return axID ?? windowServerID
+        }
+        if let knownAXIDs, !knownAXIDs.contains(windowServerID) {
+            return axID
+        }
+        return windowServerID
+    }
+}
+
 /// Tracks the most-recently-focused (MRF) order of windows by listening to
-/// `kAXFocusedWindowChangedNotification` via AXObserver for each running app.
+/// Accessibility focus/main-window notifications via AXObserver for each
+/// running app.
 /// The most recently focused windowID is always at index 0.
 ///
 /// This mirrors the Windows Alt+Tab behavior at the per-window level: after
@@ -29,6 +47,9 @@ final class AppUsageTracker {
     /// actor and may finish out of order; completions from an older activation
     /// must not move a previously selected window back to the front.
     private var activationGeneration = 0
+    /// Same-PID window changes (for example Chrome Profile A → B) do not emit
+    /// an NSWorkspace app activation notification, so they need their own token.
+    private var windowFocusGeneration = 0
     private let ownBundleID = Bundle.main.bundleIdentifier ?? ""
 
     /// AX observers keyed by PID so we can clean up when apps exit.
@@ -43,6 +64,7 @@ final class AppUsageTracker {
     /// 导致 observer + runLoopSource 永久泄漏。每 30s 扫描 runningApplications
     /// 清理已不存在的 PID。
     private var reaperTimer: Timer?
+    private var pendingFocusReads: [pid_t: Task<Void, Never>] = [:]
 
     private init() {
         // Seed with the current frontmost app + its focused window.
@@ -180,9 +202,8 @@ final class AppUsageTracker {
 
     // MARK: - AX Observer management
 
-    /// Installs an AXObserver for `kAXFocusedWindowChangedNotification` on the
-    /// given app. When the app's focused window changes, we record the new
-    /// window's CGWindowID in `windowOrder`.
+    /// Installs an AXObserver for focused and main-window changes. Chrome can
+    /// change its main window without delivering a reliable focus notification.
     private func installAXObserver(for app: NSRunningApplication) {
         let pid = app.processIdentifier
         guard app.activationPolicy == .regular else { return }
@@ -221,16 +242,22 @@ final class AppUsageTracker {
         // passUnretained 安全：AppUsageTracker 是 static let shared 单例，
         // 生命周期与进程相同，AXObserver 回调期间 self 一定存活。
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let addResult = AXObserverAddNotification(
-            obs,
-            AXUIElementCreateApplication(pid),
+        let axApp = AXUIElementCreateApplication(pid)
+        let notifications: [CFString] = [
             kAXFocusedWindowChangedNotification as CFString,
-            refcon
-        )
-        // 检查返回值：add 失败时 observer 永远收不到通知，若仍登记字典，
-        // 该 app 的窗口 MRU 静默失效且 removeAXObserver 清理了无效资源。
-        guard addResult == .success else {
-            Self.logger.error("[AppUsageTracker] AXObserverAddNotification failed for pid=\(pid, privacy: .public), error=\(addResult.rawValue, privacy: .public)")
+            kAXMainWindowChangedNotification as CFString,
+        ]
+        var registered = false
+        for notification in notifications {
+            let addResult = AXObserverAddNotification(obs, axApp, notification, refcon)
+            if addResult == .success || addResult == .notificationAlreadyRegistered {
+                registered = true
+            } else {
+                Self.logger.debug("[AppUsageTracker] AX notification unavailable for pid=\(pid, privacy: .public), error=\(addResult.rawValue, privacy: .public)")
+            }
+        }
+        // 检查返回值：两个通知都失败时，observer 没有任何用途。
+        guard registered else {
             return
         }
 
@@ -245,6 +272,8 @@ final class AppUsageTracker {
     }
 
     private func removeAXObserver(for pid: pid_t) {
+        pendingFocusReads[pid]?.cancel()
+        pendingFocusReads.removeValue(forKey: pid)
         if let src = runLoopSources[pid] {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
             runLoopSources.removeValue(forKey: pid)
@@ -260,14 +289,30 @@ final class AppUsageTracker {
         }
     }
 
-    /// Called on the main thread when an app's focused window changes.
+    /// Called on the main thread when an app's focused/main window changes.
     private func handleFocusedWindowChange(pid: pid_t, notification: CFString) {
         // AX notifications can arrive after the app has already lost focus.
         // Ignore those stale callbacks; the activation seed for the new app
         // will establish the correct frontmost window.
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-        guard let windowID = Self.readFocusedWindowID(pid: pid) else { return }
-        recordFocusedWindow(windowID, pid: pid)
+        windowFocusGeneration &+= 1
+        let generation = windowFocusGeneration
+        pendingFocusReads[pid]?.cancel()
+        pendingFocusReads[pid] = Task { @MainActor [weak self] in
+            // Chrome emits notifications in a burst while switching profiles.
+            // Read after the burst so MRU records the final window.
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard !Task.isCancelled, let self else { return }
+            let windowID = await Task.detached(priority: .userInitiated) {
+                Self.readFocusedWindowID(pid: pid)
+            }.value
+            guard !Task.isCancelled,
+                  self.windowFocusGeneration == generation,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                  let windowID else { return }
+            self.recordFocusedWindow(windowID, pid: pid)
+            self.pendingFocusReads.removeValue(forKey: pid)
+        }
     }
 
     /// 主线程更新 MRU：AX 回调路径与后台读取结果共用。
@@ -291,6 +336,7 @@ final class AppUsageTracker {
     /// 非主线程安全：读取指定 PID 的当前聚焦窗口 ID（同步 AX 跨进程 IPC）。
     /// 返回 nil 表示查询失败（无聚焦窗口 / AX 不支持 AXWindowID）。
     nonisolated private static func readFocusedWindowID(pid: pid_t) -> CGWindowID? {
+        var axID: CGWindowID?
         let axApp = AXUIElementCreateApplication(pid)
         var focusedWindowRef: CFTypeRef?
         AXUIElementCopyAttributeValue(
@@ -316,7 +362,7 @@ final class AppUsageTracker {
                 // 与 WindowActivator/WindowExtractor 保持一致：用 uint32Value 而非 intValue。
                 // CGWindowID 是 UInt32，intValue 对超过 Int32.max 的值会溢出为负数，
                 // 导致 MRU 排序匹配失效。
-                return CGWindowID(windowIDNum.uint32Value)
+                axID = CGWindowID(windowIDNum.uint32Value)
             }
         }
 
@@ -324,7 +370,32 @@ final class AppUsageTracker {
         // WindowServer still reports the frontmost on-screen window for the
         // process, which is a reliable fallback for MRU ordering (activation
         // itself remains handled by WindowActivator's AX path).
-        return frontmostWindowID(pid: pid)
+        let windowServerID = frontmostWindowID(pid: pid)
+        let knownAXIDs = axWindowIDs(pid: pid)
+        return WindowFocusResolver.resolved(axID: axID,
+                                            windowServerID: windowServerID,
+                                            knownAXIDs: knownAXIDs)
+    }
+
+    /// Returns top-level AX window IDs. This is only queried when AX and
+    /// WindowServer disagree, to reject transient Chrome popups.
+    nonisolated private static func axWindowIDs(pid: pid_t) -> Set<CGWindowID>? {
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp,
+                                            kAXWindowsAttribute as CFString,
+                                            &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else { return nil }
+        var ids = Set<CGWindowID>()
+        for window in windows {
+            var idRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window,
+                                                "AXWindowID" as CFString,
+                                                &idRef) == .success,
+                  let number = idRef as? NSNumber else { continue }
+            ids.insert(CGWindowID(number.uint32Value))
+        }
+        return ids
     }
 
     /// Returns the topmost normal/modal on-screen window owned by `pid`.
@@ -361,6 +432,7 @@ final class AppUsageTracker {
     private func seedFocusedWindowAsync(pid: pid_t, generation: Int) {
         // 用 [weak self] 捕获实例而非 AppUsageTracker.shared：本方法在 init() 中调用，
         // 此时 static let shared 尚未初始化完成，访问它会触发 EXC_BREAKPOINT。
+        let focusGeneration = windowFocusGeneration
         Task.detached(priority: .userInitiated) { [weak self] in
             for attempt in 0..<3 {
                 guard !Task.isCancelled else { return }
@@ -371,6 +443,7 @@ final class AppUsageTracker {
                 let accepted = await MainActor.run { [weak self] in
                     guard let self,
                           self.activationGeneration == generation,
+                          self.windowFocusGeneration == focusGeneration,
                           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
                           let windowID else { return false }
                     self.recordFocusedWindow(windowID, pid: pid)
@@ -392,10 +465,14 @@ final class AppUsageTracker {
         installAXObserver(for: app)
         recordAppActivation(pid)
         let generation = activationGeneration
+        windowFocusGeneration &+= 1
+        let focusGeneration = windowFocusGeneration
+        pendingFocusReads[pid]?.cancel()
         let windowID = await Task.detached(priority: .userInitiated) {
             Self.readFocusedWindowID(pid: pid)
         }.value
         guard activationGeneration == generation,
+              windowFocusGeneration == focusGeneration,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
               let windowID else { return }
         recordFocusedWindow(windowID, pid: pid)
@@ -409,6 +486,7 @@ final class AppUsageTracker {
         let pid = app.processIdentifier
         if app.bundleIdentifier == ownBundleID { return }
         activationGeneration &+= 1
+        windowFocusGeneration &+= 1
         let generation = activationGeneration
         recordAppActivation(pid)
         // Install observer if not yet installed (app was running before us)

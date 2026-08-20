@@ -1,6 +1,64 @@
 import CoreGraphics
 import Foundation
 
+nonisolated enum SwitcherAppsToShow: String, Codable, CaseIterable, Identifiable {
+    case all
+    case active
+    case nonActive
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .all: return "全部应用"
+        case .active: return "仅活跃应用"
+        case .nonActive: return "非活跃应用"
+        }
+    }
+}
+
+nonisolated enum SwitcherWindowOrder: String, Codable, CaseIterable, Identifiable {
+    case recentlyFocused
+    case alphabetical
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .recentlyFocused: return "最近聚焦"
+        case .alphabetical: return "字母顺序"
+        }
+    }
+}
+
+nonisolated enum SwitcherScreensToShow: String, Codable, CaseIterable, Identifiable {
+    case all
+    case showingSwitcher
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .all: return "所有屏幕"
+        case .showingSwitcher: return "切换器所在屏幕"
+        }
+    }
+}
+
+nonisolated enum SwitcherTabGrouping: String, Codable, CaseIterable, Identifiable {
+    case singleWindow
+    case separateWindows
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .singleWindow: return "合并同标题窗口"
+        case .separateWindows: return "显示为独立窗口"
+        }
+    }
+}
+
 /// One configurable global shortcut. Each shortcut has its own key combo,
 /// window filter set, and release behavior.
 struct ShortcutConfig: Codable, Identifiable, Hashable {
@@ -11,14 +69,22 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
     var modifiersRaw: UInt64
     var showMinimized: Bool
     var showHidden: Bool
+    var showFullscreen: Bool
+    var showWindowless: Bool
     /// 仅显示当前桌面（Space）的窗口。默认 true：切换器只列当前桌面可见窗口，
     /// 剔除其他桌面上的窗口。关闭后 `onScreenWindowsOnly=false`，可跨桌面切换。
     var currentSpaceOnly: Bool
+    /// 每个应用只显示一个主窗口（优先当前聚焦窗口）。
+    var showMainWindowOnly: Bool
+    var screensToShow: SwitcherScreensToShow
+    var tabGrouping: SwitcherTabGrouping
     var releaseBehavior: ReleaseBehavior
     /// Per-shortcut preview thumbnail size. Different shortcuts can use
     /// different sizes — e.g. a primary shortcut uses small previews while
     /// a secondary shortcut uses large ones.
     var previewSize: AppSettings.PreviewSize
+    var appsToShow: SwitcherAppsToShow
+    var windowOrder: SwitcherWindowOrder
     /// Default shortcuts cannot be renamed or deleted.
     var isDefault: Bool
 
@@ -41,9 +107,16 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
          modifiers: CGEventFlags,
          showMinimized: Bool = false,
          showHidden: Bool = false,
+         showFullscreen: Bool = true,
+         showWindowless: Bool = true,
          currentSpaceOnly: Bool = true,
+         showMainWindowOnly: Bool = false,
+         screensToShow: SwitcherScreensToShow = .all,
+         tabGrouping: SwitcherTabGrouping = .singleWindow,
          releaseBehavior: ReleaseBehavior = .focus,
          previewSize: AppSettings.PreviewSize = .small,
+         appsToShow: SwitcherAppsToShow = .all,
+         windowOrder: SwitcherWindowOrder = .recentlyFocused,
          isDefault: Bool = false) {
         self.id = id
         self.name = name
@@ -51,9 +124,16 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         self.modifiersRaw = modifiers.rawValue
         self.showMinimized = showMinimized
         self.showHidden = showHidden
+        self.showFullscreen = showFullscreen
+        self.showWindowless = showWindowless
         self.currentSpaceOnly = currentSpaceOnly
+        self.showMainWindowOnly = showMainWindowOnly
+        self.screensToShow = screensToShow
+        self.tabGrouping = tabGrouping
         self.releaseBehavior = releaseBehavior
         self.previewSize = previewSize
+        self.appsToShow = appsToShow
+        self.windowOrder = windowOrder
         self.isDefault = isDefault
     }
 
@@ -68,8 +148,8 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
     /// lack the `previewSize` field by falling back to `.small`.
     private enum CodingKeys: String, CodingKey {
         case id, name, keyCode, modifiersRaw
-        case showMinimized, showHidden, currentSpaceOnly
-        case releaseBehavior, previewSize, isDefault
+        case showMinimized, showHidden, showFullscreen, showWindowless, currentSpaceOnly, showMainWindowOnly, screensToShow, tabGrouping
+        case releaseBehavior, previewSize, appsToShow, windowOrder, isDefault
     }
 
     init(from decoder: Decoder) throws {
@@ -80,9 +160,16 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         modifiersRaw = try c.decode(UInt64.self, forKey: .modifiersRaw)
         showMinimized = try c.decodeIfPresent(Bool.self, forKey: .showMinimized) ?? false
         showHidden = try c.decodeIfPresent(Bool.self, forKey: .showHidden) ?? false
+        showFullscreen = try c.decodeIfPresent(Bool.self, forKey: .showFullscreen) ?? true
+        showWindowless = try c.decodeIfPresent(Bool.self, forKey: .showWindowless) ?? true
         currentSpaceOnly = try c.decodeIfPresent(Bool.self, forKey: .currentSpaceOnly) ?? true
+        showMainWindowOnly = try c.decodeIfPresent(Bool.self, forKey: .showMainWindowOnly) ?? false
+        screensToShow = try c.decodeIfPresent(SwitcherScreensToShow.self, forKey: .screensToShow) ?? .all
+        tabGrouping = try c.decodeIfPresent(SwitcherTabGrouping.self, forKey: .tabGrouping) ?? .singleWindow
         releaseBehavior = try c.decodeIfPresent(ReleaseBehavior.self, forKey: .releaseBehavior) ?? .focus
         previewSize = try c.decodeIfPresent(AppSettings.PreviewSize.self, forKey: .previewSize) ?? .small
+        appsToShow = try c.decodeIfPresent(SwitcherAppsToShow.self, forKey: .appsToShow) ?? .all
+        windowOrder = try c.decodeIfPresent(SwitcherWindowOrder.self, forKey: .windowOrder) ?? .recentlyFocused
         isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
     }
 
@@ -94,9 +181,16 @@ struct ShortcutConfig: Codable, Identifiable, Hashable {
         try c.encode(modifiersRaw, forKey: .modifiersRaw)
         try c.encode(showMinimized, forKey: .showMinimized)
         try c.encode(showHidden, forKey: .showHidden)
+        try c.encode(showFullscreen, forKey: .showFullscreen)
+        try c.encode(showWindowless, forKey: .showWindowless)
         try c.encode(currentSpaceOnly, forKey: .currentSpaceOnly)
+        try c.encode(showMainWindowOnly, forKey: .showMainWindowOnly)
+        try c.encode(screensToShow, forKey: .screensToShow)
+        try c.encode(tabGrouping, forKey: .tabGrouping)
         try c.encode(releaseBehavior, forKey: .releaseBehavior)
         try c.encode(previewSize, forKey: .previewSize)
+        try c.encode(appsToShow, forKey: .appsToShow)
+        try c.encode(windowOrder, forKey: .windowOrder)
         try c.encode(isDefault, forKey: .isDefault)
     }
 

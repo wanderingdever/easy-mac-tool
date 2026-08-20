@@ -15,6 +15,9 @@ struct WindowThumbnailCell: View {
     let isSelected: Bool
     let isHover: Bool
     let size: AppSettings.PreviewSize
+    let style: AppSettings.SwitcherStyle
+    /// Optional focus controls rendered at the title row's trailing edge.
+    var controlsOverlay: AnyView? = nil
 
     /// Compute the actual thumbnail dimensions from the window's aspect ratio,
     /// constrained by the configured preview size. For off-screen/placeholder
@@ -27,12 +30,12 @@ struct WindowThumbnailCell: View {
         if item.frame == .zero {
             return CGSize(width: maxWidth, height: maxHeight)
         }
-        let aspect = item.aspectRatio
+        let aspect = max(0.01, item.aspectRatio)
 
         if aspect >= maxWidth / maxHeight {
-            return CGSize(width: maxWidth, height: maxWidth / aspect)
+            return CGSize(width: maxWidth, height: max(1, maxWidth / aspect))
         } else {
-            return CGSize(width: maxHeight * aspect, height: maxHeight)
+            return CGSize(width: max(1, maxHeight * aspect), height: maxHeight)
         }
     }
 
@@ -53,10 +56,17 @@ struct WindowThumbnailCell: View {
                     .lineLimit(1)
                     .foregroundStyle(.primary)
             }
-            .frame(width: thumbnailSize.width, alignment: .leading)
+            .padding(.trailing, controlsOverlay != nil ? 62 : 0)
+            .frame(width: thumbnailSize.width, height: 22, alignment: .leading)
+            .overlay(alignment: .trailing) {
+                if let controlsOverlay { controlsOverlay }
+            }
 
             thumbnail
                 .frame(width: thumbnailSize.width, height: thumbnailSize.height)
+                .overlay(alignment: .bottomTrailing) {
+                    if item.isOffScreen { stateBadge }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
                     // 当前活跃窗口标记：品牌渐变描边（Aurora v2），
@@ -128,23 +138,21 @@ struct WindowThumbnailCell: View {
     /// The thumbnail content, sized exactly to the window's aspect ratio.
     ///
     /// 呈现策略：
-    /// - visible 窗口有捕获图：显示实时/缓存预览（无角标）
-    /// - minimized/hidden/placeholder：统一显示 app icon + 状态角标
-    ///   ScreenCaptureKit 无法实时捕获离屏窗口，缓存预览可能过时误导用户，
-    ///   因此离屏窗口一律显示 app icon（与 placeholder 一致）。
-    ///   用户通过窗口标题和状态角标区分各离屏窗口。
+    /// - 有捕获图：显示实时/缓存预览；离屏预览叠加状态角标，提醒用户
+    ///   画面可能不是实时帧
+    /// - 无捕获图的最小化/隐藏/placeholder：显示 app icon + 状态角标
     @ViewBuilder
     private var thumbnail: some View {
-        if !item.isOffScreen, let image = item.latestImage {
-            // visible 窗口有捕获图：显示实时/缓存预览
+        if style != .thumbnails {
+            iconStyleThumbnail
+        } else if let image = item.latestImage {
+            // 显示实时/缓存预览
             Image(decorative: image, scale: 1.0)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
         } else if item.isOffScreen {
-            // placeholder / minimized / hidden：统一 app icon 占位 + 状态角标
-            // Capturing hidden/minimized windows via ScreenCaptureKit fails or
-            // returns a black frame, so we never attempt it — the icon is a
-            // clear, stable placeholder. 不显示缓存预览，避免过时画面误导用户。
+            // 无缓存的最小化/隐藏/placeholder：app icon 占位 + 状态角标。
+            // 有缓存的离屏窗口走上面的预览分支，并由外层叠加状态角标。
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(.quaternary.opacity(0.3))
@@ -161,9 +169,6 @@ struct WindowThumbnailCell: View {
                 }
             }
             .frame(width: thumbnailSize.width, height: thumbnailSize.height)
-            .overlay(alignment: .bottomTrailing) {
-                stateBadge
-            }
         } else {
             // visible 窗口首次启动缓存为空时短暂显示淡色 app icon 占位。
             // 由于 WindowEnumerator 已从 WindowPreviewCache 预填充，此分支
@@ -183,6 +188,28 @@ struct WindowThumbnailCell: View {
             }
             .frame(width: thumbnailSize.width, height: thumbnailSize.height)
         }
+    }
+
+    @ViewBuilder
+    private var iconStyleThumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.quaternary.opacity(0.25))
+            if let icon = item.appIcon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(
+                        width: thumbnailSize.width * (style == .appIcons ? 0.55 : 0.32),
+                        height: thumbnailSize.height * (style == .appIcons ? 0.55 : 0.32)
+                    )
+            } else {
+                Image(systemName: "app.dashed")
+                    .font(.system(size: min(thumbnailSize.width, thumbnailSize.height) * 0.3))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: thumbnailSize.width, height: thumbnailSize.height)
     }
 
     /// 状态角标：minimized/hidden 窗口显示对应 SF Symbol，让用户一眼区分窗口状态。

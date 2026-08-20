@@ -120,13 +120,8 @@ struct SystemMonitorSettingsView: View {
 
     /// Metrics in persisted order, falling back to the default order.
     private var orderedMetrics: [MenuBarMetric] {
-        MenuBarMetric.allCases.filter {
+        MenuBarMetric.ordered(using: settings.menuBarMetricOrder).filter {
             $0.isAvailableOnCurrentHardware
-        }.sorted { lhs, rhs in
-            let order = settings.menuBarMetricOrder
-            let li = order.firstIndex(of: lhs.rawValue) ?? MenuBarMetric.defaultOrder.firstIndex(of: lhs) ?? Int.max
-            let ri = order.firstIndex(of: rhs.rawValue) ?? MenuBarMetric.defaultOrder.firstIndex(of: rhs) ?? Int.max
-            return li < ri
         }
     }
 

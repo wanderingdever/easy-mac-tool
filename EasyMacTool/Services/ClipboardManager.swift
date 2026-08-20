@@ -271,6 +271,7 @@ final class ClipboardManager: ObservableObject {
     }
 
     private var timer: Timer?
+    private var started = false
     private var lastChangeCount: Int = 0
     /// app 活跃状态：面板打开时 true（0.5s 高频），关闭时 false（1.5s 低频）。
     /// 菜单栏 app 大部分时间面板关闭，默认 false 让启动即进入低频轮询，
@@ -330,7 +331,8 @@ final class ClipboardManager: ObservableObject {
     }
 
     func start() {
-        guard timer == nil else { return }
+        guard !started else { return }
+        started = true
         // 重新同步 changeCount：init 到 start 之间若用户复制了内容，
         // poll 会误把这段内容当作新条目加入历史。ClipboardManager.shared
         // 是单例，可能在 AppCoordinator.init 之前被其他视图（如设置页）访问，
@@ -342,7 +344,9 @@ final class ClipboardManager: ObservableObject {
         } else {
             isLoaded = true
         }
-        rescheduleTimer()
+        if isCapturing {
+            rescheduleTimer()
+        }
         // 监听系统内存压力：收到 .warning/.critical 时对所有 item 调用
         // coolDown() 释放懒加载缓存（_cachedFullImage / _cachedAttributedString 等）。
         // 这些缓存可在下次访问时重新生成，释放它们不会丢失数据。
@@ -393,8 +397,11 @@ final class ClipboardManager: ObservableObject {
     }
 
     func stop() {
+        started = false
         timer?.invalidate()
         timer = nil
+        currentReapplyTask?.cancel()
+        currentReapplyTask = nil
         captureTimeoutTimer?.invalidate()
         captureTimeoutTimer = nil
         // 取消内存压力源
@@ -503,6 +510,12 @@ final class ClipboardManager: ObservableObject {
 
     func setCapturing(_ enabled: Bool) {
         isCapturing = enabled
+        if enabled {
+            if started { rescheduleTimer() }
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
         // Forget the current change count so content copied while paused is
         // never retrospectively added when the user resumes observation.
         lastChangeCount = NSPasteboard.general.changeCount
@@ -550,14 +563,14 @@ final class ClipboardManager: ObservableObject {
         let token = UUID()
         reapplyToken = token
         currentReapplyTask?.cancel()
-        currentReapplyTask = Task {
+        currentReapplyTask = Task { [weak self] in
             // 冷数据图片：先异步 warmUp 加载 TIFF Data
             if case .image(let data, _) = item.kind, data == nil {
                 await item.warmUpAsync()
             }
             // token 检查：若期间有新 reapply 进入，旧 Task 放弃 write。
             // Task.isCancelled 也检查（双保险）。
-            guard !Task.isCancelled, token == reapplyToken else { return }
+            guard let self, !Task.isCancelled, token == reapplyToken else { return }
             // 在 write 之前记录 changeCount，write 后读取实际 changeCount 作为抑制值。
             item.write(to: .general)
             suppressUntilChangeCount = NSPasteboard.general.changeCount
@@ -574,6 +587,9 @@ final class ClipboardManager: ObservableObject {
                 guard !Task.isCancelled, token == reapplyToken else { return }
                 self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
             }
+            if token == reapplyToken {
+                self.currentReapplyTask = nil
+            }
         }
     }
 
@@ -588,8 +604,8 @@ final class ClipboardManager: ObservableObject {
         let token = UUID()
         reapplyToken = token
         currentReapplyTask?.cancel()
-        currentReapplyTask = Task {
-            guard !Task.isCancelled, token == reapplyToken else { return }
+        currentReapplyTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, token == reapplyToken else { return }
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.setString(plain, forType: .string)
@@ -604,6 +620,9 @@ final class ClipboardManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 guard !Task.isCancelled, token == reapplyToken else { return }
                 self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
+            }
+            if token == reapplyToken {
+                self.currentReapplyTask = nil
             }
         }
     }
@@ -735,8 +754,8 @@ final class ClipboardManager: ObservableObject {
         let token = UUID()
         reapplyToken = token
         currentReapplyTask?.cancel()
-        currentReapplyTask = Task {
-            guard !Task.isCancelled, token == reapplyToken else { return }
+        currentReapplyTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, token == reapplyToken else { return }
             let pb = NSPasteboard.general
             pb.clearContents()
             let allFiles = selected.allSatisfy { if case .file = $0.kind { return true } else { return false } }
@@ -763,6 +782,9 @@ final class ClipboardManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 guard !Task.isCancelled, token == reapplyToken else { return }
                 self.simulatePaste(expectedAppBundleID: expectedAppBundleID)
+            }
+            if token == reapplyToken {
+                self.currentReapplyTask = nil
             }
         }
     }

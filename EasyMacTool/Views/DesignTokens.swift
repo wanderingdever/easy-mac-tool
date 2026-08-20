@@ -411,8 +411,16 @@ extension View {
     /// Standard hover-state plumbing used by controls across the app. Controls
     /// keep ownership of styling while animation and Reduce Motion behavior
     /// stay consistent.
-    func auroraHover(_ isHovered: Binding<Bool>, animated: Bool = true) -> some View {
-        modifier(AuroraHoverModifier(isHovered: isHovered, animated: animated))
+    func auroraHover(
+        _ isHovered: Binding<Bool>,
+        animated: Bool = true,
+        onHoverChange: ((Bool) -> Void)? = nil
+    ) -> some View {
+        modifier(AuroraHoverModifier(
+            isHovered: isHovered,
+            animated: animated,
+            onHoverChange: onHoverChange
+        ))
     }
 }
 
@@ -435,10 +443,12 @@ private struct ScaledSystemFontModifier: ViewModifier {
 private struct AuroraHoverModifier: ViewModifier {
     @Binding var isHovered: Bool
     let animated: Bool
+    let onHoverChange: ((Bool) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content.onHover { hovering in
+            onHoverChange?(hovering)
             if animated, !reduceMotion {
                 withAnimation(DesignTokens.Aurora.standard) { isHovered = hovering }
             } else {

@@ -120,17 +120,9 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     private var snapshotTask: Task<Void, Never>?
     private static let maximumConcurrentSnapshots = 4
 
-    // MARK: - Warming (opportunistic preview pre-capture)
-
-    /// App-activation observer for warming the cache before the switcher opens.
-    private var warmingObserver: NSObjectProtocol?
-    /// In-flight warming task for the most recently activated app.
-    private var warmingTask: Task<Void, Never>?
-    /// PID whose warming is still awaited (guards against stale captures).
-    private var pendingWarmPID: pid_t?
-    private static let maximumWarmWindows = 2
-
-    func startCapture(for items: [WindowItem], previewSize: AppSettings.PreviewSize) {
+    func startCapture(for items: [WindowItem],
+                      previewSize: AppSettings.PreviewSize,
+                      onlyMissing: Bool = false) {
         // 取消上一次未完成的快照 Task（若用户快速重新打开切换器）。
         snapshotTask?.cancel()
         snapshotTask = Task {
@@ -144,9 +136,11 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 if item.isOffScreen {
                     if let cached = WindowPreviewCache.shared.image(for: item.id, pid: item.pid) {
                         item.latestImage = cached
-                    } else {
-                        renderIconPlaceholder(for: item, previewSize: previewSize)
                     }
+                } else if onlyMissing, item.latestImage != nil {
+                    // Live refresh: keep the existing thumbnail and only capture
+                    // windows that have no preview yet. Avoids re-running the
+                    // full snapshot pass on every window/Space notification.
                 } else {
                     pending.append(item)
                 }
@@ -221,10 +215,8 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         // Stop the previous live stream.
-        if let oldID = liveWindowID, let oldStream = streams[oldID] {
-            oldStream.stopCapture { _ in }
-            streams.removeValue(forKey: oldID)
-            itemForStream.removeValue(forKey: ObjectIdentifier(oldStream))
+        if let oldID = liveWindowID {
+            stopStream(oldID)
         }
         liveWindowID = nil
 
@@ -258,83 +250,36 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         // 取消待触发的 live stream 防抖 Task。
         liveDebounceTask?.cancel()
         liveDebounceTask = nil
-        for stream in streams.values {
-            stream.stopCapture { _ in }
+        for id in Array(streams.keys) {
+            stopStream(id)
         }
-        streams.removeAll()
         itemForStream.removeAll()
         liveWindowID = nil
     }
 
-    // MARK: - Warming
+    /// Rebinds live streams after a live refresh replaces `WindowItem`
+    /// instances. Existing streams keep running; newly observed cells receive
+    /// frames through the replacement item objects.
+    func adoptItems(_ items: [WindowItem]) {
+        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let liveIDs = Set(items.map(\.id))
 
-    /// 监听 app 激活，后台预捕获其窗口缩略图写入缓存，让下次呼出切换器时
-    /// 冷窗口也有图（无需等快照）。只在有屏幕录制权限时生效。
-    func startWarming() {
-        guard warmingObserver == nil else { return }
-        if AccessibilityChecker.isScreenRecordingTrusted,
-           let front = NSWorkspace.shared.frontmostApplication {
-            scheduleWarm(pid: front.processIdentifier)
+        let stale = itemForStream.filter { !liveIDs.contains($0.value.id) }
+        for (streamID, oldItem) in stale {
+            itemForStream.removeValue(forKey: streamID)
+            stopStream(oldItem.id)
         }
-        warmingObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main
-        ) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
-                    as? NSRunningApplication else { return }
-            Task { @MainActor [weak self] in
-                self?.scheduleWarm(pid: app.processIdentifier)
-            }
-        }
-    }
 
-    func stopWarming() {
-        if let warmingObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(warmingObserver)
+        let remap = itemForStream.compactMap { streamID, oldItem -> (ObjectIdentifier, WindowItem)? in
+            guard let newItem = byID[oldItem.id] else { return nil }
+            return (streamID, newItem)
         }
-        warmingObserver = nil
-        pendingWarmPID = nil
-        warmingTask?.cancel()
-        warmingTask = nil
-    }
+        for (streamID, newItem) in remap {
+            itemForStream[streamID] = newItem
+        }
 
-    /// 激活后延迟 0.9s 再捕获，等 Space/Stage 过渡落定；期间再次激活则换目标。
-    private func scheduleWarm(pid: pid_t) {
-        guard AccessibilityChecker.isScreenRecordingTrusted else { return }
-        guard pid != ProcessInfo.processInfo.processIdentifier else { return }
-        pendingWarmPID = pid
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-            guard let self, self.pendingWarmPID == pid, self.warmingObserver != nil else { return }
-            self.pendingWarmPID = nil
-            self.warmingTask?.cancel()
-            self.warmingTask = Task {
-                guard AccessibilityChecker.isScreenRecordingTrusted else { return }
-                guard let content = try? await SCShareableContent.excludingDesktopWindows(
-                    true, onScreenWindowsOnly: true) else { return }
-                let windows = content.windows
-                    .filter { $0.owningApplication?.processID == pid }
-                    .prefix(Self.maximumWarmWindows)
-                for window in windows {
-                    guard !Task.isCancelled else { return }
-                    // 只写尚无缓存的条目，避免覆盖已有预览。
-                    guard WindowPreviewCache.shared.image(for: window.windowID, pid: pid) == nil else { continue }
-                    let config = SCStreamConfiguration()
-                    config.showsCursor = false
-                    config.ignoreShadowsSingleWindow = true
-                    let scale = min(1, 320 / max(window.frame.width, 1))
-                    config.width = max(1, Int(window.frame.width * scale))
-                    config.height = max(1, Int(window.frame.height * scale))
-                    let filter = SCContentFilter(desktopIndependentWindow: window)
-                    guard let image = try? await SCScreenshotManager.captureImage(
-                        contentFilter: filter, configuration: config) else { continue }
-                    await MainActor.run {
-                        guard !Task.isCancelled else { return }
-                        if WindowPreviewCache.shared.image(for: window.windowID, pid: pid) == nil {
-                            WindowPreviewCache.shared.store(image, for: window.windowID, pid: pid)
-                        }
-                    }
-                }
-            }
+        if let liveID = liveWindowID, !liveIDs.contains(liveID) {
+            liveWindowID = nil
         }
     }
 
@@ -383,6 +328,15 @@ final class ScreenCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             // 会返回 nil，无法清理 streams 字典 → 资源泄漏。这里同步清理。
             stream.stopCapture { _ in }
         }
+    }
+
+    /// Removes the stream from the manager's dictionaries before asking
+    /// ScreenCaptureKit to stop it, so stopAll/setLiveWindow never call
+    /// stopCapture twice on an already-stopped stream (-3808).
+    private func stopStream(_ id: CGWindowID) {
+        guard let stream = streams.removeValue(forKey: id) else { return }
+        itemForStream.removeValue(forKey: ObjectIdentifier(stream))
+        stream.stopCapture { _ in }
     }
 
     // MARK: - Static snapshot

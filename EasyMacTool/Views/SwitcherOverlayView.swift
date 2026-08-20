@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The visual switcher strip: a wrapping flow of live window thumbnails.
@@ -20,10 +21,12 @@ struct SwitcherOverlayView: View {
     @ObservedObject var controller: OverlayPanelController
     /// Called on click to select + activate the clicked window.
     var onActivate: (Int) -> Void
+    /// Called when hover auto-select should move the keyboard selection.
+    var onSelect: (Int) -> Void
+    var onWindowAction: (WindowItem, WindowControlAction) -> Void
 
     // MARK: - 固定布局常量（与 positionPanel 同步）
-    /// header 已移除（不再显示标题/计数胶囊），故保留 0 高度；若后续恢复
-    /// header 视图，需同步改回 chip 高度 + 间距。
+    /// 切换器不再包含搜索栏，顶部固定块为 0。
     static let headerBlock: CGFloat = 0
     /// footer 提示条高度（18）+ 与网格的间距（12）。
     static let footerBlock: CGFloat = 18 + 12
@@ -39,7 +42,13 @@ struct SwitcherOverlayView: View {
                         isSelected: index == controller.selectedIndex,
                         selectionIndex: controller.selectedIndex,
                         size: controller.previewSize,
-                        onActivate: { onActivate(index) })
+                        style: controller.switcherStyle,
+                        hoverSelects: controller.mouseHoverSelects,
+                        onActivate: { onActivate(index) },
+                        onHoverSelect: { onSelect(index) },
+                        onWindowAction: { action in
+                            onWindowAction(item, action)
+                        })
                 }
             }
             footer
@@ -82,7 +91,6 @@ struct SwitcherOverlayView: View {
         .animation(nil, value: controller.selectedIndex)
     }
 
-
     // MARK: - Footer 键盘提示条（高度 18，与 footerBlock 同步）
 
     private var footer: some View {
@@ -90,7 +98,7 @@ struct SwitcherOverlayView: View {
             Spacer(minLength: 0)
             hint(keys: "⇥", action: "切换")
             hint(keys: "⏎", action: "打开")
-            hint(keys: "⌘W", action: "关闭窗口")
+            hint(keys: "⌘Q", action: "关闭窗口")
             hint(keys: "esc", action: "取消")
             Spacer(minLength: 0)
         }
@@ -114,15 +122,83 @@ private struct SwitcherThumbnailEntry: View {
     let isSelected: Bool
     let selectionIndex: Int
     let size: AppSettings.PreviewSize
+    let style: AppSettings.SwitcherStyle
+    let hoverSelects: Bool
     let onActivate: () -> Void
+    let onHoverSelect: () -> Void
+    let onWindowAction: (WindowControlAction) -> Void
     @State private var isHovered = false
 
     var body: some View {
         WindowThumbnailCell(item: item, isSelected: isSelected,
-                            isHover: isHovered, size: size)
+                            isHover: isHovered, size: size, style: style,
+                            controlsOverlay: (isHovered || isSelected)
+                                ? AnyView(windowControlButtons)
+                                : nil)
             .contentShape(Rectangle())
-            .auroraHover($isHovered, animated: false)
+            .auroraHover($isHovered, animated: false) { hovering in
+                if hovering, hoverSelects { onHoverSelect() }
+            }
             .onTapGesture(perform: onActivate)
             .onChange(of: selectionIndex) { _, _ in isHovered = false }
+    }
+
+    private var windowControlButtons: some View {
+        HStack(spacing: 5) {
+            TrafficLightButton(
+                color: Color(nsColor: .systemRed),
+                systemImage: WindowControlAction.close.systemImage,
+                accessibilityLabel: WindowControlAction.close.accessibilityLabel
+            ) {
+                onWindowAction(.close)
+            }
+            TrafficLightButton(
+                color: Color(nsColor: .systemYellow),
+                systemImage: WindowControlAction.minimize.systemImage,
+                accessibilityLabel: WindowControlAction.minimize.accessibilityLabel
+            ) {
+                onWindowAction(.minimize)
+            }
+            TrafficLightButton(
+                color: Color(nsColor: .systemGreen),
+                systemImage: WindowControlAction.fullscreen.systemImage,
+                accessibilityLabel: WindowControlAction.fullscreen.accessibilityLabel
+            ) {
+                onWindowAction(.fullscreen)
+            }
+        }
+        .padding(5)
+        .background(Capsule().fill(.regularMaterial))
+        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+    }
+}
+
+/// A compact macOS traffic-light style button shown on thumbnail hover.
+private struct TrafficLightButton: View {
+    let color: Color
+    let systemImage: String
+    let accessibilityLabel: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(color)
+                if isHovered {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.black.opacity(0.6))
+                }
+            }
+            .frame(width: 12, height: 12)
+            .overlay(Circle().stroke(.white.opacity(0.75), lineWidth: 0.8))
+            .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .onHover { hovering in
+            isHovered = hovering
+        }
     }
 }

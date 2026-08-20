@@ -1,7 +1,7 @@
 import Foundation
 
 /// A live reading that can be pinned next to the menu bar icon.
-enum MenuBarMetric: String, CaseIterable, Identifiable {
+enum MenuBarMetric: String, CaseIterable, Identifiable, Hashable {
     case cpu
     case cpuTemperature
     case gpu
@@ -56,6 +56,26 @@ enum MenuBarMetric: String, CaseIterable, Identifiable {
         .memory,
         .network, .diskUsage, .power, .fanSpeed,
     ]
+
+    /// Returns one canonical order for both the settings list and the status
+    /// item. Persisted entries come first; missing or newly added metrics keep
+    /// their default relative order.
+    static func ordered(using persistedRawValues: [String]) -> [MenuBarMetric] {
+        var seen = Set<MenuBarMetric>()
+        var result: [MenuBarMetric] = []
+        for rawValue in persistedRawValues {
+            guard let metric = MenuBarMetric(rawValue: rawValue),
+                  seen.insert(metric).inserted else { continue }
+            result.append(metric)
+        }
+        for metric in defaultOrder where seen.insert(metric).inserted {
+            result.append(metric)
+        }
+        for metric in allCases where seen.insert(metric).inserted {
+            result.append(metric)
+        }
+        return result
+    }
 }
 
 extension MenuBarMetric {

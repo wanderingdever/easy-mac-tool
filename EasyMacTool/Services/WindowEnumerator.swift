@@ -49,6 +49,9 @@ final class WindowEnumerator {
         let windowID: CGWindowID?
         let title: String
         let frame: CGRect
+        /// Position in the app's `kAXWindowsAttribute` list. Used to derive a
+        /// stable fallback ID when the app does not expose AXWindowID.
+        let windowIndex: Int
     }
 
     /// AX 窗口状态：信息 + 是否最小化。
@@ -64,7 +67,11 @@ final class WindowEnumerator {
         let states: [AXWindowState]
     }
 
-    func snapshot(filter: ShortcutConfig) async -> [WindowItem] {
+    func snapshot(
+        filter: ShortcutConfig,
+        preferredScreenFrame: CGRect? = nil,
+        refreshFrontmost: Bool = true
+    ) async -> [WindowItem] {
         // 1. 检查 AX 权限——如果没有授权，AX 调用全部静默失败，
         //    minimized/hidden 窗口将完全无法检测。
         let axTrusted = AXIsProcessTrusted()
@@ -75,10 +82,12 @@ final class WindowEnumerator {
 
         // Workspace/AX activation notifications are asynchronous and can be
         // coalesced when the user clicks another app immediately after a
-        // software-driven switch. Refresh the frontmost window before taking
-        // the focused ID used by the MRU sorter, so the next switcher opening
-        // always reflects the user's actual mouse activation.
-        await AppUsageTracker.shared.refreshFrontmostWindow()
+        // software-driven switch. Refresh the frontmost window before the
+        // initial snapshot; live refreshes keep using the already-seeded MRU
+        // to avoid repeated AX IPC while the switcher is open.
+        if refreshFrontmost {
+            await AppUsageTracker.shared.refreshFrontmostWindow()
+        }
 
         // 2. SCShareableContent 用于获取窗口（需要 SCWindow 来捕获预览）。
         //    currentSpaceOnly=true（默认）：仅当前桌面（Space）可见窗口，
@@ -114,6 +123,18 @@ final class WindowEnumerator {
         // 排除 ≥19 的 utility/dock/menubar/status/popup 层。
         let (layerMap, onscreenWindowIDs) = windowLayerAndOnscreenMaps()
         Self.logger.debug("windowLayerMap: \(layerMap.count) entries, onscreen: \(onscreenWindowIDs.count)")
+
+        // SkyLight 可用时读取精确的当前 Space 与每窗口 Space 成员关系。
+        let visibleSpaceIDs = SkyLightSpaces.visibleSpaceIDs()
+        let windowSpaceIDs = SkyLightSpaces.spaceIDs(
+            forWindowIDs: content.windows.map(\.windowID)
+        )
+        var spaceMap: [CGWindowID: Set<UInt64>] = [:]
+        for (index, window) in content.windows.enumerated() {
+            spaceMap[window.windowID] = index < windowSpaceIDs.count
+                ? windowSpaceIDs[index]
+                : []
+        }
 
         // 当前焦点 windowID（window 级）：用于精确标记 active 窗口。
         let focusedWindowID = AppUsageTracker.shared.focusedWindowID
@@ -212,7 +233,11 @@ final class WindowEnumerator {
             }
             return ids
         }()
-        AppUsageTracker.shared.pruneStaleWindows(protectedIDs: offScreenWindowIDs)
+        // MRU 清理也只在初始快照执行：live refresh 已 debounce 到 250ms，
+        // 不必每次再触发一次全量 CGWindowList 查询。
+        if refreshFrontmost {
+            AppUsageTracker.shared.pruneStaleWindows(protectedIDs: offScreenWindowIDs)
+        }
 
         for runningApp in candidateApps {
             let pid = runningApp.processIdentifier
@@ -265,6 +290,39 @@ final class WindowEnumerator {
                     Self.logger.debug("  filtered out by layer=\(layer, privacy: .public): title=\(window.title ?? "nil", privacy: .public)")
                     return false
                 }
+                // CGWindowList's on-screen set is the closest public-API proxy
+                // for "currently visible on this Space". ScreenCaptureKit's
+                // onScreenWindowsOnly is not guaranteed to mean the same thing.
+                let isCurrentSpace: Bool
+                if !visibleSpaceIDs.isEmpty,
+                   let windowSpaces = spaceMap[window.windowID],
+                   !windowSpaces.isEmpty {
+                    isCurrentSpace = windowSpaces
+                        .intersection(visibleSpaceIDs)
+                        .isEmpty == false
+                } else {
+                    isCurrentSpace = onscreenWindowIDs.contains(window.windowID)
+                }
+                let filterInput = WindowFilterInput(
+                    isVisible: true,
+                    isMinimized: false,
+                    isHidden: false,
+                    isCurrentSpace: isCurrentSpace
+                )
+                if !WindowFilterResolver.shouldShow(
+                    filterInput,
+                    showMinimized: filter.showMinimized,
+                    showHidden: filter.showHidden,
+                    currentSpaceOnly: filter.currentSpaceOnly
+                ) {
+                    Self.logger.debug("  filtered out by visible-space policy: title=\(window.title ?? "nil", privacy: .public)")
+                    return false
+                }
+                if !filter.showFullscreen,
+                   NSScreen.screens.contains(where: { $0.frame == window.frame }) {
+                    Self.logger.debug("  filtered out as fullscreen: title=\(window.title ?? "nil", privacy: .public)")
+                    return false
+                }
                 let windowArea = window.frame.width * window.frame.height
                 // 比 window 更大的同 app 窗口（等大的不算，避免两个主窗口互判）
                 let biggerWindows = largeWindows.filter {
@@ -303,6 +361,7 @@ final class WindowEnumerator {
                     id: window.windowID,
                     pid: pid,
                     appName: windowAppName,
+                    bundleIdentifier: runningApp.bundleIdentifier,
                     appIcon: runningApp.icon,
                     title: title,
                     frame: window.frame,
@@ -355,14 +414,18 @@ final class WindowEnumerator {
                 }
 
                 // 根据开关过滤
-                switch windowState {
-                case .minimized:
-                    guard filter.showMinimized else { continue }
-                case .hidden:
-                    guard filter.showHidden else { continue }
-                case .visible:
-                    continue
-                }
+                let filterInput = WindowFilterInput(
+                    isVisible: false,
+                    isMinimized: state.isMinimized,
+                    isHidden: axHidden,
+                    isCurrentSpace: false
+                )
+                guard WindowFilterResolver.shouldShow(
+                    filterInput,
+                    showMinimized: filter.showMinimized,
+                    showHidden: filter.showHidden,
+                    currentSpaceOnly: filter.currentSpaceOnly
+                ) else { continue }
 
                 let title = info.title.isEmpty ? appName : info.title
                 // 如果有 windowID 用 windowID，否则用 pid + title + frame 哈希生成降级 ID
@@ -370,29 +433,22 @@ final class WindowEnumerator {
                 if let wid = info.windowID {
                     itemID = wid
                 } else {
-                    // 用 pid + title + frame.origin + 序号 生成降级 ID，降低冲突概率：
-                    // 仅用 pid + title 时，同 app 多个无 title/同名窗口会生成相同 ID，
-                    // 被 addedWindowIDs 去重逻辑误判为已添加而漏显示。
-                    // 加入 items.count 序号：两个同 app、同标题、同 origin 的窗口
-                    //（如两个 Finder 信息窗口开在同位置）会得到不同 ID，避免碰撞。
-                    var hasher = Hasher()
-                    hasher.combine(pid)
-                    hasher.combine(title)
-                    hasher.combine(info.frame.origin.x)
-                    hasher.combine(info.frame.origin.y)
-                    hasher.combine(items.count)  // 序号确保唯一性
                     // 高位标记 0xF0000000：避开系统分配的真实 windowID 区段。
                     // 否则降级 ID 理论上可能与其他窗口的真实 ID 碰撞，导致
                     // WindowActivator 按 AXWindowID 精确匹配到错误窗口
                     //（close 会误关未保存文档）。配合 hasRealWindowID=false，
                     // Activator 对此类 item 跳过精确匹配、直接走 frame 兜底。
-                    let hashed = CGWindowID(truncatingIfNeeded: hasher.finalize()) & 0x0FFFFFFF
-                    itemID = 0xF0000000 | hashed
+                    itemID = Self.fallbackWindowID(
+                        pid: pid,
+                        title: title,
+                        windowIndex: info.windowIndex
+                    )
                 }
                 items.append(WindowItem(
                     id: itemID,
                     pid: pid,
                     appName: appName,
+                    bundleIdentifier: runningApp.bundleIdentifier,
                     appIcon: runningApp.icon,
                     title: title,
                     frame: info.frame,
@@ -413,7 +469,7 @@ final class WindowEnumerator {
             // 应用图标），保证用户仍能看到该 app 并切换过去（unhide + activate）。
             // 仅当 showHidden 开启、app 确为 hidden、且该 app 无任何条目时兜底，
             // 避免与正常条目重复。
-            if filter.showHidden, axHidden, !hasVisibleItem {
+            if filter.showHidden, filter.showWindowless, axHidden, !hasVisibleItem {
                 var hasher = Hasher()
                 hasher.combine(pid)
                 let placeholderID = 0xF0000000
@@ -423,6 +479,7 @@ final class WindowEnumerator {
                     id: placeholderID,
                     pid: pid,
                     appName: appName,
+                    bundleIdentifier: runningApp.bundleIdentifier,
                     appIcon: runningApp.icon,
                     title: appName,
                     frame: .zero,
@@ -437,29 +494,65 @@ final class WindowEnumerator {
 
         Self.logger.debug("snapshot total items: \(items.count)")
 
+        // 应用范围过滤：仅活跃/非活跃应用。
+        if filter.appsToShow != .all {
+            let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            items = items.filter { item in
+                switch filter.appsToShow {
+                case .all: return true
+                case .active: return item.pid == frontmostPID
+                case .nonActive: return item.pid != frontmostPID
+                }
+            }
+        }
+
+        // 屏幕范围过滤：仅切换器所在屏幕上的窗口。
+        if filter.screensToShow == .showingSwitcher,
+           let screenFrame = preferredScreenFrame {
+            items = items.filter { item in
+                item.frame == .zero || item.frame.intersects(screenFrame)
+            }
+        }
+
         // Sort by most-recently-focused (per-window MRU) — mirrors Windows Alt+Tab.
         // Off-screen windows always sort to the END.
-        items.sort { lhs, rhs in
-            let lhsOff = lhs.isOffScreen
-            let rhsOff = rhs.isOffScreen
-            if lhsOff && !rhsOff { return false }
-            if !lhsOff && rhsOff { return true }
-            let lhsRank = AppUsageTracker.shared.rank(ofWindow: lhs.id)
-            let rhsRank = AppUsageTracker.shared.rank(ofWindow: rhs.id)
-            if lhsRank != rhsRank {
-                // 有 MRU 记录的窗口始终排在无记录（Int.max）之前，符合 Windows Alt+Tab 语义。
-                // 旧逻辑仅当两者都有记录时才比较 rank，导致有记录的窗口可能因 pidRank 排在无记录窗口之后。
-                if lhsRank == Int.max { return false }
-                if rhsRank == Int.max { return true }
-                return lhsRank < rhsRank
+        let sortKeys = items.map { item in
+            WindowSortKey(
+                id: item.id,
+                pid: item.pid,
+                isOffScreen: item.isOffScreen,
+                windowRank: AppUsageTracker.shared.rank(ofWindow: item.id),
+                appRank: AppUsageTracker.shared.rank(of: item.pid),
+                title: item.title,
+                appName: item.appName
+            )
+        }
+        let sortedIndices = WindowOrderResolver.sortedIndices(
+            sortKeys,
+            order: filter.windowOrder
+        )
+        items = sortedIndices.map { items[$0] }
+
+        // 每个应用仅显示主窗口：保留排序后每个应用的第一项。
+        if filter.showMainWindowOnly {
+            var seenPIDs = Set<pid_t>()
+            items = items.filter { item in
+                if seenPIDs.contains(item.pid) { return false }
+                seenPIDs.insert(item.pid)
+                return true
             }
-            // 两者 rank 相等且都有记录：按 id 稳定排序
-            if lhsRank != Int.max { return lhs.id < rhs.id }
-            // 两者都无窗口级记录：fall through 到 pid MRU
-            let lhsPidRank = AppUsageTracker.shared.rank(of: lhs.pid)
-            let rhsPidRank = AppUsageTracker.shared.rank(of: rhs.pid)
-            if lhsPidRank != rhsPidRank { return lhsPidRank < rhsPidRank }
-            return lhs.id < rhs.id
+        }
+
+        // 近似 Tab 分组：同一应用的同标题窗口合并为一个条目。公开 API 下
+        // 无法可靠读取 AXTabGroup，因此以 pid+title 作为分组键。
+        if filter.tabGrouping == .singleWindow {
+            var seenTitles = Set<String>()
+            items = items.filter { item in
+                let key = "\(item.pid):\(item.title)"
+                if seenTitles.contains(key) { return false }
+                seenTitles.insert(key)
+                return true
+            }
         }
         return items
     }
@@ -518,8 +611,8 @@ final class WindowEnumerator {
     nonisolated private static func axWindowStates(for pid: pid_t) -> [AXWindowState] {
         guard let windows = axWindows(for: pid) else { return [] }
         var result: [AXWindowState] = []
-        for window in windows {
-            guard let info = axWindowInfo(for: window) else { continue }
+        for (windowIndex, window) in windows.enumerated() {
+            guard let info = axWindowInfo(for: window, windowIndex: windowIndex) else { continue }
             var minimizedRef: CFTypeRef?
             let minResult = AXUIElementCopyAttributeValue(window,
                                                            kAXMinimizedAttribute as CFString,
@@ -553,7 +646,7 @@ final class WindowEnumerator {
 
     /// 从 AXUIElement 提取窗口信息（windowID / title / frame）。
     /// windowID 可为 nil（某些 app 不支持 AXWindowID 属性）。
-    nonisolated private static func axWindowInfo(for window: AXUIElement) -> AXWindowInfo? {
+    nonisolated private static func axWindowInfo(for window: AXUIElement, windowIndex: Int) -> AXWindowInfo? {
         // 获取 windowID（可能不被某些 app 支持）
         var idRef: CFTypeRef?
         let idResult = AXUIElementCopyAttributeValue(window, "AXWindowID" as CFString, &idRef)
@@ -594,8 +687,22 @@ final class WindowEnumerator {
         return AXWindowInfo(
             windowID: windowID,
             title: title,
-            frame: CGRect(origin: position, size: size)
+            frame: CGRect(origin: position, size: size),
+            windowIndex: windowIndex
         )
+    }
+
+    /// Stable fallback identity for windows whose app does not expose
+    /// AXWindowID. Index-based so two same-title windows do not collide, and
+    /// deliberately independent of mutable global ordering (`items.count`) that
+    /// would change the ID between snapshots.
+    nonisolated static func fallbackWindowID(pid: pid_t, title: String, windowIndex: Int) -> CGWindowID {
+        var hasher = Hasher()
+        hasher.combine(pid)
+        hasher.combine(title)
+        hasher.combine(windowIndex)
+        return 0xF0000000
+            | (CGWindowID(truncatingIfNeeded: hasher.finalize()) & 0x0FFFFFFF)
     }
 
 }

@@ -1,11 +1,69 @@
 import AppKit
 import ApplicationServices
+import os
+
+/// Pure matching policy for selecting an AX window from an app's window list.
+/// Kept separate from AX calls so the ambiguous-frame rules are unit-testable.
+struct AXWindowMatchCandidate {
+    let id: CGWindowID?
+    let title: String
+    let frame: CGRect
+}
+
+nonisolated enum AXWindowMatchResolver {
+    /// A real WindowServer ID is unambiguous; prefer it whenever present.
+    static func exactIndex(in candidates: [AXWindowMatchCandidate], targetID: CGWindowID) -> Int? {
+        candidates.firstIndex { $0.id == targetID }
+    }
+
+    /// Frame-based fallback for apps that do not expose AXWindowID (Chrome,
+    /// Chromium, and some Electron apps). A single frame match is accepted even
+    /// when titles differ: SC window titles and AX titles frequently disagree
+    /// (Chrome reports the tab title through SC, but "title - Google Chrome"
+    /// through AX). With multiple same-frame candidates, titles are used to
+    /// disambiguate via exact match or containment (the SC tab title is a
+    /// substring of Chrome's AX title). Ambiguity is never guessed.
+    static func frameFallbackIndex(
+        in candidates: [AXWindowMatchCandidate],
+        targetFrame: CGRect,
+        targetTitle: String,
+        tolerance: CGFloat = 2
+    ) -> Int? {
+        let frameMatches = candidates.indices.filter { index in
+            let candidate = candidates[index]
+            guard !candidate.frame.isNull, !targetFrame.isNull else { return false }
+            return abs(candidate.frame.origin.x - targetFrame.origin.x) < tolerance
+                && abs(candidate.frame.origin.y - targetFrame.origin.y) < tolerance
+                && abs(candidate.frame.size.width - targetFrame.size.width) < tolerance
+                && abs(candidate.frame.size.height - targetFrame.size.height) < tolerance
+        }
+        guard !frameMatches.isEmpty else { return nil }
+        if frameMatches.count == 1 { return frameMatches[0] }
+
+        let titleMatches = frameMatches.filter { index in
+            let title = candidates[index].title
+            return titlesAgree(title, targetTitle)
+        }
+        return titleMatches.count == 1 ? titleMatches[0] : nil
+    }
+
+    private static func titlesAgree(_ candidateTitle: String, _ targetTitle: String) -> Bool {
+        if candidateTitle.isEmpty || targetTitle.isEmpty || candidateTitle == targetTitle {
+            return true
+        }
+        let a = candidateTitle.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let b = targetTitle.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        return a.contains(b) || b.contains(a)
+    }
+}
 
 /// Brings a specific window (not just its app) to the front via the Accessibility
 /// API, and supports closing / minimizing a window via its AX toolbar buttons.
 @MainActor
 final class WindowActivator {
     private var pendingHiddenActivation: Task<Void, Never>?
+    private var pendingFocusActivation: Task<Void, Never>?
+    private static let logger = Logger(subsystem: "com.easymactool", category: "WindowActivator")
 
     /// Activates the owning app and raises the exact window matching `item.frame`.
     /// For placeholder items (no open windows), uses `NSWorkspace.openApplication`
@@ -23,6 +81,8 @@ final class WindowActivator {
     func activate(_ item: WindowItem) -> Bool {
         pendingHiddenActivation?.cancel()
         pendingHiddenActivation = nil
+        pendingFocusActivation?.cancel()
+        pendingFocusActivation = nil
         let app = NSRunningApplication(processIdentifier: item.pid)
         // 缓存第一次 findAXWindow 找到的窗口引用，app.activate 后窗口列表可能变化，
         // 第二次查找可能失败。复用引用避免 deminimize 后未正确 focus。
@@ -67,16 +127,29 @@ final class WindowActivator {
     private func finishActivation(_ item: WindowItem,
                                   app: NSRunningApplication?,
                                   resolvedWindow: AXUIElement?) -> Bool {
-        // 激活 app 并通过 AX 提升目标窗口到前台。
-        // 复用第一次 findAXWindow 的结果，避免 app.activate 后窗口列表变化导致第二次查找失败。
-        app?.activate(options: [.activateAllWindows])
+        guard let app, !app.isTerminated else { return false }
 
+        // A hidden-app placeholder has no real window to resolve. It is still
+        // useful to unhide/activate the app, but do not pretend a window was
+        // focused or run an ID-based verification loop.
+        if item.frame == .zero && !item.hasRealWindowID {
+            app.activate(options: [])
+            return true
+        }
+
+        // Resolve before app.activate. `activateAllWindows` used to let Chrome
+        // restore Profile A after the app activation, racing the later AX focus
+        // of Profile B. Resolve the exact AX window first and activate only the
+        // app, then focus the same AX element again.
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = resolvedWindow ?? findAXWindow(axApp, matching: item) else { return false }
+        guard let window = resolvedWindow ?? findAXWindow(axApp, matching: item) else {
+            Self.logger.error("Unable to resolve target window id=\(item.id, privacy: .public) title=\(item.title, privacy: .public)")
+            return false
+        }
         focus(window: window, pid: item.pid)
-        // Space 切换 / 部分 app 的 main window 是异步落位（晚一两个 run loop），
-        // 单次设置可能失败。按延迟序列重试 focus，直到前台稳定为目标 app。
-        scheduleFocusRetries(item: item, delays: [0.12])
+        app.activate(options: [])
+        focus(window: window, pid: item.pid)
+        scheduleFocusRetries(item: item, delays: [0.05, 0.12, 0.25])
         return true
     }
 
@@ -91,6 +164,9 @@ final class WindowActivator {
     /// 对一个窗口做强 focus：设为 app 的 focused/main 窗口并 raise。
     private func focus(window: AXUIElement, pid: pid_t) {
         let axApp = AXUIElementCreateApplication(pid)
+        // Set both main and focused attributes. Some Chromium builds only
+        // honor one of them when two profile windows share the same process.
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, window)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
@@ -99,50 +175,102 @@ final class WindowActivator {
     /// 每次重试前守卫：目标 app 仍在运行、仍是前台、目标窗口仍可解析。
     private func scheduleFocusRetries(item: WindowItem, delays: [TimeInterval]) {
         let pid = item.pid
-        for delay in delays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self else { return }
-                // 目标 app 已退出，或前台已不是目标 app（用户已切走），放弃重试。
-                guard let app = NSRunningApplication(processIdentifier: pid),
+        pendingFocusActivation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for delay in delays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled,
+                      let app = NSRunningApplication(processIdentifier: pid),
                       !app.isTerminated,
                       Self.frontmostPID(matching: pid) != nil else { return }
-                let axApp = AXUIElementCreateApplication(pid)
-                guard let window = self.findAXWindow(axApp, matching: item) else { return }
+                guard let window = self.findAXWindow(
+                    AXUIElementCreateApplication(pid), matching: item
+                ) else { return }
                 self.focus(window: window, pid: pid)
+                if Self.frontmostWindowID(pid: pid) == item.id {
+                    self.pendingFocusActivation = nil
+                    return
+                }
             }
+            // Do not silently accept Chrome's other window as success. The
+            // caller has already closed the overlay, but diagnostics make the
+            // failed activation visible and the next snapshot can recover MRU.
+            if Self.frontmostWindowID(pid: pid) != item.id {
+                Self.logger.error("Target window id=\(item.id, privacy: .public) was not frontmost after AX focus retries")
+            }
+            self.pendingFocusActivation = nil
         }
     }
 
+    /// WindowServer orders entries front-to-back. Restrict to normal/floating/
+    /// modal levels so Chrome menus and omnibox popups do not count as windows.
+    private static func frontmostWindowID(pid: pid_t) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for info in list {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? Int,
+                  pid_t(ownerPID) == pid,
+                  let number = info[kCGWindowNumber as String] as? Int,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  (0...8).contains(layer),
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let width = bounds["Width"] as? CGFloat,
+                  let height = bounds["Height"] as? CGFloat,
+                  width > 0, height > 0 else { continue }
+            return CGWindowID(number)
+        }
+        return nil
+    }
+
     /// Closes the window by pressing its AX close button.
-    /// 禁用 frame 兜底匹配：close 涉及数据丢失风险（未保存文档被关），
-    /// 仅允许真实 windowID 精确匹配。无 AXWindowID 的窗口放弃关闭——
-    /// 安全的 no-op 优于误关近似窗口。
+    /// frame 兜底仅在唯一候选时生效；多个同 frame 候选且标题无法
+    /// 区分时仍返回 nil，避免误关近似窗口。
     /// - Returns: true 表示成功找到窗口并按下了 close 按钮；
     ///   false 表示未找到窗口或按钮未暴露。调用方应仅在 true 时从列表移除 item，
     ///   false 时保留 item 并可选提示用户（避免"列表消失但窗口仍开"的困惑）。
     @discardableResult
     func close(_ item: WindowItem) -> Bool {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return false }
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: true) else { return false }
         return pressButton(window, attribute: kAXCloseButtonAttribute as CFString)
     }
 
     /// Minimizes the window by pressing its AX minimize button.
-    /// 同 close：禁用 frame 兜底，避免误最小化近似窗口。
+    /// 同 close：唯一 frame 候选允许兜底，歧义时不猜测。
     /// - Returns: true 表示成功按下 minimize 按钮；false 表示未找到窗口或按钮未暴露。
     @discardableResult
     func minimize(_ item: WindowItem) -> Bool {
         let axApp = AXUIElementCreateApplication(item.pid)
-        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: false) else { return false }
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: true) else { return false }
         return pressButton(window, attribute: kAXMinimizeButtonAttribute as CFString)
+    }
+
+    /// Toggles fullscreen using the window's AX fullscreen button.
+    /// - Returns: true when the button was found and the press succeeded.
+    @discardableResult
+    func toggleFullscreen(_ item: WindowItem) -> Bool {
+        let axApp = AXUIElementCreateApplication(item.pid)
+        guard let window = findAXWindow(axApp, matching: item, allowFrameFallback: true) else { return false }
+        var fullscreenRef: CFTypeRef?
+        let readResult = AXUIElementCopyAttributeValue(
+            window, "AXFullScreen" as CFString, &fullscreenRef
+        )
+        let isFullscreen = (fullscreenRef as? NSNumber)?.boolValue ?? false
+        let writeResult = AXUIElementSetAttributeValue(
+            window,
+            "AXFullScreen" as CFString,
+            isFullscreen ? kCFBooleanFalse : kCFBooleanTrue
+        )
+        return readResult == .success && writeResult == .success
     }
 
     // MARK: - Private
 
     /// 在 AX 窗口列表中查找匹配 item 的窗口。
     /// - Parameter allowFrameFallback: 无 AXWindowID 时是否允许 frame 兜底匹配。
-    ///   activate 允许（激活错误窗口无数据丢失风险）；close/minimize 禁用
-    ///   （误关/误最小化有数据丢失风险）。
+    ///   唯一 frame 候选可安全用于 activate/close/minimize/fullscreen；
+    ///   多个同 frame 候选且标题无法区分时统一返回 nil。
     private func findAXWindow(_ axApp: AXUIElement, matching item: WindowItem, allowFrameFallback: Bool = true) -> AXUIElement? {
         var count: CFIndex = 0
         AXUIElementGetAttributeValueCount(axApp, kAXWindowsAttribute as CFString, &count)
@@ -154,36 +282,38 @@ final class WindowActivator {
         // is therefore unambiguous even when several windows share an origin.
         // 仅对真实 windowID 做精确匹配：降级 ID（哈希生成，0xF0000000 高位
         // 标记）可能与系统分配的真实 ID 碰撞，误匹配会操作到错误窗口。
+        let candidates = axWindows.map { window in
+            AXWindowMatchCandidate(
+                id: windowID(of: window),
+                title: title(of: window),
+                frame: frame(of: window) ?? .null
+            )
+        }
         if item.hasRealWindowID {
-            for axWindow in axWindows where windowID(of: axWindow) == item.id {
-                return axWindow
+            if let index = AXWindowMatchResolver.exactIndex(
+                in: candidates,
+                targetID: item.id
+            ) {
+                return axWindows[index]
             }
+            // Some apps (e.g. Chrome) expose a CGWindowID through
+            // ScreenCaptureKit but not through AXWindowID. Exact match can
+            // legitimately fail, so activation still falls back to frame+title.
         }
 
         // 无 AXWindowID 的窗口：仅 activate 允许 frame 兜底匹配。
         // close/minimize 传入 allowFrameFallback=false，直接返回 nil（安全 no-op）。
         guard allowFrameFallback else { return nil }
 
-        // A small number of apps do not expose AXWindowID. Keep a conservative
-        // fallback for them, requiring origin + size + title 全部匹配。
-        // 仅 frame 匹配会误匹配同 app 近似窗口（如两个全屏终端），
-        // 增加 title 辅助校验降低误匹配概率。
-        for axWindow in axWindows {
-            guard let position = cgPoint(axWindow, kAXPositionAttribute as CFString),
-                  let size = cgSize(axWindow, kAXSizeAttribute as CFString) else { continue }
-            let frame = CGRect(origin: position, size: size)
-            let target = item.frame
-            guard abs(frame.origin.x - target.origin.x) < 2,
-                  abs(frame.origin.y - target.origin.y) < 2,
-                  abs(frame.size.width - target.size.width) < 2,
-                  abs(frame.size.height - target.size.height) < 2 else { continue }
-            // frame 匹配后追加 title 校验：同 app 近似窗口通常 title 不同
-            // （如 "Terminal — bash" vs "Terminal — ssh"），可进一步排除。
-            // title 为空时（少数 app 不暴露 title）回退为仅 frame 匹配。
-            let axTitle = title(of: axWindow)
-            if axTitle.isEmpty || item.title.isEmpty || axTitle == item.title {
-                return axWindow
-            }
+        // Frame 唯一时直接采纳，不再要求 title 一致：Chrome 的 SC title 与
+        // AX title 格式不同（Bilibili 标签页 vs "标题 - Google Chrome"）。
+        // 多个同 frame 候选时再用 title 缩小；仍不唯一则返回 nil 不猜测。
+        if let index = AXWindowMatchResolver.frameFallbackIndex(
+            in: candidates,
+            targetFrame: item.frame,
+            targetTitle: item.title
+        ) {
+            return axWindows[index]
         }
         return nil
     }
@@ -218,8 +348,11 @@ final class WindowActivator {
               let value = ref,
               CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
         let button = value as! AXUIElement
-        AXUIElementPerformAction(button, kAXPressAction as CFString)
-        return true
+        let status = AXUIElementPerformAction(button, kAXPressAction as CFString)
+        if status != .success {
+            Self.logger.error("AX press action failed: attribute=\(attribute, privacy: .public) status=\(status.rawValue, privacy: .public)")
+        }
+        return status == .success
     }
 
     private func cgPoint(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {
@@ -242,5 +375,11 @@ final class WindowActivator {
         var size = CGSize.zero
         guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
         return size
+    }
+
+    private func frame(of element: AXUIElement) -> CGRect? {
+        guard let position = cgPoint(element, kAXPositionAttribute as CFString),
+              let size = cgSize(element, kAXSizeAttribute as CFString) else { return nil }
+        return CGRect(origin: position, size: size)
     }
 }

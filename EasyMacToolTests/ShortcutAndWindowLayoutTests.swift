@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Testing
 @testable import EasyMacTool
 
@@ -12,6 +13,82 @@ struct ShortcutAndWindowLayoutTests {
         #expect(!AppSettings.isReservedSystemCombo(
             keyCode: 0x0C, modifiers: [.maskCommand, .maskShift]
         ))
+    }
+
+    @MainActor @Test func globalShortcutConflictRejectsLayoutConflictsAndHonorsExclusion() {
+        let layout = LayoutShortcut(action: .leftHalf, keyCode: 0x30, modifiers: .maskCommand)
+        #expect(AppSettings.globalShortcutConflictDescription(
+            keyCode: 0x30,
+            modifiers: .maskCommand,
+            switcherShortcuts: [],
+            clipboardShortcut: nil,
+            layoutShortcuts: [layout],
+            excludingWindowShortcutID: nil
+        ) == "已被窗口布局「左半屏」使用")
+        #expect(AppSettings.layoutShortcutConflictDescription(
+            keyCode: 0x30,
+            modifiers: .maskCommand,
+            excludingAction: .leftHalf,
+            shortcuts: [layout]
+        ) == nil)
+    }
+
+    @MainActor @Test func globalShortcutConflictChecksSwitcherAndClipboardShortcuts() {
+        let switcher = ShortcutConfig(name: "测试", keyCode: 0x30, modifiers: .maskCommand)
+        #expect(AppSettings.globalShortcutConflictDescription(
+            keyCode: 0x30,
+            modifiers: .maskCommand,
+            switcherShortcuts: [switcher],
+            clipboardShortcut: nil,
+            layoutShortcuts: [],
+            excludingWindowShortcutID: nil
+        ) == "已被窗口切换快捷键「测试」使用")
+
+        let clipboard = ShortcutConfig(name: "剪贴板", keyCode: 0x09, modifiers: [.maskCommand, .maskShift])
+        #expect(AppSettings.globalShortcutConflictDescription(
+            keyCode: 0x09,
+            modifiers: [.maskCommand, .maskShift],
+            switcherShortcuts: [],
+            clipboardShortcut: clipboard,
+            layoutShortcuts: [],
+            excludingWindowShortcutID: nil
+        ) == "已被剪切板快捷键使用")
+    }
+
+    @Test func fallbackWindowIDIsStableAndUsesMarkerBits() {
+        let first = WindowEnumerator.fallbackWindowID(pid: 42, title: "T", windowIndex: 0)
+        let second = WindowEnumerator.fallbackWindowID(pid: 42, title: "T", windowIndex: 0)
+        #expect(first == second)
+        #expect(first & 0xF0000000 == 0xF0000000)
+        #expect(first != WindowEnumerator.fallbackWindowID(pid: 43, title: "T", windowIndex: 0))
+        #expect(first != WindowEnumerator.fallbackWindowID(pid: 42, title: "T", windowIndex: 1))
+    }
+
+    @MainActor @Test func shortcutConfigBackwardCompatibilityDefaultsNewFields() throws {
+        let json = """
+        {
+          "id": "11111111-1111-1111-1111-111111111111",
+          "name": "默认",
+          "keyCode": 48,
+          "modifiersRaw": 1048576,
+          "showMinimized": false,
+          "showHidden": false,
+          "currentSpaceOnly": true,
+          "releaseBehavior": "focus",
+          "previewSize": "small",
+          "isDefault": true
+        }
+        """
+        let data = try #require(json.data(using: .utf8))
+        let decoded = try JSONDecoder().decode(ShortcutConfig.self, from: data)
+
+        #expect(decoded.showFullscreen)
+        #expect(decoded.showWindowless)
+        #expect(!decoded.showMainWindowOnly)
+        #expect(decoded.screensToShow == .all)
+        #expect(decoded.tabGrouping == .singleWindow)
+        #expect(decoded.appsToShow == .all)
+        #expect(decoded.windowOrder == .recentlyFocused)
     }
 
     @Test func normalizesInvalidMonitorIntervals() {
